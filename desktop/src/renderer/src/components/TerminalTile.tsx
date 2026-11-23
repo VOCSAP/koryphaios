@@ -13,6 +13,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { SnippetsDialog } from './SnippetsDialog'
 import { TileApprovalPanel } from './TileApprovalPanel'
+import { TileSequenceBanner } from './TileSequenceBanner'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
   dark: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
@@ -346,6 +347,7 @@ export function TerminalTile({
           {GLYPH_ACTIONS.close}
         </button>
       </div>
+      <TileSequenceBanner tileId={id} />
       <div
         className="tile-body"
         ref={hostRef}

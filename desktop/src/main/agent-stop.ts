@@ -3,7 +3,7 @@
 // StopMode/StopOutcome/StopReport are mirrored by value in the renderer's
 // AgentStopControls component: rename a field here only alongside that copy.
 
-import type { SessionRuntime } from '@shared/types'
+import type { DirectiveOutcome, InjectRefusal, SessionRuntime } from '@shared/types'
 import { resolveDirectiveTargets } from './directive'
 
 /**
@@ -29,11 +29,9 @@ export function toInterruptMode(mode: StopMode): 'pause' | 'hard' {
 
 export type InterruptResult = 'interrupted' | 'no-terminal'
 
-/** Why a stop was refused whole, before any write; mirrors InjectRefusal (session-service.ts). */
-export type StopRefusal = 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'
+export type StopRefusal = InjectRefusal
 
-/** Mirrors SessionService.injectCommand's DirectiveOutcome (session-service.ts). */
-export type InjectOutcome = 'written' | 'no-terminal' | 'busy-timeout' | StopRefusal
+export type InjectOutcome = DirectiveOutcome
 
 export interface StopOutcome {
   /** Tile id. Always present -- unlike peerId, which is null until the peer registers. */

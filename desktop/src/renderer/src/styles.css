@@ -657,6 +657,29 @@ body {
   display: none;
 }
 
+/* Skills sequence progress, only while one runs or waits: the .row-model pill
+   recipe, so the two read as one family of runtime labels. The clepsydra is
+   amber like the tile banner's wait. */
+.row-seq {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.row-seq-glyph {
+  display: inline-flex;
+  color: var(--locked);
+}
+
 /* Inset, like .row-drag-over, so locking never moves a pixel of the row. The
    :not() keeps the drop target readable, since this rule sits later in the
    file at the same specificity. */
@@ -2398,8 +2421,28 @@ code {
   cursor: default;
 }
 
-.context-menu-item-danger:hover:not(:disabled) {
+.context-menu-item-danger:not(:disabled) {
   color: var(--danger);
+}
+
+/* Second line of an item, aligned under the label text after its glyph. It
+   wraps (the item itself does not) and keeps --fg-dim on a disabled item, so a
+   blocking reason stays as readable as on an enabled one. */
+.context-menu-hint {
+  display: block;
+  max-width: 40em;
+  margin-top: 2px;
+  padding-left: 17px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--fg-dim);
+  white-space: normal;
+}
+
+.context-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 .preset-row {
@@ -2719,6 +2762,66 @@ code {
   justify-content: flex-end;
   gap: 6px 8px;
   margin-top: 10px;
+}
+
+/* ----- Skills sequence banner (TileSequenceBanner) -----
+   Laid over the top rows of the terminal. The negative bottom margin equal to
+   its height gives it zero net size in the tile's flex column, so .tile-body,
+   xterm and the PTY keep their size whether it shows or not, and it starts
+   exactly under .tile-head whatever that head's height. Same z-index as the
+   verdict panel, under the expired overlay; the 52px right padding clears
+   .help-fab like that panel's head. */
+.tile-seq {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  height: 26px;
+  margin-bottom: -26px;
+  padding: 0 52px 0 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.tile-seq-glyph {
+  display: inline-flex;
+  color: var(--fg-dim);
+}
+
+.tile-seq-waiting-background .tile-seq-glyph,
+.tile-seq.is-fault .tile-seq-glyph {
+  color: var(--locked);
+}
+
+.tile-seq-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-seq-code {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.tile-seq-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+/* .btn-sm is 25px tall at 12px: one pixel short of filling the 26px band. */
+.tile-seq-actions .btn {
+  padding: 1px 8px;
+  font-size: 11px;
 }
 
 /* ----- empty-state actions (M6c-2) ----- */

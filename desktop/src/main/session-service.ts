@@ -6,6 +6,8 @@ import { basename, join } from 'node:path'
 import type {
   AppConfig,
   CreateSessionInput,
+  DirectiveOutcome,
+  InjectRefusal,
   PeerStatus,
   SessionDef,
   SessionLiveStatus,
@@ -256,20 +258,7 @@ const PROMPT_INJECT_SETTLE_MS = 400
 /** Rolling cap for the magic-compact output scanner (CT4). */
 const OUTPUT_SCAN_CAP = 65536
 
-/**
- * Why an injection was refused whole -- neither the pre-paste Escape nor the
- * paste was written. 'refused-modal': the screen looks like a dialog where both
- * gestures are destructive. 'screen-unavailable': there is no screen to
- * inspect. 'needs-attention' and 'rate-limited': the tile's runtime flags say
- * the agent is waiting on the operator or on its quota.
- */
-export type InjectRefusal = 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'
-
-/**
- * Outcome of injectCommand, journaled by the caller (CT3). Mirrored in
- * agent-stop.ts's InjectOutcome; update both together.
- */
-export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | InjectRefusal
+export type { DirectiveOutcome, InjectRefusal }
 
 const SANDBOX_BRIDGE_REFUSAL =
   "the tile runs in the sandbox, and the bridge config names the host Electron binary and 127.0.0.1, which inside the container is the container's own loopback"
@@ -482,6 +471,7 @@ export class SessionService extends EventEmitter {
           this.defs = this.defs.filter((d) => d.id !== id)
           this.dropTileFeed(id)
           this.runtime.delete(id)
+          this.spawnGenerations.delete(id)
           this.persist()
           this.broadcast()
         }
@@ -693,6 +683,8 @@ export class SessionService extends EventEmitter {
     string,
     { feed: TileTurnFeed; subscribe: TurnSignalServer['subscribe']; unsubscribe: () => void; generation: object | null }
   >()
+  /** The spawns of each tile id in this run; it survives a restore that keeps the id, so a view can tell which spawn it ran in. */
+  private spawnGenerations = new Map<string, number>()
 
   setTurnSignalUrl(url: string | null): void {
     this.turnSignalUrl = url
@@ -1205,6 +1197,7 @@ export class SessionService extends EventEmitter {
       this.defs = this.defs.filter((d) => d.id !== id)
       this.dropTileFeed(id)
       this.runtime.delete(id)
+      this.spawnGenerations.delete(id)
       this.outputAt.delete(id)
       this.persist()
       this.broadcast()
@@ -1388,6 +1381,9 @@ export class SessionService extends EventEmitter {
       ...d,
       color: d.color || paletteColor(this.getConfig().palette ?? DEFAULT_PALETTE, i)
     }))
+    for (const id of [...this.spawnGenerations.keys()]) {
+      if (!this.defs.some((d) => d.id === id)) this.spawnGenerations.delete(id)
+    }
     // Restored data may carry several leads (hand-edited file): keep the first.
     let leadSeen = false
     for (const d of this.defs) {
@@ -1720,6 +1716,7 @@ export class SessionService extends EventEmitter {
     r.expired = false
 
     const before = new Set(this.transcriptsOf(def.cwd).map((e) => e.id))
+    this.spawnGenerations.set(def.id, (this.spawnGenerations.get(def.id) ?? 0) + 1)
     this.startPty(def, effectiveMode, modPlan) // INSTANT
     // Fire-and-forget: discovery must never block terminal visibility.
     void this.discoverRealId(def, before)
@@ -2102,7 +2099,8 @@ export class SessionService extends EventEmitter {
       claudeLaunch: r?.claudeLaunch ?? true,
       liveStatus: r?.liveStatus ?? null,
       windowsPty: this.windowsPty,
-      skillEligibility: this.skillEligibility(def)
+      skillEligibility: this.skillEligibility(def),
+      spawnGeneration: this.spawnGenerations.get(def.id) ?? 0
     }
   }
 
@@ -2252,6 +2250,7 @@ export class SessionService extends EventEmitter {
   runSequence(id: string, input: SequenceInput, journal: (line: string) => void): SequenceHandle {
     const subscribe = this.turnSignalSubscribe
     const slot: { handle: SequenceHandle | null } = { handle: null }
+    const spawnGeneration = this.spawnGenerations.get(id) ?? 0
     const handle = runSequence(
       {
         holdTile: async (tile, fn) => this.holdTile(tile, fn),
@@ -2265,7 +2264,7 @@ export class SessionService extends EventEmitter {
           return entry !== null && entry.generation === this.pty.life(tile) ? entry.feed.backgroundTasks() : null
         },
         onState: (view) => {
-          this.emit('sequence', view)
+          this.emit('sequence', { ...view, spawnGeneration })
         },
         life: (tile) => this.pty.life(tile),
         hasSource: (tile) => subscribe !== null && this.hasTurnSignalSource(tile),

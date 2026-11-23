@@ -107,6 +107,11 @@ interface FakeDeckState {
   approvalDrafts: Record<string, unknown>;
   setApprovalDraft: () => void;
   clearPendingApproval: () => void;
+  sessionSequences: Record<string, unknown>;
+  sequenceActionsInFlight: Record<string, boolean>;
+  cancelSequence: (id: string) => Promise<void>;
+  overrideSequence: (id: string) => Promise<void>;
+  dismissSequence: (id: string) => void;
 }
 
 function initialFakeDeckState(): FakeDeckState {
@@ -130,7 +135,12 @@ function initialFakeDeckState(): FakeDeckState {
     remote: false,
     approvalDrafts: {},
     setApprovalDraft: () => {},
-    clearPendingApproval: () => {}
+    clearPendingApproval: () => {},
+    sessionSequences: {},
+    sequenceActionsInFlight: {},
+    cancelSequence: async () => {},
+    overrideSequence: async () => {},
+    dismissSequence: () => {}
   };
 }
 
@@ -315,4 +325,17 @@ test("TerminalTile docks the verdict panel of a request its module waits on, and
     })
   );
   expect(container.querySelector(".tile .tile-approval"), "the tile mounts the panel for its own row").not.toBeNull();
+});
+
+test("TerminalTile lays its own sequence banner between the head and the terminal, and no other tile's", () => {
+  renderTerminalTile(session({}));
+  expect(container.querySelector(".tile-seq") === null).toBe(true);
+  const view = { spawnGeneration: 1, moment: "start", step: 0, total: 2, phase: "running", background: null, reason: null };
+  act(() => fakeDeck.setState({ sessionSequences: { "tile-b": { ...view, tileId: "tile-b" } } }));
+  expect(container.querySelector(".tile-seq") === null, "a neighbour's sequence must not show here").toBe(true);
+  act(() => fakeDeck.setState({ sessionSequences: { "tile-a": { ...view, tileId: "tile-a" } } }));
+  const banner = container.querySelector(".tile .tile-seq");
+  expect(banner !== null, "the tile mounts the banner for its own sequence").toBe(true);
+  expect(banner!.previousElementSibling?.classList.contains("tile-head")).toBe(true);
+  expect(banner!.nextElementSibling?.classList.contains("tile-body")).toBe(true);
 });

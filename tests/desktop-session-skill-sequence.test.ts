@@ -68,6 +68,21 @@ test('only the global settings feed a plan: a hostile repository carrying other 
   }
 })
 
+test('a plan names its moment, and only a stop plan carries a mode', () => {
+  const plans = {
+    start: assembleSkillSequence('start', settings()),
+    end: assembleSkillSequence('end', settings()),
+    soft: assembleSkillSequence('stop', settings(), 'soft'),
+    hard: assembleSkillSequence('stop', settings(), 'hard')
+  }
+  const { start, end, soft, hard } = plans
+  if ('refused' in start || 'refused' in end || 'refused' in soft || 'refused' in hard) throw new Error('refused')
+
+  expect([start.moment, end.moment, soft.moment, hard.moment]).toEqual(['start', 'end', 'stop', 'stop'])
+  expect([soft.mode, hard.mode]).toEqual(['soft', 'hard'])
+  expect([Object.hasOwn(start, 'mode'), Object.hasOwn(end, 'mode')]).toEqual([false, false])
+})
+
 test('Start types the configured commands and then the native skill', () => {
   const result = assembleSkillSequence('start', settings({ start: ['/first', '/second one'], end: ['/end-only'] }))
 

@@ -627,7 +627,7 @@ function servedTile() {
   svc.setTurnSignalSubscribe(server.subscribe);
   const journal: string[] = [];
   const tile = svc.create({});
-  const run = (id = tile.id) => svc.runSequence(id, { steps: [SKILL_STEP] }, (line) => journal.push(line));
+  const run = (id = tile.id) => svc.runSequence(id, { moment: "start", steps: [SKILL_STEP] }, (line) => journal.push(line));
   return { svc, server, journal, tile, run };
 }
 
@@ -645,12 +645,12 @@ test("a sequence is refused as no-source when no server is up, the tile is not s
   const noServer = setup(SERVED);
   noServer.svc.setTurnSignalUrl(TURN_URL);
   const a = noServer.svc.create({});
-  expect(await noServer.svc.runSequence(a.id, { steps: [SKILL_STEP] }, () => {}).result, "no server subscription").toEqual(NO_SOURCE);
+  expect(await noServer.svc.runSequence(a.id, { moment: "start", steps: [SKILL_STEP] }, () => {}).result, "no server subscription").toEqual(NO_SOURCE);
 
   const unserved = setup({ hostTelemetry: true });
   unserved.svc.setTurnSignalSubscribe(signalServer().subscribe);
   const b = unserved.svc.create({});
-  expect(await unserved.svc.runSequence(b.id, { steps: [SKILL_STEP] }, () => {}).result, "no plugin loaded").toEqual(NO_SOURCE);
+  expect(await unserved.svc.runSequence(b.id, { moment: "start", steps: [SKILL_STEP] }, () => {}).result, "no plugin loaded").toEqual(NO_SOURCE);
 
   const down = servedTile();
   down.svc.setTurnSignalSubscribe(null);
@@ -783,7 +783,7 @@ function signalsOf(tile: ReturnType<typeof servedTile>) {
 test("overrideQuiescence types the next step while a background task still runs", async () => {
   const tile = servedTile();
   const writes = typing(tile.svc);
-  const handle = tile.svc.runSequence(tile.tile.id, { steps: [SKILL_STEP, END_STEP] }, () => {});
+  const handle = tile.svc.runSequence(tile.tile.id, { moment: "start", steps: [SKILL_STEP, END_STEP] }, () => {});
   await settle();
   const nonce = [...writes.join("").matchAll(NONCE_TOKEN)][0]![1];
   const send = signalsOf(tile);
@@ -1767,7 +1767,7 @@ test("a sequence waits before typing step 1 when the tile's last turn left backg
   const writes = typing(tile.svc);
   signalsOf(tile)({ ...MAIN_TURN_DONE, backgroundTasks: 2 });
   const journal: string[] = [];
-  const handle = tile.svc.runSequence(tile.tile.id, { steps: [SKILL_STEP] }, (line) => journal.push(line));
+  const handle = tile.svc.runSequence(tile.tile.id, { moment: "start", steps: [SKILL_STEP] }, (line) => journal.push(line));
   await settle();
   expect(writes, "nothing is typed while 2 tasks run").toEqual([]);
   expect(journal).toContain(`sequence on tile ${tile.tile.id}: step 1 waits for background tasks (2)`);
@@ -1851,7 +1851,7 @@ test("a server that refuses the tile's subscription leaves the tile spawned, rep
     });
     const tile = svc.create({});
     expect(spawned).not.toHaveLength(0);
-    const result = await reachedWithin(svc.runSequence(tile.id, { steps: [SKILL_STEP] }, () => {}).result, "the sequence", 1500);
+    const result = await reachedWithin(svc.runSequence(tile.id, { moment: "start", steps: [SKILL_STEP] }, () => {}).result, "the sequence", 1500);
     expect(result).toMatchObject({ status: "interrupted", step: 0, typed: false, reason: "revoked" });
     expect(errors.some(([scope, text]) => scope === "session" && text.includes("no turn signal subscription for tile"))).toBe(true);
   } finally {
@@ -1975,7 +1975,7 @@ test("runSkillSequence starts the moment's sequence and the sequence event follo
   finishTurn(lead, leadSignals(lead), NATIVE_COMMANDS.start, 0);
   await settle();
 
-  const base = { tileId: lead.tile.id, total: 1, background: null, reason: null };
+  const base = { tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, total: 1, background: null, reason: null };
   expect(lead.views).toEqual([
     { ...base, step: 0, phase: "running" },
     { ...base, step: 1, phase: "done" },
@@ -1989,11 +1989,11 @@ test("the sequence event reports the wait for background tasks with its count, t
   await settle();
   finishTurn(lead, leadSignals(lead), "prepare-notes", 2);
   await settle();
-  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
 
   expect(lead.svc.cancelSequence(lead.tile.id)).toBe(true);
   await settle();
-  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, step: 1, total: 2, phase: "stopped", background: null, reason: "operator-cancelled" });
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "stopped", background: null, reason: "operator-cancelled" });
 });
 
 test("a stop sequence types the native stop skill with its mode", async () => {
@@ -2002,9 +2002,46 @@ test("a stop sequence types the native stop skill with its mode", async () => {
     expect(await lead.svc.runSkillSequence(lead.tile.id, "stop", mode)).toEqual({ status: "started" });
     await settle();
     expect(lead.writes.join(""), mode).toContain(`/${NATIVE_COMMANDS.stop} ${mode} kory-step:`);
+    expect(lead.views.at(-1), mode).toMatchObject({ moment: "stop", mode, phase: "running" });
     lead.svc.cancelSequence(lead.tile.id);
     await settle();
+    expect(lead.views.at(-1), mode).toMatchObject({ moment: "stop", mode, phase: "stopped", reason: "operator-cancelled" });
   }
+});
+
+test("a restore that keeps the tile id emits the old sequence's last view after the new list, from an older spawn than the new tile", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const before = lead.svc.list().find((s) => s.id === lead.tile.id)!;
+  const events: Array<{ kind: "changed"; tiles: Array<{ id: string; spawnGeneration: number }> } | { kind: "view"; view: { phase: string; spawnGeneration: number } }> = [];
+  lead.svc.on("changed", (tiles) => events.push({ kind: "changed", tiles }));
+  lead.svc.on("sequence", (view) => events.push({ kind: "view", view }));
+
+  lead.svc.restoreFrom(lead.svc.captureSessions());
+  await settle();
+
+  const firstChanged = events.findIndex((e) => e.kind === "changed");
+  const late = events.slice(firstChanged + 1).flatMap((e) => (e.kind === "view" ? [e.view] : []));
+  expect(late.map((v) => v.phase), "the views emitted after the new list").toEqual(["stopped"]);
+  const lastChanged = events.findLast((e) => e.kind === "changed");
+  const after = lastChanged?.kind === "changed" ? lastChanged.tiles.find((t) => t.id === lead.tile.id) : undefined;
+  expect(after?.spawnGeneration, "the new tile's spawn").not.toBe(before.spawnGeneration);
+  expect(late[0]!.spawnGeneration, "the late view carries the spawn it ran in").toBe(before.spawnGeneration);
+});
+
+test("a restart that finds its session already live spawns nothing, so the tile keeps its spawn generation and the running sequence's views", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const before = lead.svc.list().find((s) => s.id === lead.tile.id)!;
+  const spawnsBefore = spawned.length;
+
+  const restarted = await lead.svc.restart(lead.tile.id);
+
+  expect(spawned.length, "no new PTY").toBe(spawnsBefore);
+  expect(restarted.spawnGeneration, "the restarted tile").toBe(before.spawnGeneration);
+  expect(lead.views.at(-1), "the running sequence of the live PTY").toMatchObject({ phase: "running", spawnGeneration: restarted.spawnGeneration });
 });
 
 test("a sequence reads its settings from the configured state directory, never from the working directory", async () => {

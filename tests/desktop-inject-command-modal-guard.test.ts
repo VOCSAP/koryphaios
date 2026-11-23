@@ -37,20 +37,18 @@ test('the injection refusal gives an unavailable xterm read its own reason and l
   expect(body).toContain("return 'rate-limited'")
 })
 
-test('every injection refusal is a member of DirectiveOutcome, its agent-stop mirror and the Deck wire unions', () => {
+test('every injection refusal is a member of DirectiveOutcome, its agent-stop aliases and the Deck wire unions', () => {
   const refusals = ['refused-modal', 'screen-unavailable', 'needs-attention', 'rate-limited']
-  const session = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
   const agentStop = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'agent-stop.ts'), 'utf-8')
-  expect(/export type DirectiveOutcome = ([^\n]+)/.exec(session)?.[1]).toContain('InjectRefusal')
-  expect(/export type InjectOutcome = ([^\n]+)/.exec(agentStop)?.[1]).toContain('StopRefusal')
-  const sessionRefusals = /export type InjectRefusal = ([^\n]+)/.exec(session)?.[1] ?? ''
-  const stopRefusals = /export type StopRefusal = ([^\n]+)/.exec(agentStop)?.[1] ?? ''
   const wireTypes = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'shared', 'types.ts'), 'utf-8')
+  expect(/export type DirectiveOutcome = ([^\n]+)/.exec(wireTypes)?.[1]).toContain('InjectRefusal')
+  expect(agentStop).toContain('export type InjectOutcome = DirectiveOutcome')
+  expect(agentStop).toContain('export type StopRefusal = InjectRefusal')
+  const injectRefusals = /export type InjectRefusal = ([^\n]+)/.exec(wireTypes)?.[1] ?? ''
   const coreTypes = readFileSync(join(import.meta.dir, '..', 'shared', 'types.ts'), 'utf-8')
   for (const reason of refusals) {
-    expect(sessionRefusals, `InjectRefusal lacks ${reason}`).toContain(`'${reason}'`)
-    expect(stopRefusals, `StopRefusal lacks ${reason}`).toContain(`'${reason}'`)
-    expect(wireTypes.split(`'${reason}'`).length - 1, `desktop wire types carry ${reason} in DirectiveDispatch.refused and StopOutcome.result`).toBeGreaterThanOrEqual(2)
+    expect(injectRefusals, `InjectRefusal lacks ${reason}`).toContain(`'${reason}'`)
+    expect(wireTypes.split(`'${reason}'`).length - 1, `desktop wire types carry ${reason} in InjectRefusal, DirectiveDispatch.refused and StopOutcome.result`).toBeGreaterThanOrEqual(3)
     expect(coreTypes, `DispatchRefusalReason lacks ${reason}`).toContain(`"${reason}"`)
   }
 })

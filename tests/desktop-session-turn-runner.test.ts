@@ -213,7 +213,7 @@ function watch(handle: SequenceHandle): { value?: RunResult; rejected?: unknown 
 }
 
 async function start(world: World, steps: SequenceStepInput[]) {
-  const handle = runSequence(world.host, TILE, { steps } satisfies SequenceInput)
+  const handle = runSequence(world.host, TILE, { moment: 'start', steps } satisfies SequenceInput)
   const result = watch(handle)
   await flush()
   return { handle, result }
@@ -479,7 +479,7 @@ describe('runSequence', () => {
 
   test('cancel before the hold starts types nothing', async () => {
     const w = makeWorld({ deferStart: true })
-    const handle = runSequence(w.host, TILE, { steps: [START] })
+    const handle = runSequence(w.host, TILE, { moment: 'start', steps: [START] })
     const result = watch(handle)
     handle.cancel()
     w.startHold()
@@ -488,7 +488,7 @@ describe('runSequence', () => {
     expect(w.typed).toEqual([])
     expect(w.claims.size).toBe(0)
 
-    const third = runSequence(w.host, TILE, { steps: [END] })
+    const third = runSequence(w.host, TILE, { moment: 'end', steps: [END] })
     const accepted = watch(third)
     await flush()
     expect(accepted.value).toBeUndefined()
@@ -517,7 +517,7 @@ describe('runSequence', () => {
     test('a second sequence on a claimed tile is refused, and the tile is free again once the first ends', async () => {
       const w = makeWorld()
       const first = await start(w, [START])
-      const second = watch(runSequence(w.host, TILE, { steps: [END] }))
+      const second = watch(runSequence(w.host, TILE, { moment: 'end', steps: [END] }))
       await flush()
       expect(second.value).toEqual({ status: 'refused', reason: 'sequence-active' })
       expect(w.counts.holds).toBe(1)
@@ -525,7 +525,7 @@ describe('runSequence', () => {
       first.handle.cancel()
       await flush()
       expect(first.result.value).toMatchObject({ status: 'interrupted' })
-      const third = runSequence(w.host, TILE, { steps: [END] })
+      const third = runSequence(w.host, TILE, { moment: 'end', steps: [END] })
       await flush()
       expect(w.counts.holds).toBe(2)
       third.cancel()
@@ -589,7 +589,7 @@ describe('start quiescence and state view', () => {
 
   test('reads the count when the hold starts, not when the run is requested', async () => {
     const w = makeWorld({ background: 0, deferStart: true })
-    const handle = runSequence(w.host, TILE, { steps: [START] })
+    const handle = runSequence(w.host, TILE, { moment: 'start', steps: [START] })
     w.setBackground(3)
     w.startHold()
     await flush()
@@ -608,7 +608,7 @@ describe('start quiescence and state view', () => {
     await openTurn(w, s, 1, 'turn-2')
     w.signal(s.completed('turn-2'))
     await flush()
-    const base = { tileId: TILE, total: 2, background: null, reason: null }
+    const base = { tileId: TILE, moment: 'start' as const, total: 2, background: null, reason: null }
     expect(w.states).toEqual([
       { ...base, step: 0, phase: 'running' },
       { ...base, step: 1, phase: 'running' },
@@ -620,13 +620,13 @@ describe('start quiescence and state view', () => {
     const w = makeWorld({ background: 2 })
     const s = signals()
     const { handle } = await start(w, [START, END])
-    expect(w.states).toEqual([{ tileId: TILE, step: 0, total: 2, phase: 'waiting-background', background: 2, reason: null }])
+    expect(w.states).toEqual([{ tileId: TILE, moment: 'start', step: 0, total: 2, phase: 'waiting-background', background: 2, reason: null }])
     handle.override()
     await flush()
     await openTurn(w, s, 0, 'turn-1')
     w.signal(s.completed('turn-1', { backgroundTasks: 3 }))
     await flush()
-    expect(w.states.at(-1)).toEqual({ tileId: TILE, step: 1, total: 2, phase: 'waiting-background', background: 3, reason: null })
+    expect(w.states.at(-1)).toEqual({ tileId: TILE, moment: 'start', step: 1, total: 2, phase: 'waiting-background', background: 3, reason: null })
   })
 
   test('reports stopped with the step and the reason', async () => {
@@ -634,7 +634,33 @@ describe('start quiescence and state view', () => {
     const { handle } = await start(w, [START, END])
     handle.cancel()
     await flush()
-    expect(w.states.at(-1)).toEqual({ tileId: TILE, step: 0, total: 2, phase: 'stopped', background: null, reason: 'operator-cancelled' })
+    expect(w.states.at(-1)).toEqual({ tileId: TILE, moment: 'start', step: 0, total: 2, phase: 'stopped', background: null, reason: 'operator-cancelled' })
+  })
+
+  test('every view carries the moment and the stop mode of the input, in each phase', async () => {
+    const w = makeWorld({ background: 1 })
+    const s = signals()
+    const handle = runSequence(w.host, TILE, { moment: 'stop', mode: 'soft', steps: [START, END] })
+    await flush()
+    handle.override()
+    await flush()
+    await openTurn(w, s, 0, 'turn-1')
+    w.signal(s.completed('turn-1', { backgroundTasks: 0 }))
+    await flush()
+    handle.cancel()
+    await flush()
+    expect(w.states.map((view) => view.phase)).toEqual(['waiting-background', 'running', 'running', 'stopped'])
+    expect(w.states.map((view) => [view.moment, view.mode])).toEqual(Array(4).fill(['stop', 'soft']))
+  })
+
+  test('a start or an end view has no mode key', async () => {
+    for (const moment of ['start', 'end'] as const) {
+      const w = makeWorld()
+      runSequence(w.host, TILE, { moment, steps: [START] })
+      await flush()
+      expect(w.states[0]?.moment).toBe(moment)
+      expect(Object.hasOwn(w.states[0]!, 'mode'), moment).toBe(false)
+    }
   })
 
   test('an observer that throws is reported and does not stop the sequence', async () => {

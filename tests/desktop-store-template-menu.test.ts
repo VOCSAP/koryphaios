@@ -197,11 +197,20 @@ test("showToast returns false for an identical repeat and true when the repeat r
   expect(useDeck.getState().toastRaw).toBe(true);
 });
 
-const sequenceView = (tileId: string) => ({ tileId, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
+const sequenceView = (tileId: string, spawnGeneration = 1) => ({
+  tileId,
+  moment: "start",
+  spawnGeneration,
+  step: 1,
+  total: 2,
+  phase: "waiting-background",
+  background: 2,
+  reason: null
+});
 const pushSequence = (view: unknown) => (listeners.get("onSessionSequence") as unknown as (v: unknown) => void)(view);
-const changeSessions = (ids: string[]) =>
+const changeSessions = (ids: string[], spawnGeneration = 1) =>
   (listeners.get("onSessionsChanged") as unknown as (sessions: unknown[]) => void)(
-    ids.map((id) => ({ id, rateLimited: false, status: "running" }))
+    ids.map((id) => ({ id, rateLimited: false, status: "running", spawnGeneration }))
   );
 
 // Mutant: the onSessionSequence subscription removed.
@@ -221,8 +230,24 @@ test("a tile that disappears takes its sequence state with it, and a restored ti
   expect(Object.keys(useDeck.getState().sessionSequences)).toEqual(["a"]);
   changeSessions([]);
   expect(useDeck.getState().sessionSequences).toEqual({});
+  pushSequence({ ...sequenceView("a"), phase: "stopped", background: null, reason: "revoked" });
+  expect(useDeck.getState().sessionSequences["a"], "a late view of a tile that is gone").toBeUndefined();
   changeSessions(["a"]);
   expect(useDeck.getState().sessionSequences["a"]).toBeUndefined();
+  changeSessions([]);
+});
+
+test("a restore that keeps the tile id drops the old sequence view and refuses its late stopped view", () => {
+  changeSessions(["a"], 1);
+  pushSequence(sequenceView("a", 1));
+  changeSessions(["a"], 2);
+  expect(useDeck.getState().sessionSequences["a"], "the view of the replaced tile").toBeUndefined();
+
+  pushSequence({ ...sequenceView("a", 1), phase: "stopped", background: null, reason: "revoked" });
+  expect(useDeck.getState().sessionSequences["a"], "the late stopped view of the old spawn").toBeUndefined();
+
+  pushSequence(sequenceView("a", 2));
+  expect(useDeck.getState().sessionSequences["a"]).toEqual(sequenceView("a", 2));
   changeSessions([]);
 });
 
@@ -257,7 +282,6 @@ test("a run that main rejects resolves null instead of throwing", async () => {
   });
 });
 
-// Mutants: cancel calling the override method, or the reverse.
 test("cancelSequence and overrideSequence call their own main method with the tile", async () => {
   const cancelled: unknown[][] = [];
   const overridden: unknown[][] = [];
@@ -271,6 +295,59 @@ test("cancelSequence and overrideSequence call their own main method with the ti
       expect([cancelled, overridden]).toEqual([[["t"]], []]);
       await useDeck.getState().overrideSequence("u");
       expect([cancelled, overridden]).toEqual([[["t"]], [["u"]]]);
+    }
+  );
+});
+
+test("a run main refuses is toasted as an error with its detail, and a started run is not", async () => {
+  useDeck.setState({ toast: null, toastParams: null });
+  const refusal = { status: "refused", reason: "command-refused", detail: "stop line 2: dialogue-command" };
+  await withApi({ runSessionSkill: () => Promise.resolve(refusal) }, async () => {
+    await useDeck.getState().runSkill("t", "stop", "soft");
+  });
+  expect(shownToast()).toEqual({
+    toast: "toast.skillRefused.commandRefused",
+    toastVariant: "error",
+    toastParams: { detail: "stop line 2: dialogue-command" }
+  });
+
+  useDeck.setState({ toast: null, toastParams: null });
+  await withApi({ runSessionSkill: () => Promise.resolve({ status: "started" }) }, async () => {
+    await useDeck.getState().runSkill("t", "start");
+  });
+  expect(useDeck.getState().toast).toBeNull();
+});
+
+test("dismissSequence drops the view of that tile only", () => {
+  changeSessions(["a", "b"]);
+  pushSequence(sequenceView("a"));
+  pushSequence(sequenceView("b"));
+  useDeck.getState().dismissSequence("a");
+  expect(Object.keys(useDeck.getState().sessionSequences)).toEqual(["b"]);
+  changeSessions([]);
+});
+
+test("a second cancel while the first awaits main is dropped, and the tile is released after", async () => {
+  const calls: unknown[][] = [];
+  let answer: (v: boolean) => void = () => {};
+  await withApi(
+    {
+      cancelSessionSequence: (...args) => {
+        calls.push(args);
+        return new Promise<boolean>((r) => (answer = r));
+      },
+      overrideSessionQuiescence: (...args) => (calls.push(["override", ...args]), Promise.resolve(true))
+    },
+    async () => {
+      const first = useDeck.getState().cancelSequence("t");
+      expect(useDeck.getState().sequenceActionsInFlight).toEqual({ t: true });
+      await useDeck.getState().cancelSequence("t");
+      await useDeck.getState().overrideSequence("t");
+      await useDeck.getState().overrideSequence("other");
+      answer(true);
+      await first;
+      expect(calls).toEqual([["t"], ["override", "other"]]);
+      expect(useDeck.getState().sequenceActionsInFlight).toEqual({});
     }
   );
 });

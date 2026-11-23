@@ -47,6 +47,7 @@ import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreDemotionToast, workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
 import { TOAST_ACTION_MS, TOAST_MS } from './toast-timing'
+import { skillRefusalToast } from './sequence-feedback'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -61,6 +62,8 @@ interface DeckState {
   sessions: SessionRuntime[]
   /** Progress of each tile's Skills sequence by tile id; the last view stays until the next run. */
   sessionSequences: Record<string, SessionSequenceView>
+  /** Tiles whose sequence cancel or override is awaiting main, so every surface disables the same buttons. */
+  sequenceActionsInFlight: Record<string, boolean>
   config: AppConfig | null
   /** Active navigation-rail view: agents (sessions) or roadmap. */
   view: DeckView
@@ -423,6 +426,8 @@ interface DeckState {
   runSkill(id: string, moment: SessionSkillMoment, mode?: SessionSkillStopMode): Promise<SessionSkillRunResult | null>
   cancelSequence(id: string): Promise<void>
   overrideSequence(id: string): Promise<void>
+  /** Drops a tile's finished or stopped sequence view; local to this window. */
+  dismissSequence(id: string): void
   reorderSessions(ids: string[]): Promise<void>
   updateConfig(patch: Partial<AppConfig>): Promise<void>
   /** Broadcast a free-text operator message to all peers in the active group. */
@@ -517,6 +522,24 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<boole
   }
 }
 
+/** One cancel or override per tile at a time; a second click while main answers is dropped. */
+async function sequenceAction(id: string, label: string, fn: () => Promise<unknown>): Promise<void> {
+  if (useDeck.getState().sequenceActionsInFlight[id]) return
+  const flag = (on: boolean): void =>
+    useDeck.setState((s) => {
+      const next = { ...s.sequenceActionsInFlight }
+      if (on) next[id] = true
+      else delete next[id]
+      return { sequenceActionsInFlight: next }
+    })
+  flag(true)
+  try {
+    await guarded(label, fn)
+  } finally {
+    flag(false)
+  }
+}
+
 /**
  * True when `e` is the sandbox gate's 'sandbox-auth-required' refusal, which
  * it then routes to the login modal instead of an error toast. Every IPC call
@@ -573,6 +596,7 @@ export function roadmapConflictCount(s: DeckState): number {
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   sessionSequences: {},
+  sequenceActionsInFlight: {},
   config: null,
   // The Deck opens on Home: the supervisor is the entry point of the app (it
   // spawns lazily on that view's first visit), so landing there is what starts
@@ -719,7 +743,9 @@ export const useDeck = create<DeckState>((set, get) => ({
         selectedId: stillExists ? selectedId : (next[0]?.id ?? null),
         maximizedId: maxStillExists ? maximizedId : null,
         browserPairedId: pairedStillExists ? browserPairedId : null,
-        sessionSequences: Object.fromEntries(Object.entries(sessionSequences).filter(([id]) => next.some((s) => s.id === id)))
+        sessionSequences: Object.fromEntries(
+          Object.entries(sessionSequences).filter(([id, view]) => next.some((s) => s.id === id && s.spawnGeneration === view.spawnGeneration))
+        )
       })
     })
     window.api.onMenuSettings(() => get().openSettings(true))
@@ -754,7 +780,11 @@ export const useDeck = create<DeckState>((set, get) => ({
       if (e.resumed) get().showToast('toast.quotaResumed', 'info')
     })
     window.api.onSessionSequence((view) => {
-      set((s) => ({ sessionSequences: { ...s.sessionSequences, [view.tileId]: view } }))
+      set((s) => {
+        const tile = s.sessions.find((t) => t.id === view.tileId)
+        if (tile === undefined || tile.spawnGeneration !== view.spawnGeneration) return s
+        return { sessionSequences: { ...s.sessionSequences, [view.tileId]: view } }
+      })
     })
     // The operator answered from a phone or this Courrier and believes it
     // landed: the journal alone would leave the dialog waiting unnoticed.
@@ -1243,15 +1273,29 @@ export const useDeck = create<DeckState>((set, get) => ({
     await guarded('run skill', async () => {
       result = await window.api.runSessionSkill(id, moment, mode)
     })
+    const settled = result as SessionSkillRunResult | null
+    if (settled?.status === 'refused') {
+      const toast = skillRefusalToast(settled)
+      get().showToast(toast.key, toast.level, toast.params ? { params: toast.params } : undefined)
+    }
     return result
   },
 
   async cancelSequence(id) {
-    await guarded('cancel sequence', () => window.api.cancelSessionSequence(id))
+    await sequenceAction(id, 'cancel sequence', () => window.api.cancelSessionSequence(id))
   },
 
   async overrideSequence(id) {
-    await guarded('skip background wait', () => window.api.overrideSessionQuiescence(id))
+    await sequenceAction(id, 'skip background wait', () => window.api.overrideSessionQuiescence(id))
+  },
+
+  dismissSequence(id) {
+    set((s) => {
+      if (!(id in s.sessionSequences)) return s
+      const next = { ...s.sessionSequences }
+      delete next[id]
+      return { sessionSequences: next }
+    })
   },
 
   async reorderSessions(ids) {

@@ -4,7 +4,7 @@
 // it sends back, and no timer ever ends a step well: it can only interrupt.
 
 import { TURN_SIGNAL_LIMITS, isWireText, type TurnSignal, type TurnSignalRefusal } from '../../hooks/turn-signal-wire'
-import type { DirectiveOutcome } from './session-service'
+import type { SequenceInjectionRefusal, SequenceStopReason } from '../shared/types'
 
 export type CommandClass = 'skill' | 'compact' | 'locale' | 'dialogue'
 
@@ -25,36 +25,9 @@ export interface SequencePlan {
   startQuiet: boolean
 }
 
-export type InjectionRefusal = Exclude<DirectiveOutcome, 'written'>
+export type InjectionRefusal = SequenceInjectionRefusal
 
-export type SequenceStopReason =
-  | 'empty-plan'
-  | 'unknown-command'
-  | 'dialogue-command'
-  | 'bad-nonce'
-  | 'step-too-long'
-  | 'bad-args'
-  | `injection-${InjectionRefusal}`
-  | 'no-command-run'
-  | 'no-turn-start'
-  | 'foreign-command'
-  | 'foreign-turn'
-  | 'unexpected-turn'
-  | 'turn-overlap'
-  | 'turn-mismatch'
-  | 'turn-aborted'
-  | 'turn-refused'
-  | 'turn-error'
-  | 'compact-failed'
-  | 'session-ended'
-  | 'seq-gap'
-  | 'seq-regressed'
-  | 'signal-refused'
-  | 'source-changed'
-  | 'step-mismatch'
-  | 'quiescence-unknown'
-  | 'operator-cancelled'
-  | 'revoked'
+export type { SequenceStopReason }
 
 export type SequenceResult =
   | { status: 'done' }

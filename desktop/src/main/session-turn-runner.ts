@@ -1,3 +1,4 @@
+import type { SessionSkillMoment, SessionSkillStopMode } from '../shared/types'
 import type { TileHold } from './tile-injector'
 import type { TurnSignalEvent } from './turn-signal-server'
 import {
@@ -24,6 +25,9 @@ export interface SequenceStepInput {
 }
 
 export interface SequenceInput {
+  moment: SessionSkillMoment
+  /** The stop mode of a `stop` sequence; absent on `start` and `end`. */
+  mode?: SessionSkillStopMode
   steps: readonly SequenceStepInput[]
 }
 
@@ -39,6 +43,8 @@ export interface SequenceHandle {
 
 export interface SequenceStateView {
   tileId: string
+  moment: SessionSkillMoment
+  mode?: SessionSkillStopMode
   /** The step in flight, or the next one while waiting; the step count once done. */
   step: number
   total: number
@@ -91,6 +97,7 @@ function journalResult(host: SequenceRunHost, tileId: string, total: number, res
 function runInHold(
   host: SequenceRunHost,
   tileId: string,
+  kind: Pick<SequenceStateView, 'moment' | 'mode'>,
   hold: TileHold,
   total: number,
   startBackground: number | null,
@@ -107,7 +114,7 @@ function runInHold(
 
     const view = (step: number, phase: SequenceStateView['phase'], background: number | null, reason: SequenceStopReason | null): void => {
       try {
-        host.onState?.({ tileId, step, total, phase, background, reason })
+        host.onState?.({ tileId, ...kind, step, total, phase, background, reason })
       } catch (error) {
         host.reportError(`sequence on tile ${tileId}: state observer failed`, error)
       }
@@ -196,6 +203,7 @@ function runInHold(
 
 export function runSequence(host: SequenceRunHost, tileId: string, input: SequenceInput): SequenceHandle {
   const total = input.steps.length
+  const kind = input.mode === undefined ? { moment: input.moment } : { moment: input.moment, mode: input.mode }
   const refused = (result: RunResult): SequenceHandle => {
     journalResult(host, tileId, total, result)
     return { result: Promise.resolve(result), override() {}, cancel() {} }
@@ -216,7 +224,7 @@ export function runSequence(host: SequenceRunHost, tileId: string, input: Sequen
       const early: SequenceEvent | null = !hold.isCurrent() ? { type: 'revoked' } : cancelRequested ? { type: 'operator-cancel' } : null
       const background = host.backgroundTasks(tileId)
       const inHold = startSequence({ ...plan, startQuiet: background === null || background === 0 })
-      return runInHold(host, tileId, hold, total, background, inHold, early, (dispatch) => {
+      return runInHold(host, tileId, kind, hold, total, background, inHold, early, (dispatch) => {
         control = dispatch
       })
     })

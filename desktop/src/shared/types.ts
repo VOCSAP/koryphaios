@@ -183,6 +183,8 @@ export interface SessionRuntime extends SessionDef {
   windowsPty: WindowsPtyInfo | null
   /** Whether the Skills sequences can run in this tile, and the first reason they cannot. */
   skillEligibility: SkillEligibility
+  /** Counts the spawns of this tile id in this app run; a restore that keeps the id steps it. Never persisted. */
+  spawnGeneration: number
 }
 
 /** One statusLine report, validated main-side before it reaches the renderer. */
@@ -541,9 +543,56 @@ export type SessionSkillStopMode = 'soft' | 'hard'
 export type SkillIneligibility = 'not-claude' | 'sandbox' | 'not-lead' | 'no-lead-plugin' | 'no-signals'
 export type SkillEligibility = { eligible: true } | { eligible: false; reason: SkillIneligibility }
 
+/**
+ * Why an injection was refused whole -- neither the pre-paste Escape nor the
+ * paste was written. 'refused-modal': the screen looks like a dialog where both
+ * gestures are destructive. 'screen-unavailable': there is no screen to
+ * inspect. 'needs-attention' and 'rate-limited': the tile's runtime flags say
+ * the agent is waiting on the operator or on its quota.
+ */
+export type InjectRefusal = 'refused-modal' | 'screen-unavailable' | 'needs-attention' | 'rate-limited'
+
+export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | InjectRefusal
+
+export type SequenceInjectionRefusal = Exclude<DirectiveOutcome, 'written'>
+
+export type SequenceStopReason =
+  | 'empty-plan'
+  | 'unknown-command'
+  | 'dialogue-command'
+  | 'bad-nonce'
+  | 'step-too-long'
+  | 'bad-args'
+  | `injection-${SequenceInjectionRefusal}`
+  | 'no-command-run'
+  | 'no-turn-start'
+  | 'foreign-command'
+  | 'foreign-turn'
+  | 'unexpected-turn'
+  | 'turn-overlap'
+  | 'turn-mismatch'
+  | 'turn-aborted'
+  | 'turn-refused'
+  | 'turn-error'
+  | 'compact-failed'
+  | 'session-ended'
+  | 'seq-gap'
+  | 'seq-regressed'
+  | 'signal-refused'
+  | 'source-changed'
+  | 'step-mismatch'
+  | 'quiescence-unknown'
+  | 'operator-cancelled'
+  | 'revoked'
+
 /** Progress of the Skills sequence of one tile; carries no command text. */
 export interface SessionSequenceView {
   tileId: string
+  /** The tile's `spawnGeneration` when the sequence started: a view of an older spawn is not the new tile's. */
+  spawnGeneration: number
+  moment: SessionSkillMoment
+  /** The stop mode of a `stop` sequence; absent on `start` and `end`. */
+  mode?: SessionSkillStopMode
   /** The step in flight, or the next one while waiting; the step count once done. */
   step: number
   total: number
@@ -551,7 +600,7 @@ export interface SessionSequenceView {
   /** The background task count the sequence waits on; null otherwise. */
   background: number | null
   /** Why the sequence stopped; null while it runs or when it is done. */
-  reason: string | null
+  reason: SequenceStopReason | null
 }
 
 export type SessionSkillRefusal =
@@ -1240,8 +1289,6 @@ export interface StopOutcome {
    * are each reachable from two different guards (soft's own injectCommand
    * guard, pause's own interrupt gate); 'hard' is deliberately left ungated
    * and never produces them.
-   * Hand-maintained mirror of DirectiveOutcome and InjectOutcome, with no
-   * compile-time link between the three.
    */
   result:
     | 'interrupted'

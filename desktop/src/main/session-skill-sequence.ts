@@ -74,5 +74,6 @@ export function assembleSkillSequence(moment: SkillMoment, settings: SessionSkil
   if ('refused' in configured) return configured
   const native: SequenceStepInput =
     moment === 'stop' ? { command: NATIVE_COMMANDS.stop, args: mode, commandClass: 'skill' } : { command: NATIVE_COMMANDS[moment], commandClass: 'skill' }
-  return { steps: moment === 'start' ? [...configured, native] : [native, ...configured] }
+  const steps = moment === 'start' ? [...configured, native] : [native, ...configured]
+  return moment === 'stop' ? { moment, mode, steps } : { moment, steps }
 }

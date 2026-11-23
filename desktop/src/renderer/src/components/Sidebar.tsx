@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { SessionRuntime } from '@shared/types'
+import type { SessionRuntime, SkillIneligibility } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
 import { shortModelLabel } from '@shared/models'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph, roleGlyph } from './icons'
@@ -7,7 +7,7 @@ import { errorText, useDeck } from '../store'
 import { formatPeerTable } from '../peer-table'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
-import { ContextMenu } from './ContextMenu'
+import { ContextMenu, type ContextMenuEntry } from './ContextMenu'
 import { ContextRing } from './ContextRing'
 import { CreateMenu } from './CreateMenu'
 import { MessageBar } from './MessageBar'
@@ -21,6 +21,14 @@ export interface RowDnd {
   onDrop: (e: React.DragEvent, id: string) => void
   onDragEnd: () => void
 }
+
+/** The line a tile shows for each reason it cannot run a Skills sequence; 'not-claude' hides the group instead. */
+export const SKILL_BLOCK_KEY = {
+  sandbox: 'sidebar.skillBlocked.sandbox',
+  'not-lead': 'sidebar.skillBlocked.not-lead',
+  'no-lead-plugin': 'sidebar.skillBlocked.no-lead-plugin',
+  'no-signals': 'sidebar.skillBlocked.no-signals'
+} as const satisfies Record<Exclude<SkillIneligibility, 'not-claude'>, string>
 
 // Exported rather than file-local so a single row can be mounted directly with
 // a minimal store surface, instead of dragging in the whole Sidebar tree's
@@ -58,6 +66,8 @@ export function SessionRow({
   const clearAttention = useDeck((s) => s.clearAttention)
   const showToast = useDeck((s) => s.showToast)
   const openDiff = useDeck((s) => s.openDiff)
+  const runSkill = useDeck((s) => s.runSkill)
+  const sequence = useDeck((s) => s.sessionSequences?.[session.id])
 
   // Effective auto-resume: per-session override wins, else the global setting.
   const autoResumeOn = session.autoResume ?? config.autoResumeQuota
@@ -103,6 +113,85 @@ export function SessionRow({
       showToast(`set locked: ${msg}`, 'error', { raw: true })
     })
   }
+
+  const interrupt = (): void => {
+    const peerId = session.peerId
+    if (!peerId) return
+    const refused = (msg: string): void => {
+      try {
+        window.api.reportError('sidebar', `interrupt failed: ${msg}`)
+      } catch {
+        // Reporting must never mask the toast.
+      }
+      showToast('toast.interruptRefused', 'error', { params: { reason: msg } })
+    }
+    window.api.agentsStop('pause', [peerId]).then(
+      (report) => {
+        const outcome = report.outcomes[0]?.result
+        if (outcome !== 'interrupted') refused(outcome ?? 'missing')
+      },
+      (e: unknown) => refused(errorText(e))
+    )
+  }
+
+  const eligibility = session.skillEligibility
+  const ineligible = eligibility && !eligibility.eligible ? eligibility.reason : null
+  const skillsShown = !!eligibility && ineligible !== 'not-claude'
+  const sequenceActive = sequence?.phase === 'running' || sequence?.phase === 'waiting-background'
+  const sequenceBlock = !skillsShown
+    ? null
+    : sequenceActive
+      ? t('sidebar.skillSequenceActive', { step: String(sequence.step + 1), total: String(sequence.total) })
+      : ineligible
+        ? t(SKILL_BLOCK_KEY[ineligible])
+        : null
+  const skillEntries: ContextMenuEntry[] = skillsShown
+    ? [
+        { separator: true },
+        {
+          label: (
+            <>
+              {GLYPH_BADGES.torchLit} {t('sidebar.skillStart')}
+            </>
+          ),
+          onSelect: () => void runSkill(session.id, 'start'),
+          disabled: sequenceBlock !== null
+        },
+        {
+          label: (
+            <>
+              {GLYPH_ACTIONS.checklist} {t('sidebar.skillEnd')}
+            </>
+          ),
+          onSelect: () => void runSkill(session.id, 'end'),
+          disabled: sequenceBlock !== null
+        },
+        {
+          label: (
+            <>
+              {GLYPH_ACTIONS.stop} {t('sidebar.skillStopSoft')}
+            </>
+          ),
+          onSelect: () => void runSkill(session.id, 'stop', 'soft'),
+          disabled: sequenceBlock !== null,
+          // One line for the whole group: the blocking reason replaces the
+          // description of an entry that cannot run anyway.
+          hint: sequenceBlock ?? t('sidebar.skillStopSoftHint')
+        },
+        { separator: true },
+        {
+          label: (
+            <>
+              {GLYPH_ACTIONS.pause} {t('sidebar.interrupt')}
+            </>
+          ),
+          onSelect: interrupt,
+          disabled: !session.peerId,
+          danger: true,
+          hint: t('sidebar.interruptHint')
+        }
+      ]
+    : []
 
   const commit = (): void => {
     setEditing(false)
@@ -280,6 +369,18 @@ export function SessionRow({
           {GLYPH_BADGES.torchOut}
         </span>
       )}
+      {!collapsed && sequenceActive && (
+        <span
+          className="row-seq"
+          title={t(sequence.phase === 'waiting-background' ? 'sidebar.seqBadgeWaitingTitle' : 'sidebar.seqBadgeTitle', {
+            step: String(Math.min(sequence.step + 1, sequence.total)),
+            total: String(sequence.total)
+          })}
+        >
+          {sequence.phase === 'waiting-background' && <span className="row-seq-glyph">{GLYPH_BADGES.clepsydra}</span>}
+          {`${Math.min(sequence.step + 1, sequence.total)}/${sequence.total}`}
+        </span>
+      )}
       {/* Model + context fill: the tile's own statusLine report. A non-Claude
           tile can never report one, so it gets no ring. A Claude tile without
           a report (none yet, stopped, sandbox, status line off) drops the
@@ -450,7 +551,8 @@ export function SessionRow({
             {
               label: t('sidebar.viewDiff'),
               onSelect: () => openDiff({ dir: session.cwd, title: session.name })
-            }
+            },
+            ...skillEntries
           ]}
         />
       )}
