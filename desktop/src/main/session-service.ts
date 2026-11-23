@@ -98,6 +98,8 @@ import { mintDepositCapability } from './deposit-capability'
 import { TileTelemetryPublisher } from './peer-telemetry-publisher'
 import { TELEMETRY_CAPABILITY_ENV } from '../../../shared/peer-telemetry'
 import { windowsPtyFor } from '../shared/windows-pty'
+import type { TilePty } from './tile-process-owner'
+import type { TileRef } from './turn-signal-server'
 import { isToolNameList } from '../shared/tool-names'
 import { assertClodexContextInput, clodexContextEnv, isClodexContextTokens } from '../shared/clodex-context'
 
@@ -202,6 +204,12 @@ function pushSessionIdHistory(history: string[] | undefined, realId: string): st
   const next = history ? [...history, realId] : [realId]
   if (next.length <= MAX_SESSION_ID_HISTORY) return next
   return [next[0]!, ...next.slice(next.length - (MAX_SESSION_ID_HISTORY - 1))]
+}
+
+/** The inherited NO_PROXY and no_proxy values kept, plus the loopback hosts: through a proxy the owner of the tile's socket would be the proxy. */
+function noProxyWithLoopback(env: NodeJS.ProcessEnv): string {
+  const inherited = [env.NO_PROXY, env.no_proxy].filter((value): value is string => value !== undefined && value.trim() !== '')
+  return [...new Set(inherited), '127.0.0.1,localhost'].join(',')
 }
 
 /**
@@ -662,6 +670,25 @@ export class SessionService extends EventEmitter {
 
   setHostTelemetryProvider(provider: (shell: string) => boolean): void {
     this.hostSupportsKoryTelemetry = provider
+  }
+
+  /** Where the tiles report their turns; null while no server is up. */
+  private turnSignalUrl: string | null = null
+
+  setTurnSignalUrl(url: string | null): void {
+    this.turnSignalUrl = url
+  }
+
+  /** The live PTYs of the tiles: the turn-signal server decides which tile owns a connection from these alone. */
+  turnSignalTiles(): Array<TileRef & TilePty> {
+    const tiles: Array<TileRef & TilePty> = []
+    for (const id of this.runtime.keys()) {
+      const generation = this.pty.life(id)
+      const ptyPid = this.pty.pid(id)
+      if (generation === null || ptyPid === null) continue
+      tiles.push({ id, generation, ptyPid, isCurrent: () => this.pty.life(id) === generation })
+    }
+    return tiles
   }
 
   /** Sandboxed tiles use container telemetry and do not install the host hook. */
@@ -1814,7 +1841,12 @@ export class SessionService extends EventEmitter {
       CLAUDE_PEERS_DEPOSIT_CAPABILITY: '',
       THALPOS_AUTOSTART: '',
       KORY_APPROVAL_MODULE: koryModuleServed ? '1' : '',
+      KORY_TURN_SIGNAL_URL: koryModuleServed && this.turnSignalUrl !== null ? this.turnSignalUrl : '',
       ...(fallbackInjected ? { KORY_STATUS_FALLBACK: '1' } : null)
+    }
+    if (sessionEnv.KORY_TURN_SIGNAL_URL !== '') {
+      const noProxy = noProxyWithLoopback(process.env)
+      Object.assign(sessionEnv, { NO_PROXY: noProxy, no_proxy: noProxy })
     }
     Object.assign(sessionEnv, clodexContextEnv(def, !sandboxed && isClodexLaunch(base)))
     const peerToolsValue = peerToolsEnvValue(def.peerTools)

@@ -1,4 +1,5 @@
 import type { On } from './claude-code-types.ts'
+import { reportCompacted, reportSessionEnd } from './kory-turns.ts'
 import { FRONTIER_CATALOG } from '../src/shared/models.ts'
 import { decodeStatusFile, encodeStatusFromMeasure, encodeStatusFromModelIdentity, statusFileName, type CurrentModel, type MeasuredContext } from '../src/shared/session-status.ts'
 
@@ -88,6 +89,7 @@ export function register(on: On): void {
   })
 
   on('session.end', async ($, e, next) => {
+    reportSessionEnd($, e.reason)
     if (e.reason === 'clear') await reportMeasuredContext($, {})
     return next(e)
   })
@@ -95,6 +97,7 @@ export function register(on: On): void {
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
     if ('skip' in result) return result
+    reportCompacted($)
     try {
       const usage = await $.session.usage()
       await reportMeasuredContext($, { window: usage.context.window })

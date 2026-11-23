@@ -166,14 +166,58 @@ type Next<Input, Result> = {
   readonly signal: AbortSignal
 }
 
+export type CommandRunInput = {
+  command: string
+  args: string
+  origin: { kind: string }
+}
+
+export type CommandRunResult = {
+  text?: string
+}
+
+export type TurnStartInput = {
+  turnId: string
+  agentId?: string
+}
+
+export type TurnStartResult = {
+  text?: string
+}
+
+export type TurnCompleteInput = {
+  turnId: string
+  agentId?: string
+  reason: 'answer' | 'aborted' | 'refusal' | 'error'
+  isAborted: boolean
+}
+
+export type TurnCompleteResult = {
+  text?: string
+}
+
+/** `background_tasks` lists the async sub-agents and the background Bash tasks still running at the end of the turn. */
+export type ClassicStopInput = {
+  background_tasks?: unknown
+}
+
+export type ClassicStopResult = Record<string, unknown>
+
+export type HttpFetchInit = {
+  method: string
+  headers: Record<string, string>
+  body: string
+}
+
 type TelemetryPluginHost = {
   env: { get(name: string): Promise<string | undefined> }
+  http: { fetch(url: string, init: HttpFetchInit): Promise<{ status: number }> }
   fs: {
     exists(path: string): Promise<boolean>
     read(path: string): Promise<string>
     write(path: string, text: string): Promise<void>
   }
-  clock: { now(): Promise<number> }
+  clock: { now(): Promise<number>; sleep(ms: number): Promise<void> }
   ui: { log(text: string, options?: { to: 'debug' }): void }
   session: {
     usage(): Promise<{ context: SessionContextUsage }>
@@ -239,7 +283,41 @@ type ToolCallHook = (
   next: Next<ToolCallInput, ToolCallResult>,
 ) => ToolCallResult | Promise<ToolCallResult>
 
-type EventName = 'session.start' | 'session.measure' | 'session.compact' | 'session.end' | 'tool.check' | 'tool.call'
+type CommandRunHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<CommandRunInput>,
+  next: Next<CommandRunInput, CommandRunResult>,
+) => CommandRunResult | Promise<CommandRunResult>
+
+type TurnStartHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<TurnStartInput>,
+  next: Next<TurnStartInput, TurnStartResult>,
+) => TurnStartResult | Promise<TurnStartResult>
+
+type TurnCompleteHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<TurnCompleteInput>,
+  next: Next<TurnCompleteInput, TurnCompleteResult>,
+) => TurnCompleteResult | Promise<TurnCompleteResult>
+
+type ClassicStopHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<ClassicStopInput>,
+  next: Next<ClassicStopInput, ClassicStopResult>,
+) => ClassicStopResult | Promise<ClassicStopResult>
+
+type EventName =
+  | 'session.start'
+  | 'session.measure'
+  | 'session.compact'
+  | 'session.end'
+  | 'tool.check'
+  | 'tool.call'
+  | 'command.run'
+  | 'turn.start'
+  | 'turn.complete'
+  | 'classic.Stop'
 
 type HookFor<Event extends EventName> = Event extends 'session.start'
   ? SessionStartHook
@@ -251,6 +329,14 @@ type HookFor<Event extends EventName> = Event extends 'session.start'
         ? SessionEndHook
         : Event extends 'tool.check'
           ? ToolCheckHook
-          : ToolCallHook
+          : Event extends 'command.run'
+            ? CommandRunHook
+            : Event extends 'turn.start'
+              ? TurnStartHook
+              : Event extends 'turn.complete'
+                ? TurnCompleteHook
+                : Event extends 'classic.Stop'
+                  ? ClassicStopHook
+                  : ToolCallHook
 
 export type On = <Event extends EventName>(event: Event, hook: HookFor<Event>) => void

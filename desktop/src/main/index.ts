@@ -26,6 +26,8 @@ import { rendererMenuActions, SAVE_TEMPLATE_ITEM_ID } from './menu-template'
 import { safeExternalUrl } from './external-url'
 import { SessionService, type DirectiveOutcome } from './session-service'
 import { TileTelemetryPublisher } from './peer-telemetry-publisher'
+import { listWin32Processes } from './tile-process-owner'
+import { startTurnSignalServer, type TurnSignalServer } from './turn-signal-server'
 import { PermissionLeaseRuntime } from './permission-lease-runtime'
 import {
   createMissingDirTracker,
@@ -3279,6 +3281,7 @@ const controlDeps: DeckControlDeps = {
 }
 
 let controlServer: DeckControlServer | null = null
+let turnSignalServer: TurnSignalServer | null = null
 let companionServer: CompanionServer | null = null
 /**
  * Memoizes the in-flight start promise, not just the started server: two
@@ -3908,6 +3911,17 @@ app.whenReady().then(async () => {
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
   if (startup.isQuitting()) return
+  // Up before service.start(): a restored tile spawns there and reads the URL then.
+  try {
+    turnSignalServer = await startTurnSignalServer({
+      tiles: () => service.turnSignalTiles(),
+      listProcesses: () => listWin32Processes()
+    })
+    service.setTurnSignalUrl(turnSignalServer?.url ?? null)
+  } catch (e) {
+    reportError('turn-signal', 'turn signal server failed to start', e)
+  }
+  journal.add('session', turnSignalServer ? 'turn signals on' : 'turn signals unsupported or failed')
   // Clodex proxy starts detached so neither the window nor restored tiles wait on a login-shell probe.
   void Promise.resolve()
     .then(() => ensureClodexController().start(getConfig().clodexAutoStart, getConfig().clodexProxyArgs))
@@ -4015,6 +4029,7 @@ const runBeforeQuit = createBeforeQuitHandler({
     },
     { label: 'sandbox', run: () => sandbox.stopCurrentDetached() },
     { label: 'controlServer', run: () => controlServer?.close() },
+    { label: 'turnSignalServer', run: () => turnSignalServer?.close() },
     // Dropping the socket is itself the revocation: the phone sees it and shows
     // "host disconnected".
     { label: 'companionServer', run: () => void companionServer?.stop(true) },

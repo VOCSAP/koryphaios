@@ -498,6 +498,102 @@ test("the approval module is armed only where the host serves the Kory module", 
   expect(spawned.at(-1)!.env.KORY_APPROVAL_MODULE, "sandboxed tile").toBe("");
 });
 
+const TURN_URL = "http://127.0.0.1:4242/signal";
+const SERVED = { hostTelemetry: true, pluginDirs: () => ["/plugins/deck-plugin"] };
+
+function withEnv(values: Record<string, string | undefined>, run: () => void): void {
+  const inherited = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+  try {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    run();
+  } finally {
+    for (const [name, value] of Object.entries(inherited)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+test("the turn signal URL reaches only the tiles the host serves the Kory module to", () => {
+  const served = setup(SERVED);
+  served.svc.setTurnSignalUrl(TURN_URL);
+  served.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL, "host claude tile with the plugin and a compatible CLI").toBe(TURN_URL);
+
+  const noServer = setup(SERVED);
+  noServer.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL, "no server is up").toBe("");
+
+  const noPlugin = setup({ hostTelemetry: true });
+  noPlugin.svc.setTurnSignalUrl(TURN_URL);
+  noPlugin.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL, "no plugin loaded").toBe("");
+
+  const oldCli = setup({ pluginDirs: () => ["/plugins/deck-plugin"] });
+  oldCli.svc.setTurnSignalUrl(TURN_URL);
+  oldCli.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL, "CLI without the module host").toBe("");
+
+  const sbx = mkdtempSync(join(tmpdir(), "kory-sbx-peers-"));
+  tmpDirs.push(sbx);
+  const sandboxed = setup({ ...SERVED, sandboxPeersDir: sbx });
+  sandboxed.svc.setTurnSignalUrl(TURN_URL);
+  sandboxed.svc.create({});
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL, "sandboxed tile").toBe("");
+});
+
+test("an inherited turn signal URL never reaches a tile the host does not serve", () => {
+  withEnv({ KORY_TURN_SIGNAL_URL: TURN_URL }, () => {
+    const { svc } = setup();
+    svc.create({});
+    expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL).toBe("");
+  });
+});
+
+test("a served tile keeps the inherited NO_PROXY and gains the loopback hosts", () => {
+  withEnv({ no_proxy: undefined, NO_PROXY: "corp.example" }, () => {
+    const { svc } = setup(SERVED);
+    svc.setTurnSignalUrl(TURN_URL);
+    svc.create({});
+    const env = spawned.at(-1)!.env;
+    expect(env.NO_PROXY).toBe("corp.example,127.0.0.1,localhost");
+    expect(env.no_proxy).toBe("corp.example,127.0.0.1,localhost");
+  });
+  withEnv({ no_proxy: "", NO_PROXY: "" }, () => {
+    const { svc } = setup(SERVED);
+    svc.setTurnSignalUrl(TURN_URL);
+    svc.create({});
+    expect(spawned.at(-1)!.env.NO_PROXY, "nothing inherited").toBe("127.0.0.1,localhost");
+  });
+});
+
+test("a tile with no turn signal URL keeps its NO_PROXY as inherited", () => {
+  withEnv({ no_proxy: undefined, NO_PROXY: "corp.example" }, () => {
+    const { svc } = setup(SERVED);
+    svc.create({});
+    expect(spawned.at(-1)!.env.NO_PROXY).toBe("corp.example");
+  });
+});
+
+test("the turn signal tiles name each live PTY by its shell pid and life, and lose a PTY that exited", () => {
+  const { svc } = setup();
+  const runtime = svc.create({});
+  const [tile] = svc.turnSignalTiles();
+
+  expect(svc.turnSignalTiles()).toHaveLength(1);
+  expect(tile!.id).toBe(runtime.id);
+  expect(tile!.ptyPid).toBe(spawned.at(-1)!.pid);
+  expect(tile!.isCurrent()).toBe(true);
+  expect(svc.turnSignalTiles()[0]!.generation, "the same PTY keeps the same life object").toBe(tile!.generation);
+
+  spawned.at(-1)!.exit(0);
+  expect(svc.turnSignalTiles()).toEqual([]);
+  expect(tile!.isCurrent(), "a reference taken before the exit is no longer current").toBe(false);
+});
+
 function attentionProbe() {
   const { svc } = setup();
   const internals = svc as unknown as { attentionDetector: { emit(ev: string, e: unknown): void } };
