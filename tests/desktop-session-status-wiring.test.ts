@@ -635,7 +635,7 @@ test("a sequence on a served tile takes its hold, subscribes to its signals and 
   expect(result).toMatchObject({ status: "interrupted", step: 0, typed: false });
   expect(reasonOf(result)).toMatch(/^injection-/);
   expect(server.subscribed).toEqual([tile.id]);
-  expect(server.unsubscribed).toEqual([tile.id]);
+  expect(server.unsubscribed, "the feed keeps the one subscription while the tile lives").toEqual([]);
   expect(journal).toHaveLength(1);
 });
 
@@ -1756,4 +1756,164 @@ test("a tile no renderer has resized reads a screen laid out on the grid its PTY
     [read.snapshot.lines[0]!.length, read.snapshot.lines[1]],
     "a row wraps at the PTY width, as the CLI drew it for that width",
   ).toEqual([pty.cols, "x".repeat(overflow)]);
+});
+
+const MAIN_TURN_DONE = { kind: "turn.complete", turnId: "turn-0", reason: "answer", isAborted: false } as const;
+
+test("a sequence waits before typing step 1 when the tile's last turn left background tasks", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  signalsOf(tile)({ ...MAIN_TURN_DONE, backgroundTasks: 2 });
+  const journal: string[] = [];
+  const handle = tile.svc.runSequence(tile.tile.id, { steps: [SKILL_STEP] }, (line) => journal.push(line));
+  await settle();
+  expect(writes, "nothing is typed while 2 tasks run").toEqual([]);
+  expect(journal).toContain(`sequence on tile ${tile.tile.id}: step 1 waits for background tasks (2)`);
+
+  expect(tile.svc.overrideQuiescence(tile.tile.id)).toBe(true);
+  await settle();
+  expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+test("a sequence types step 1 at once when the tile's last turn left no background task", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  signalsOf(tile)({ ...MAIN_TURN_DONE, backgroundTasks: 0 });
+  const handle = tile.run();
+  await settle();
+  expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+test("a restarted tile does not inherit the background tasks its previous PTY left", async () => {
+  const tile = servedTile();
+  signalsOf(tile)({ ...MAIN_TURN_DONE, backgroundTasks: 2 });
+  spawned.at(-1)!.exit(1);
+  await tile.svc.restart(tile.tile.id);
+  const writes = typing(tile.svc);
+  const handle = tile.run();
+  await settle();
+  expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+test("two sequences on one tile share its single server subscription", async () => {
+  const tile = servedTile();
+  typing(tile.svc);
+  for (let run = 0; run < 2; run++) {
+    const handle = tile.run();
+    await settle();
+    tile.svc.cancelSequence(tile.tile.id);
+    await reachedWithin(handle.result, "the cancelled sequence", 1500);
+  }
+  expect(tile.server.subscribed).toEqual([tile.tile.id]);
+});
+
+test("the tile's server subscription ends when the tile is removed", async () => {
+  const tile = servedTile();
+  spawned.at(-1)!.exit(1);
+  await tile.svc.remove(tile.tile.id);
+  expect(tile.server.unsubscribed).toEqual([tile.tile.id]);
+});
+
+test("the tile's server subscription ends when its PTY exits cleanly and the tile disappears", () => {
+  const tile = servedTile();
+  spawned.at(-1)!.exit(0);
+  expect(tile.server.unsubscribed).toEqual([tile.tile.id]);
+});
+
+test("a tile's feed is replaced, and the old subscription ended, when the server changes", () => {
+  const tile = servedTile();
+  const next = signalServer();
+  tile.svc.setTurnSignalSubscribe(next.subscribe);
+  tile.svc.setTurnSignalUrl(OTHER_URL);
+  spawned.at(-1)!.exit(1);
+  return tile.svc.restart(tile.tile.id).then(() => {
+    expect(tile.server.unsubscribed).toEqual([tile.tile.id]);
+    expect(next.subscribed).toEqual([tile.tile.id]);
+  });
+});
+
+test("a server that refuses the tile's subscription leaves the tile spawned, reports it, and stops the sequence untyped", async () => {
+  const errors: Array<[string, string]> = [];
+  onDeckError((scope, text) => errors.push([scope, text]));
+  try {
+    const { svc } = setup(SERVED);
+    svc.setTurnSignalUrl(TURN_URL);
+    svc.setTurnSignalSubscribe(() => {
+      throw new Error("tile already has a listener");
+    });
+    const tile = svc.create({});
+    expect(spawned).not.toHaveLength(0);
+    const result = await reachedWithin(svc.runSequence(tile.id, { steps: [SKILL_STEP] }, () => {}).result, "the sequence", 1500);
+    expect(result).toMatchObject({ status: "interrupted", step: 0, typed: false, reason: "revoked" });
+    expect(errors.some(([scope, text]) => scope === "session" && text.includes("no turn signal subscription for tile"))).toBe(true);
+  } finally {
+    onDeckError(() => {});
+  }
+});
+
+const feedCount = (svc: InstanceType<typeof SessionService>): number => (svc as unknown as { tileFeeds: Map<string, unknown> }).tileFeeds.size;
+
+test("closeAll ends the feed and the server subscription of every tile", () => {
+  const tile = servedTile();
+  const second = tile.svc.create({});
+  expect(feedCount(tile.svc)).toBe(2);
+  tile.svc.closeAll();
+  expect([...tile.server.unsubscribed].sort()).toEqual([tile.tile.id, second.id].sort());
+  expect(feedCount(tile.svc)).toBe(0);
+});
+
+test("stop ends the feed and the server subscription of every tile", () => {
+  const tile = servedTile();
+  const second = tile.svc.create({});
+  tile.svc.stop();
+  expect([...tile.server.unsubscribed].sort()).toEqual([tile.tile.id, second.id].sort());
+  expect(feedCount(tile.svc)).toBe(0);
+});
+
+test("restoreFrom ends the feed of every previous tile and gives a restored tile with a new id one feed", () => {
+  const tile = servedTile();
+  tile.svc.restoreFrom(tile.svc.captureSessions().map((def) => ({ ...def, id: "restored-tile" })));
+  expect(tile.server.unsubscribed).toEqual([tile.tile.id]);
+  expect(tile.server.subscribed).toEqual([tile.tile.id, "restored-tile"]);
+  expect(feedCount(tile.svc)).toBe(1);
+});
+
+test("restoreFrom with the same id subscribes the tile once more after one unsubscription", () => {
+  const tile = servedTile();
+  tile.svc.restoreFrom(tile.svc.captureSessions());
+  expect(tile.server.unsubscribed).toEqual([tile.tile.id]);
+  expect(tile.server.subscribed).toEqual([tile.tile.id, tile.tile.id]);
+  expect(feedCount(tile.svc)).toBe(1);
+});
+
+test("a new subscribe function on the same URL replaces the feed before the sequence reads its background count", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  signalsOf(tile)({ ...MAIN_TURN_DONE, backgroundTasks: 2 });
+  tile.svc.setTurnSignalSubscribe(signalServer().subscribe);
+  const handle = tile.run();
+  await settle();
+  expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+test("a sequence types step 1 without an override once a main turn follows a sub-agent turn and reports no background task", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  const send = signalsOf(tile);
+  send({ ...MAIN_TURN_DONE, backgroundTasks: 1 });
+  send({ ...MAIN_TURN_DONE, turnId: "turn-sub", agentId: "agent-1" });
+  send({ ...MAIN_TURN_DONE, turnId: "turn-1", backgroundTasks: 0 });
+  const handle = tile.run();
+  await settle();
+  expect(writes.join("")).toContain(`/${SKILL_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
 });

@@ -6,6 +6,7 @@ import {
   type SequenceHandle,
   type SequenceInput,
   type SequenceRunHost,
+  type SequenceStateView,
   type SequenceStepInput
 } from '../desktop/src/main/session-turn-runner.ts'
 import type { TileHold } from '../desktop/src/main/tile-injector.ts'
@@ -33,6 +34,9 @@ interface WorldOptions {
   subscribeThrows?: boolean
   /** holdTile rejects with this error before running the hold. */
   holdRejects?: Error
+  /** What the host reports as the tile's background task count; null = unknown. */
+  background?: number | null
+  stateThrows?: boolean
 }
 
 interface FakeTimer {
@@ -51,6 +55,8 @@ function makeWorld(options: WorldOptions = {}) {
   const timers: FakeTimer[] = []
   const outcomes = [...(options.outcomes ?? [])]
   const counts = { holds: 0, subscribes: 0, unsubscribes: 0, minted: 0 }
+  const states: SequenceStateView[] = []
+  let background = options.background ?? null
   let listener: ((event: TurnSignalEvent) => void) | null = null
   let revoke!: (reason: string) => void
   const revoked = new Promise<string>((resolve) => {
@@ -99,6 +105,11 @@ function makeWorld(options: WorldOptions = {}) {
         listener = null
       }
     },
+    backgroundTasks: () => background,
+    onState: (view) => {
+      states.push(view)
+      if (options.stateThrows) throw new Error('observer failed')
+    },
     life: () => GENERATION,
     hasSource: () => options.source ?? true,
     tryClaim: (id) => {
@@ -130,6 +141,10 @@ function makeWorld(options: WorldOptions = {}) {
     errors,
     claims,
     counts,
+    states,
+    setBackground: (count: number | null) => {
+      background = count
+    },
     revoke: (reason: string) => revoke(reason),
     startHold: () => startHold(),
     settleInject: (error?: Error) => settleInject(error),
@@ -551,5 +566,91 @@ describe('runSequence', () => {
       await start(w, [START])
       expect(w.journal).toEqual([`sequence on tile ${TILE}: refused (no-source)`])
     })
+  })
+})
+
+describe('start quiescence and state view', () => {
+  test.each([null, 0])('types step 1 at once when the host reports %p background tasks', async (background) => {
+    const w = makeWorld({ background })
+    await start(w, [START])
+    expect(w.typed).toHaveLength(1)
+    expect(w.journal).toEqual([])
+  })
+
+  test('waits before step 1 while the host reports background tasks, and an override types it', async () => {
+    const w = makeWorld({ background: 2 })
+    const { handle } = await start(w, [START])
+    expect(w.typed).toEqual([])
+    expect(w.journal).toEqual([`sequence on tile ${TILE}: step 1 waits for background tasks (2)`])
+    handle.override()
+    await flush()
+    expect(w.typed).toHaveLength(1)
+  })
+
+  test('reads the count when the hold starts, not when the run is requested', async () => {
+    const w = makeWorld({ background: 0, deferStart: true })
+    const handle = runSequence(w.host, TILE, { steps: [START] })
+    w.setBackground(3)
+    w.startHold()
+    await flush()
+    expect(w.typed).toEqual([])
+    handle.cancel()
+    await flush()
+  })
+
+  test('reports running for each step it types and done at the end', async () => {
+    const w = makeWorld()
+    const s = signals()
+    await start(w, [START, END])
+    await openTurn(w, s, 0, 'turn-1')
+    w.signal(s.completed('turn-1', { backgroundTasks: 0 }))
+    await flush()
+    await openTurn(w, s, 1, 'turn-2')
+    w.signal(s.completed('turn-2'))
+    await flush()
+    const base = { tileId: TILE, total: 2, background: null, reason: null }
+    expect(w.states).toEqual([
+      { ...base, step: 0, phase: 'running' },
+      { ...base, step: 1, phase: 'running' },
+      { ...base, step: 2, phase: 'done' }
+    ])
+  })
+
+  test('reports waiting-background with the count it waits on, at the start and after a turn', async () => {
+    const w = makeWorld({ background: 2 })
+    const s = signals()
+    const { handle } = await start(w, [START, END])
+    expect(w.states).toEqual([{ tileId: TILE, step: 0, total: 2, phase: 'waiting-background', background: 2, reason: null }])
+    handle.override()
+    await flush()
+    await openTurn(w, s, 0, 'turn-1')
+    w.signal(s.completed('turn-1', { backgroundTasks: 3 }))
+    await flush()
+    expect(w.states.at(-1)).toEqual({ tileId: TILE, step: 1, total: 2, phase: 'waiting-background', background: 3, reason: null })
+  })
+
+  test('reports stopped with the step and the reason', async () => {
+    const w = makeWorld({ background: 1 })
+    const { handle } = await start(w, [START, END])
+    handle.cancel()
+    await flush()
+    expect(w.states.at(-1)).toEqual({ tileId: TILE, step: 0, total: 2, phase: 'stopped', background: null, reason: 'operator-cancelled' })
+  })
+
+  test('an observer that throws is reported and does not stop the sequence', async () => {
+    const w = makeWorld({ stateThrows: true })
+    const s = signals()
+    const { result } = await start(w, [START])
+    await openTurn(w, s, 0, 'turn-1')
+    w.signal(s.completed('turn-1'))
+    await flush()
+    expect(result.value).toEqual({ status: 'done' })
+    expect(w.errors).toEqual(Array(2).fill(`sequence on tile ${TILE}: state observer failed`))
+  })
+
+  test('a run refused before the hold reports no state', async () => {
+    const w = makeWorld({ source: false })
+    await start(w, [START])
+    expect(w.states).toEqual([])
   })
 })

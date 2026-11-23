@@ -100,6 +100,7 @@ import { TELEMETRY_CAPABILITY_ENV } from '../../../shared/peer-telemetry'
 import { windowsPtyFor } from '../shared/windows-pty'
 import type { TilePty } from './tile-process-owner'
 import { runSequence, type SequenceHandle, type SequenceInput } from './session-turn-runner'
+import { createTileTurnFeed, type TileTurnFeed } from './tile-turn-feed'
 import type { TileRef, TurnSignalServer } from './turn-signal-server'
 import { isToolNameList } from '../shared/tool-names'
 import { assertClodexContextInput, clodexContextEnv, isClodexContextTokens } from '../shared/clodex-context'
@@ -474,6 +475,7 @@ export class SessionService extends EventEmitter {
           this.emit('exit', { id, exitCode, name: def?.name })
         } finally {
           this.defs = this.defs.filter((d) => d.id !== id)
+          this.dropTileFeed(id)
           this.runtime.delete(id)
           this.persist()
           this.broadcast()
@@ -679,6 +681,11 @@ export class SessionService extends EventEmitter {
   /** The signal URL each PTY life was launched with: a tile has a source only while its PTY posts to the current server. */
   private turnSignalSources = new WeakMap<object, string>()
   private sequenceSlots = new Map<string, { handle: SequenceHandle | null }>()
+  /** The tile's one subscription to the signal server; `generation` is the PTY life of the last event it carried. */
+  private tileFeeds = new Map<
+    string,
+    { feed: TileTurnFeed; subscribe: TurnSignalServer['subscribe']; unsubscribe: () => void; generation: object | null }
+  >()
 
   setTurnSignalUrl(url: string | null): void {
     this.turnSignalUrl = url
@@ -698,6 +705,41 @@ export class SessionService extends EventEmitter {
       tiles.push({ id, generation, ptyPid, isCurrent: () => this.pty.life(id) === generation })
     }
     return tiles
+  }
+
+  private tileFeed(id: string): { feed: TileTurnFeed; generation: object | null } | null {
+    const subscribe = this.turnSignalSubscribe
+    if (subscribe === null) return null
+    const known = this.tileFeeds.get(id)
+    if (known?.subscribe === subscribe) return known
+    known?.unsubscribe()
+    this.tileFeeds.delete(id)
+    const entry = {
+      feed: createTileTurnFeed((error) => reportError('session', `a turn signal listener of tile ${id} threw`, error)),
+      subscribe,
+      unsubscribe: () => {},
+      generation: null as object | null
+    }
+    try {
+      entry.unsubscribe = subscribe(id, (event) => {
+        entry.generation = event.generation
+        entry.feed.feed(event)
+      })
+    } catch (e) {
+      reportError('session', `no turn signal subscription for tile ${id}`, e)
+      return null
+    }
+    this.tileFeeds.set(id, entry)
+    return entry
+  }
+
+  private dropTileFeed(id: string): void {
+    this.tileFeeds.get(id)?.unsubscribe()
+    this.tileFeeds.delete(id)
+  }
+
+  private dropAllTileFeeds(): void {
+    for (const id of [...this.tileFeeds.keys()]) this.dropTileFeed(id)
   }
 
   private hasTurnSignalSource(id: string): boolean {
@@ -822,6 +864,7 @@ export class SessionService extends EventEmitter {
     this.revokeAllPermissionLeases()
     for (const def of this.defs) void this.peerTelemetryPublisher?.stop(def.id)
     this.pty.killAll()
+    this.dropAllTileFeeds()
   }
 
   list(): SessionRuntime[] {
@@ -1133,6 +1176,7 @@ export class SessionService extends EventEmitter {
       this.deckLeadPluginTiles.delete(id)
       this.dropStatusFile(def)
       this.defs = this.defs.filter((d) => d.id !== id)
+      this.dropTileFeed(id)
       this.runtime.delete(id)
       this.outputAt.delete(id)
       this.persist()
@@ -1208,6 +1252,7 @@ export class SessionService extends EventEmitter {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
     this.pty.killAll()
+    this.dropAllTileFeeds()
     if (this.defs.length === 0) return
     for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
@@ -1299,6 +1344,7 @@ export class SessionService extends EventEmitter {
       this.emit('removed', { id: d.id, name: d.name })
     }
     this.pty.killAll()
+    this.dropAllTileFeeds()
     for (const d of this.defs) void this.cleanupSandbox(d.id, d.name)
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
@@ -1985,7 +2031,10 @@ export class SessionService extends EventEmitter {
         ({ id, cols, rows }) => this.screenGuard.start(id, cols, rows)
       )
       const spawnedLife = this.pty.life(def.id)
-      if (spawnedLife !== null && sessionEnv.KORY_TURN_SIGNAL_URL !== '') this.turnSignalSources.set(spawnedLife, sessionEnv.KORY_TURN_SIGNAL_URL)
+      if (spawnedLife !== null && sessionEnv.KORY_TURN_SIGNAL_URL !== '') {
+        this.turnSignalSources.set(spawnedLife, sessionEnv.KORY_TURN_SIGNAL_URL)
+        this.tileFeed(def.id)
+      }
       if (telemetryLaunchHash !== null && !wrapped) this.peerTelemetryPublisher?.start(def.id, telemetryLaunchHash)
       if (handoffLaunch) this.sessionHandoffLaunches.set(def.id, handoffLaunch)
       this.deadWriteReported.delete(def.id)
@@ -2177,7 +2226,15 @@ export class SessionService extends EventEmitter {
     const handle = runSequence(
       {
         holdTile: async (tile, fn) => this.holdTile(tile, fn),
-        subscribe: (tile, listener) => subscribe!(tile, listener),
+        subscribe: (tile, listener) => {
+          const entry = this.tileFeed(tile)
+          if (entry === null) throw new Error(`tile ${tile} has no turn signal feed`)
+          return entry.feed.listen(listener)
+        },
+        backgroundTasks: (tile) => {
+          const entry = this.tileFeed(tile)
+          return entry !== null && entry.generation === this.pty.life(tile) ? entry.feed.backgroundTasks() : null
+        },
         life: (tile) => this.pty.life(tile),
         hasSource: (tile) => subscribe !== null && this.hasTurnSignalSource(tile),
         tryClaim: (tile) => {

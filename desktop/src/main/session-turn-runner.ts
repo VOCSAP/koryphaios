@@ -10,6 +10,7 @@ import {
   type SequencePlan,
   type SequenceResult,
   type SequenceState,
+  type SequenceStopReason,
   type Transition
 } from './session-turn-sequence'
 
@@ -36,10 +37,24 @@ export interface SequenceHandle {
   cancel(): void
 }
 
+export interface SequenceStateView {
+  tileId: string
+  /** The step in flight, or the next one while waiting; the step count once done. */
+  step: number
+  total: number
+  phase: 'running' | 'waiting-background' | 'done' | 'stopped'
+  /** The background task count the sequence waits on; null otherwise. */
+  background: number | null
+  reason: SequenceStopReason | null
+}
+
 export interface SequenceRunHost {
   holdTile<T>(id: string, fn: (hold: TileHold) => Promise<T>): Promise<T>
-  /** One listener per tile; throws when the tile already has one. Returns its unsubscribe. */
+  /** Listens to the tile's turn signals; throws when the tile has no feed. Returns its unsubscribe. */
   subscribe(id: string, listener: (event: TurnSignalEvent) => void): () => void
+  /** The background task count of the tile's last main turn; null while unknown. */
+  backgroundTasks(id: string): number | null
+  onState?(view: SequenceStateView): void
   life(id: string): object | null
   /** Whether the tile was launched with a turn signal source. */
   hasSource(id: string): boolean
@@ -77,6 +92,8 @@ function runInHold(
   host: SequenceRunHost,
   tileId: string,
   hold: TileHold,
+  total: number,
+  startBackground: number | null,
   started: Transition,
   early: SequenceEvent | null,
   attach: (dispatch: (event: SequenceEvent) => void) => void
@@ -88,9 +105,19 @@ function runInHold(
     let finished = false
     let unsubscribe: (() => void) | null = null
 
+    const view = (step: number, phase: SequenceStateView['phase'], background: number | null, reason: SequenceStopReason | null): void => {
+      try {
+        host.onState?.({ tileId, step, total, phase, background, reason })
+      } catch (error) {
+        host.reportError(`sequence on tile ${tileId}: state observer failed`, error)
+      }
+    }
+
     const finish = (result: SequenceResult): void => {
       finished = true
       unsubscribe?.()
+      if (result.status === 'done') view(total, 'done', null, null)
+      else view(result.status === 'interrupted' ? result.step : 0, 'stopped', null, result.reason)
       resolve(result)
     }
 
@@ -98,6 +125,7 @@ function runInHold(
       switch (effect.type) {
         case 'submit': {
           const step = effect.step
+          view(step, 'running', null, null)
           hold.inject(effect.text, { escape: false }).then(
             (outcome) => dispatch(outcome === 'written' ? { type: 'submitted', step } : { type: 'inject-refused', step, outcome }),
             (error) => {
@@ -120,7 +148,8 @@ function runInHold(
           return
         }
         case 'waiting-quiescence':
-          host.journal(`sequence on tile ${tileId}: step ${effect.step + 1} waits for background tasks (${effect.background})`)
+          view(effect.step, 'waiting-background', effect.background ?? startBackground, null)
+          host.journal(`sequence on tile ${tileId}: step ${effect.step + 1} waits for background tasks (${effect.background ?? startBackground})`)
           return
         case 'finish':
           finish(effect.result)
@@ -185,7 +214,9 @@ export function runSequence(host: SequenceRunHost, tileId: string, input: Sequen
   const result = host
     .holdTile(tileId, (hold) => {
       const early: SequenceEvent | null = !hold.isCurrent() ? { type: 'revoked' } : cancelRequested ? { type: 'operator-cancel' } : null
-      return runInHold(host, tileId, hold, started, early, (dispatch) => {
+      const background = host.backgroundTasks(tileId)
+      const inHold = startSequence({ ...plan, startQuiet: background === null || background === 0 })
+      return runInHold(host, tileId, hold, total, background, inHold, early, (dispatch) => {
         control = dispatch
       })
     })
