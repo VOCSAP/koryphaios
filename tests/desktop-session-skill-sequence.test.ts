@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TURN_SIGNAL_LIMITS, isWireText } from '../desktop/hooks/turn-signal-wire'
-import { assembleSkillSequence, NATIVE_COMMANDS, type SkillMoment } from '../desktop/src/main/session-skill-sequence'
+import { assembleSkillSequence, BUILTIN_COMMAND_TABLES, NATIVE_COMMANDS, type SkillMoment } from '../desktop/src/main/session-skill-sequence'
 import { readSessionSkills, writeSessionSkills } from '../desktop/src/main/session-skills'
 import { startSequence, stepArgs, type CommandClass, type PlanStep } from '../desktop/src/main/session-turn-sequence'
 import { validateCommandLine, type CommandLineRefusal } from '../desktop/src/shared/session-command-line'
@@ -242,6 +242,58 @@ test('the ceilings keep the longest step inside the wire limits once the step to
   expect(SESSION_COMMAND_LIMITS.command).toBe(TURN_SIGNAL_LIMITS.command)
   expect(Array.from(stepArgs(longest)).length).toBeLessThanOrEqual(TURN_SIGNAL_LIMITS.args)
   expect(startSequence({ steps: [longest], table, startQuiet: true }).state).toMatchObject({ status: 'running' })
+})
+
+const MEASURED = {
+  dialogue: [
+    'add-dir', 'auto-mode-setup', 'autocompact', 'config', 'effort', 'export', 'fast', 'goal', 'help', 'hooks', 'ide', 'login',
+    'mobile', 'model', 'permissions', 'powerup', 'rewind', 'status', 'tasks', 'theme', 'usage', 'workflows'
+  ],
+  ending: ['logout', 'exit', 'background'],
+  interactiveUnmeasured: ['memory', 'output-style', 'plugin', 'resume', 'skills', 'reload-plugins', 'radio', 'stickers', 'tui', 'team-onboarding'],
+  noTurn: [
+    'branch', 'btw', 'bug', 'cd', 'clear', 'color', 'context', 'copy', 'diff', 'feedback', 'focus', 'fork', 'keybindings',
+    'list-agents', 'mcp', 'plan', 'recap', 'release-notes', 'reload-skills', 'rename', 'subtask', 'terminal-setup'
+  ],
+  modelTurn: [
+    'batch', 'claude-api', 'code-review', 'dataviz', 'debug', 'deep-research', 'doctor', 'fewer-permission-prompts', 'init',
+    'insights', 'loop', 'plugin-authoring', 'run', 'simplify', 'statusline', 'update-config', 'workflow-authoring'
+  ]
+}
+
+const classOfBuiltin = (line: string) => {
+  const result = assembleSkillSequence('end', settings({ end: [line] }))
+  return 'refused' in result ? result.reason : steps(result)[1]?.commandClass
+}
+
+test('a built-in that waits for the operator, or ends the session, is refused whatever its case', () => {
+  for (const name of [...MEASURED.dialogue, ...MEASURED.ending, ...MEASURED.interactiveUnmeasured]) {
+    expect(classOfBuiltin(`/${name}`), name).toBe('dialogue-command')
+    expect(classOfBuiltin(`/${name.toUpperCase()} x`), name.toUpperCase()).toBe('dialogue-command')
+  }
+})
+
+test('a built-in that runs without a model turn is a locale step, whatever its case', () => {
+  for (const name of MEASURED.noTurn) {
+    expect(classOfBuiltin(`/${name}`), name).toBe('locale')
+    expect(classOfBuiltin(`/${name.toUpperCase()}`), name.toUpperCase()).toBe('locale')
+  }
+})
+
+test('a built-in that runs a model turn, and a name no table knows, is a skill', () => {
+  for (const name of [...MEASURED.modelTurn, 'agents', 'security-review', 'verify', 'not-a-builtin']) {
+    expect(classOfBuiltin(`/${name}`), name).toBe('skill')
+  }
+})
+
+test('no command name sits in two built-in class tables', () => {
+  const tables = Object.entries(BUILTIN_COMMAND_TABLES)
+  const owners = new Map<string, string[]>()
+  for (const [commandClass, names] of tables) for (const name of names) owners.set(name, [...(owners.get(name) ?? []), commandClass])
+
+  expect(tables.length).toBeGreaterThan(1)
+  expect([...owners].filter(([, classes]) => classes.length > 1)).toEqual([])
+  for (const [name] of owners) expect(name, 'tables hold lowercase names').toBe(name.toLowerCase())
 })
 
 test('an assembled sequence is accepted by the sequence reducer once the runner adds its nonces', () => {

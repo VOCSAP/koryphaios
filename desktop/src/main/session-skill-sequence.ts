@@ -5,6 +5,7 @@ import type { CommandClass } from './session-turn-sequence'
 
 export type SkillMoment = 'start' | 'end' | 'stop'
 export type StopMode = 'soft' | 'hard'
+export const SKILL_MOMENTS: readonly SkillMoment[] = ['start', 'end', 'stop']
 
 /** The engine's name of each native skill, without its slash: typed by the Deck and expected back in the turn signal. */
 export const NATIVE_COMMANDS = {
@@ -15,12 +16,25 @@ export const NATIVE_COMMANDS = {
 
 // A name the Deck does not know is a skill: it gets a step token and is proven by its own turn.
 const COMPACT_COMMANDS: ReadonlySet<string> = new Set(['compact'])
-const LOCAL_COMMANDS: ReadonlySet<string> = new Set(['clear'])
-// Commands that open a picker or a dialog: typing one would park the tile on a screen no step can finish.
-const DIALOGUE_COMMANDS: ReadonlySet<string> = new Set([
-  'agents', 'config', 'doctor', 'help', 'hooks', 'ide', 'login', 'logout', 'mcp', 'memory', 'model',
-  'output-style', 'permissions', 'plugin', 'resume', 'rewind', 'skills', 'status', 'terminal-setup', 'theme'
+const LOCAL_COMMANDS: ReadonlySet<string> = new Set([
+  'branch', 'btw', 'bug', 'cd', 'clear', 'color', 'context', 'copy', 'diff', 'feedback', 'focus', 'fork',
+  'keybindings', 'list-agents', 'mcp', 'plan', 'recap', 'release-notes', 'reload-skills', 'rename', 'subtask',
+  'terminal-setup'
 ])
+// Interactive built-ins, and those that end the session, are refused: no step can finish them safely.
+const DIALOGUE_COMMANDS: ReadonlySet<string> = new Set([
+  'add-dir', 'auto-mode-setup', 'autocompact', 'config', 'effort', 'export', 'fast', 'goal', 'help', 'hooks', 'ide',
+  'login', 'mobile', 'model', 'permissions', 'powerup', 'rewind', 'status', 'tasks', 'theme', 'usage', 'workflows',
+  'background', 'exit', 'logout',
+  'memory', 'output-style', 'plugin', 'radio', 'reload-plugins', 'resume', 'skills', 'stickers', 'team-onboarding', 'tui'
+])
+
+/** Every built-in table by the class it gives; a name sits in one table only. */
+export const BUILTIN_COMMAND_TABLES: Readonly<Record<Exclude<CommandClass, 'skill'>, ReadonlySet<string>>> = {
+  dialogue: DIALOGUE_COMMANDS,
+  compact: COMPACT_COMMANDS,
+  locale: LOCAL_COMMANDS
+}
 
 function classOf(command: string): CommandClass {
   const name = command.toLowerCase()
