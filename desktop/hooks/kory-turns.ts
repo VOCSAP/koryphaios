@@ -71,6 +71,13 @@ function send($: TurnsHost, signal: SignalBody): number {
   return seq
 }
 
+/** This final form is reserved to the Deck's step correlation and is removed whatever typed it. */
+const STEP_TOKEN_TAIL = /(?:^| )kory-step:[0-9a-f]{8,32}$/
+
+function withoutStepToken(args: string): string {
+  return args.replace(STEP_TOKEN_TAIL, '')
+}
+
 /** Called by the session.compact hook that also reports telemetry: the loader takes one registration per event. */
 export function reportCompacted($: TurnsHost): void {
   send($, { kind: 'session.compact:resolved' })
@@ -87,7 +94,8 @@ export function register(on: On): void {
 
   on('command.run', async ($, e, next) => {
     state.pendingCommandSeq = send($, { kind: 'command.run:enter', command: e.command, args: e.args, origin: e.origin.kind })
-    const result = await next(e)
+    const args = withoutStepToken(e.args)
+    const result = await next(args === e.args ? e : { ...e, args })
     send($, { kind: 'command.run:resolved', command: e.command })
     return result
   })

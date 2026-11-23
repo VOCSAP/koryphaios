@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { register as registerModule } from '../desktop/hooks/kory-module.ts'
 import type { TurnsHost } from '../desktop/hooks/kory-turns.ts'
 import { parseTurnSignal } from '../desktop/hooks/turn-signal-wire.ts'
+import { startSequence, stepArgs } from '../desktop/src/main/session-turn-sequence.ts'
 
 const SERVER_URL = 'http://127.0.0.1:4242/signal'
 const LOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
@@ -321,6 +322,90 @@ test('session.end keeps a known reason and files an unknown one under other', as
 
   expect(bodies(probe).map((body) => body.reason)).toEqual(['clear', 'other'])
   for (const request of probe.sent) expect(parseTurnSignal(request.body).ok).toBe(true)
+})
+
+const NEXT_RESULT = { text: 'ran' }
+
+/** Plays one command.run through the module and records what the engine's next() was given. */
+async function runCommand(args: string) {
+  const probe = host()
+  const event = { command: 'turnspy:probe', args, origin: { kind: 'composer' } }
+  const forwarded: Array<{ args: string }> = []
+  const result = await handlers().get('command.run')!(probe.value, event, async (given: { args: string }) => {
+    forwarded.push(given)
+    return NEXT_RESULT
+  })
+  await idle()
+  return { probe, event, forwarded, result }
+}
+
+/** The args the Deck types for a skill step, built by the Deck's own function. */
+const deckArgs = (base: string, nonce: string): string => stepArgs({ command: 'turnspy:probe', args: base, nonce })
+
+/** Whether the Deck would accept this nonce on a skill step. */
+function deckAcceptsNonce(nonce: string): boolean {
+  const plan = { steps: [{ command: 'kory-session-start', nonce }], table: { 'kory-session-start': 'skill' }, startQuiet: true } as const
+  return startSequence(plan).state.status !== 'refused'
+}
+
+const NONCE = 'a1b2c3d4e5f60718'
+const TOKEN_PREFIX = deckArgs('', NONCE).slice(0, -NONCE.length)
+
+test('the command.run signal keeps the original args, token included, so the Deck can read the nonce', async () => {
+  for (const base of ['plan N1', '']) {
+    const { probe } = await runCommand(deckArgs(base, NONCE))
+    expect(bodies(probe)[0], `base ${JSON.stringify(base)}`).toMatchObject({ kind: 'command.run:enter', args: deckArgs(base, NONCE) })
+  }
+})
+
+test('a skill never sees the token the Deck appended to its arguments, nor the space before it', async () => {
+  for (const base of ['plan N1', '', 'two  words', 'ends with a space ']) {
+    const { event, forwarded } = await runCommand(deckArgs(base, NONCE))
+    expect(forwarded, `base ${JSON.stringify(base)}`).toHaveLength(1)
+    expect(forwarded[0]).toEqual({ ...event, args: base })
+  }
+})
+
+test('the token is removed for every nonce the Deck accepts and kept for every one it refuses', async () => {
+  const nonces = Array.from({ length: 40 }, (_, at) => '0123456789abcdef'.repeat(3).slice(0, at + 1))
+  nonces.push('ABCDEF0123456789', 'aBcdef0123456789', 'g'.repeat(16), 'a1b2c3d4-e5f60718')
+  const accepted = nonces.filter(deckAcceptsNonce)
+  expect(accepted.length, 'the oracle must accept some nonces').toBeGreaterThan(0)
+  expect(accepted.length, 'the oracle must refuse some nonces').toBeLessThan(nonces.length)
+  for (const nonce of nonces) {
+    const args = deckArgs('soft', nonce)
+    const { event, forwarded } = await runCommand(args)
+    if (deckAcceptsNonce(nonce)) expect(forwarded[0]!.args, `nonce ${nonce}`).toBe('soft')
+    else expect(forwarded[0], `nonce ${nonce}`).toBe(event)
+  }
+})
+
+test('text that is not the Deck tail reaches the skill untouched', async () => {
+  const tail = `${TOKEN_PREFIX}${NONCE}`
+  for (const args of [`${tail} plan`, `plan ${tail} `, `plan\t${tail}`, `plan${tail}`, `plan ${TOKEN_PREFIX}`, `plan ${TOKEN_PREFIX}xyz`]) {
+    const { event, forwarded } = await runCommand(args)
+    expect(forwarded[0], JSON.stringify(args)).toBe(event)
+  }
+})
+
+test('only the last of two tokens is removed', async () => {
+  const first = `${TOKEN_PREFIX}${NONCE}`
+  const { forwarded } = await runCommand(`plan ${first} ${TOKEN_PREFIX}00ff00ff00ff00ff`)
+  expect(forwarded[0]!.args).toBe(`plan ${first}`)
+})
+
+test('a command without a token passes the very same event to next and returns its result', async () => {
+  const { probe, event, forwarded, result } = await runCommand('plan N1')
+  expect(forwarded).toHaveLength(1)
+  expect(forwarded[0]).toBe(event)
+  expect(result).toBe(NEXT_RESULT)
+  expect(bodies(probe).map((body) => body.kind)).toEqual(['command.run:enter', 'command.run:resolved'])
+})
+
+test('a command with a token still returns the result of next and sends the resolved signal', async () => {
+  const { probe, result } = await runCommand(deckArgs('plan N1', NONCE))
+  expect(result).toBe(NEXT_RESULT)
+  expect(bodies(probe).map((body) => body.kind)).toEqual(['command.run:enter', 'command.run:resolved'])
 })
 
 test('the Kory module registers each turn event, and no event twice', () => {
