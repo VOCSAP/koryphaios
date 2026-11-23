@@ -4,6 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractParenBody } from "./_braced-body.ts";
+import { reachedWithin } from "./_bounded-await";
+import type { TurnSignalEvent } from "../desktop/src/main/turn-signal-server.ts";
+import { START_TIMEOUT_MS } from "../desktop/src/main/session-turn-runner.ts";
 import { ATTENTION_CONFIRMATION_DELAY_MS } from "../desktop/src/main/attention.ts";
 
 const SHARED = join(import.meta.dir, "..", "desktop", "src", "shared");
@@ -592,6 +595,298 @@ test("the turn signal tiles name each live PTY by its shell pid and life, and lo
   spawned.at(-1)!.exit(0);
   expect(svc.turnSignalTiles()).toEqual([]);
   expect(tile!.isCurrent(), "a reference taken before the exit is no longer current").toBe(false);
+});
+
+const SKILL_STEP = { command: "kory-session-start", commandClass: "skill" } as const;
+const NO_SOURCE = { status: "refused", reason: "no-source" } as const;
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+const reasonOf = (result: unknown): string => String((result as { reason?: unknown }).reason);
+
+function signalServer() {
+  const subscribed: string[] = [];
+  const unsubscribed: string[] = [];
+  const listeners: Array<(event: TurnSignalEvent) => void> = [];
+  return {
+    subscribed,
+    unsubscribed,
+    listeners,
+    subscribe: (tileId: string, listener: (event: TurnSignalEvent) => void) => {
+      subscribed.push(tileId);
+      listeners.push(listener);
+      return () => void unsubscribed.push(tileId);
+    },
+  };
+}
+
+function servedTile() {
+  const { svc } = setup(SERVED);
+  svc.setTurnSignalUrl(TURN_URL);
+  const server = signalServer();
+  svc.setTurnSignalSubscribe(server.subscribe);
+  const journal: string[] = [];
+  const tile = svc.create({});
+  const run = (id = tile.id) => svc.runSequence(id, { steps: [SKILL_STEP] }, (line) => journal.push(line));
+  return { svc, server, journal, tile, run };
+}
+
+test("a sequence on a served tile takes its hold, subscribes to its signals and reaches the first injection", async () => {
+  const { server, journal, tile, run } = servedTile();
+  const result = await reachedWithin(run().result, "the sequence", 1500);
+  expect(result).toMatchObject({ status: "interrupted", step: 0, typed: false });
+  expect(reasonOf(result)).toMatch(/^injection-/);
+  expect(server.subscribed).toEqual([tile.id]);
+  expect(server.unsubscribed).toEqual([tile.id]);
+  expect(journal).toHaveLength(1);
+});
+
+test("a sequence is refused as no-source when no server is up, the tile is not served, or its PTY is gone", async () => {
+  const noServer = setup(SERVED);
+  noServer.svc.setTurnSignalUrl(TURN_URL);
+  const a = noServer.svc.create({});
+  expect(await noServer.svc.runSequence(a.id, { steps: [SKILL_STEP] }, () => {}).result, "no server subscription").toEqual(NO_SOURCE);
+
+  const unserved = setup({ hostTelemetry: true });
+  unserved.svc.setTurnSignalSubscribe(signalServer().subscribe);
+  const b = unserved.svc.create({});
+  expect(await unserved.svc.runSequence(b.id, { steps: [SKILL_STEP] }, () => {}).result, "no plugin loaded").toEqual(NO_SOURCE);
+
+  const down = servedTile();
+  down.svc.setTurnSignalSubscribe(null);
+  expect(await down.run().result, "the server went away").toEqual(NO_SOURCE);
+
+  const exited = servedTile();
+  spawned.at(-1)!.exit(1);
+  expect(await exited.run().result, "the PTY exited").toEqual(NO_SOURCE);
+});
+
+test("a tile restarted after its PTY exited has a signal source again", async () => {
+  const { svc, tile, run } = servedTile();
+  spawned.at(-1)!.exit(1);
+  expect(await run().result, "exited").toEqual(NO_SOURCE);
+
+  await svc.restart(tile.id);
+  const result = await reachedWithin(run().result, "the restarted tile's sequence", 1500);
+  expect(reasonOf(result)).toMatch(/^injection-/);
+});
+
+test("a second sequence on a tile that holds one is refused, tiles do not cross, and the claim is released at the end", async () => {
+  const { svc, run } = servedTile();
+  const other = svc.create({});
+  const first = run();
+  const second = run();
+  const elsewhere = run(other.id);
+  expect(await second.result).toEqual({ status: "refused", reason: "sequence-active" });
+  for (const [name, handle] of [["first", first], ["other tile", elsewhere]] as const) {
+    expect(reasonOf(await reachedWithin(handle.result, name, 1500)), name).toMatch(/^injection-/);
+  }
+  expect(reasonOf(await reachedWithin(run().result, "the released tile", 1500)), "free again").toMatch(/^injection-/);
+});
+
+test("cancelSequence and overrideQuiescence reach the running sequence and say whether one ran", async () => {
+  const { svc, tile, run } = servedTile();
+  expect(svc.cancelSequence(tile.id), "nothing runs yet").toBe(false);
+  expect(svc.overrideQuiescence(tile.id), "nothing runs yet").toBe(false);
+
+  const handle = run();
+  expect(svc.overrideQuiescence(tile.id), "a sequence holds the tile").toBe(true);
+  expect(svc.cancelSequence(tile.id)).toBe(true);
+  expect(await reachedWithin(handle.result, "the cancelled sequence", 1500)).toEqual({
+    status: "interrupted",
+    step: 0,
+    typed: false,
+    reason: "operator-cancelled",
+  });
+  expect(svc.cancelSequence(tile.id), "it ended").toBe(false);
+  expect(svc.overrideQuiescence(tile.id), "it ended").toBe(false);
+});
+
+test("the operator's out-of-turn stop ends a running sequence before it types", async () => {
+  const { svc, tile, run } = servedTile();
+  spawned.at(-1)!.output("busy");
+  const handle = run();
+  await settle();
+
+  await svc.injectCommandOutOfTurn(tile.id, "/stop", 0);
+  expect(await reachedWithin(handle.result, "the interrupted sequence", 1500)).toEqual({
+    status: "interrupted",
+    step: 0,
+    typed: false,
+    reason: "revoked",
+  });
+});
+
+test("a sequence hears the signals of its own PTY generation only", async () => {
+  const own = servedTile();
+  spawned.at(-1)!.output("busy");
+  const signalled = own.run();
+  await settle();
+  own.server.listeners[0]!({
+    type: "source-changed",
+    loadId: "other-load",
+    generation: own.svc.turnSignalTiles()[0]!.generation,
+  });
+  expect(await reachedWithin(signalled.result, "the signalled sequence", 1500)).toEqual({
+    status: "interrupted",
+    step: 0,
+    typed: false,
+    reason: "source-changed",
+  });
+
+  const foreign = servedTile();
+  spawned.at(-1)!.output("busy");
+  const stale = foreign.run();
+  await settle();
+  foreign.server.listeners[0]!({ type: "source-changed", loadId: "other-load", generation: {} });
+  expect(await reachedWithin(stale.result, "the signal of another generation", 1500)).toEqual({
+    status: "interrupted",
+    step: 0,
+    typed: false,
+    reason: "revoked",
+  });
+});
+
+const END_STEP = { command: "kory-session-end", commandClass: "skill" } as const;
+const OTHER_URL = "http://127.0.0.1:4343/signal";
+const NONCE_TOKEN = /kory-step:([0-9a-f]{16})/g;
+
+function clearComposer() {
+  const rule = String.fromCodePoint(0x2500).repeat(120);
+  const lines = Array<string>(40).fill("");
+  lines[0] = rule;
+  lines[1] = String.fromCodePoint(0x276f);
+  lines[2] = rule;
+  return { status: "ready", snapshot: { cols: 120, rows: 40, lines, cursor: { x: 0, y: 1 }, revision: 1 } };
+}
+
+/** A tile whose screen reads as an empty composer, and the PTY writes it receives. */
+function typing(svc: InstanceType<typeof SessionService>): string[] {
+  const internals = svc as unknown as {
+    screenGuard: { read: (id: string) => unknown };
+    pty: { write: (id: string, data: string) => boolean };
+  };
+  internals.screenGuard.read = () => clearComposer();
+  const writes: string[] = [];
+  const write = internals.pty.write.bind(internals.pty);
+  internals.pty.write = (id, data) => (writes.push(data), write(id, data));
+  return writes;
+}
+
+function signalsOf(tile: ReturnType<typeof servedTile>) {
+  const generation = tile.svc.turnSignalTiles()[0]!.generation;
+  let seq = 0;
+  return (signal: Record<string, unknown>): void =>
+    tile.server.listeners.at(-1)!({ type: "signal", signal: { ...signal, seq: ++seq }, loadId: "load-1", generation } as TurnSignalEvent);
+}
+
+test("overrideQuiescence types the next step while a background task still runs", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  const handle = tile.svc.runSequence(tile.tile.id, { steps: [SKILL_STEP, END_STEP] }, () => {});
+  await settle();
+  const nonce = [...writes.join("").matchAll(NONCE_TOKEN)][0]![1];
+  const send = signalsOf(tile);
+  send({ kind: "command.run:enter", command: SKILL_STEP.command, args: `kory-step:${nonce}`, origin: "composer" });
+  send({ kind: "command.run:resolved", command: SKILL_STEP.command });
+  send({ kind: "turn.start", turnId: "turn-1", commandSeq: 1 });
+  send({ kind: "turn.complete", turnId: "turn-1", reason: "answer", isAborted: false, backgroundTasks: 1 });
+  await settle();
+  expect(writes.join(""), "the background task is waited for").not.toContain(END_STEP.command);
+
+  expect(tile.svc.overrideQuiescence(tile.tile.id)).toBe(true);
+  await settle();
+  expect(writes.join("")).toContain(`/${END_STEP.command} kory-step:`);
+  tile.svc.cancelSequence(tile.tile.id);
+  await reachedWithin(handle.result, "the cancelled sequence", 1500);
+});
+
+test("the start timer exists once the first step is written, and firing it stops the sequence", async () => {
+  const timers: Array<() => void> = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms !== START_TIMEOUT_MS) return realSetTimeout(callback, ms, ...rest);
+    timers.push(callback);
+    return 0 as unknown as NodeJS.Timeout;
+  }) as unknown as typeof setTimeout;
+  try {
+    const tile = servedTile();
+    typing(tile.svc);
+    const handle = tile.run();
+    await settle();
+    expect(timers).toHaveLength(1);
+    timers[0]!();
+    expect(await reachedWithin(handle.result, "the timed out sequence", 1500)).toEqual({
+      status: "interrupted",
+      step: 0,
+      typed: true,
+      reason: "no-command-run",
+    });
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("each sequence types its own 16 hex nonce", async () => {
+  const tile = servedTile();
+  const writes = typing(tile.svc);
+  for (let run = 0; run < 2; run++) {
+    const handle = tile.run();
+    await settle();
+    tile.svc.cancelSequence(tile.tile.id);
+    await reachedWithin(handle.result, "the cancelled sequence", 1500);
+  }
+  const nonces = [...writes.join("").matchAll(NONCE_TOKEN)].map((match) => match[1]);
+  expect(nonces).toHaveLength(2);
+  expect(new Set(nonces).size, "two distinct nonces").toBe(2);
+});
+
+test("an injection that fails reaches the Deck error sink under the session scope", async () => {
+  const errors: Array<[string, string]> = [];
+  onDeckError((scope, text) => errors.push([scope, text]));
+  try {
+    const tile = servedTile();
+    (tile.svc as unknown as { injector: { injectCommand: () => Promise<never> } }).injector.injectCommand = () =>
+      Promise.reject(new Error("write failed"));
+    expect(await reachedWithin(tile.run().result, "the failed sequence", 1500)).toMatchObject({ status: "interrupted", reason: "revoked" });
+    expect(errors.some(([scope, text]) => scope === "session" && text.includes("injection of step 1 failed"))).toBe(true);
+  } finally {
+    onDeckError(() => {});
+  }
+});
+
+test("a server replaced with another URL refuses the PTY launched for the old one until it restarts", async () => {
+  const { svc, tile, run } = servedTile();
+  svc.setTurnSignalUrl(null);
+  svc.setTurnSignalSubscribe(null);
+  svc.setTurnSignalUrl(OTHER_URL);
+  svc.setTurnSignalSubscribe(signalServer().subscribe);
+  expect(await run().result, "the PTY posts to the old server").toEqual(NO_SOURCE);
+
+  spawned.at(-1)!.exit(1);
+  await svc.restart(tile.id);
+  expect(spawned.at(-1)!.env.KORY_TURN_SIGNAL_URL).toBe(OTHER_URL);
+  expect(reasonOf(await reachedWithin(run().result, "the restarted tile's sequence", 1500))).toMatch(/^injection-/);
+});
+
+test("a holdTile that throws synchronously rejects the run and leaves the tile free", async () => {
+  const { svc, run } = servedTile();
+  const hold = spyOn(svc, "holdTile").mockImplementationOnce(() => {
+    throw new Error("hold refused");
+  });
+  await expect(run().result).rejects.toThrow("hold refused");
+  hold.mockRestore();
+  expect(reasonOf(await reachedWithin(run().result, "the second run", 1500)), "not sequence-active").toMatch(/^injection-/);
+});
+
+test("the stop of a busy tile ends its sequence, returns its outcome and types nothing", async () => {
+  const { svc, tile, run } = servedTile();
+  const writes = typing(svc);
+  spawned.at(-1)!.output("busy");
+  const handle = run();
+  await settle();
+
+  expect(await svc.injectCommandOutOfTurn(tile.id, "/stop", 0)).toBe("busy-timeout");
+  expect(await reachedWithin(handle.result, "the interrupted sequence", 1500)).toMatchObject({ reason: "revoked" });
+  expect(writes).toEqual([]);
 });
 
 function attentionProbe() {

@@ -69,6 +69,7 @@ export class TileInjector {
   private readonly turnGenerations = new Map<string, object>()
   private readonly holds = new Map<string, { generation: object; done: () => void; onRevoke: (reason: string) => void }>()
   private readonly revocations = new Map<string, { count: number; reason: string }>()
+  private readonly holdGuards = new WeakSet<() => boolean>()
   private readonly timing: InjectorTiming
 
   constructor(
@@ -179,7 +180,9 @@ export class TileInjector {
       } else {
         this.holds.set(id, { generation, done, onRevoke })
       }
-      const turn = Promise.resolve().then(() => fn(() => this.turnGenerations.get(id) === generation))
+      const isCurrent = () => this.turnGenerations.get(id) === generation
+      if (onRevoke !== undefined) this.holdGuards.add(isCurrent)
+      const turn = Promise.resolve().then(() => fn(isCurrent))
       turn.then(done, done)
       return turn
     })
@@ -224,7 +227,7 @@ export class TileInjector {
     const life = this.pty.life(id)
     if (!life) return 'no-terminal'
     const idle = await this.waitIdle(id, idleWaitMs)
-    if (isCurrent && !isCurrent()) throw this.staleTurn(id)
+    if (isCurrent && !isCurrent()) throw this.staleTurn(id, this.holdGuards.has(isCurrent))
     if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
     if (!idle) return 'busy-timeout'
     const firstRefusal = this.refusal(id)
@@ -233,7 +236,7 @@ export class TileInjector {
       if (isCurrent && !isCurrent()) throw this.staleTurn(id)
       if (!this.pty.write(id, '\x1b')) return 'no-terminal'
       await new Promise<void>((res) => this.clock.setTimeout(res, this.timing.settleMs))
-      if (isCurrent && !isCurrent()) throw this.staleTurn(id)
+      if (isCurrent && !isCurrent()) throw this.staleTurn(id, this.holdGuards.has(isCurrent))
       if (!this.pty.isAlive(id) || this.pty.life(id) !== life) return 'no-terminal'
       const secondRefusal = this.refusal(id)
       if (secondRefusal) return secondRefusal
@@ -260,9 +263,11 @@ export class TileInjector {
     return 'refused-modal'
   }
 
-  private staleTurn(id: string): Error {
+  /** `ended`: a hold's own caller ended it while an injection waited, so the refusal is a log line, not an error. */
+  private staleTurn(id: string, ended = false): Error {
     const error = new Error(`injection callback refused for ${id}: its turn is no longer current`)
-    this.report(error.message)
+    if (ended) this.info('session', error.message)
+    else this.report(error.message)
     return error
   }
 

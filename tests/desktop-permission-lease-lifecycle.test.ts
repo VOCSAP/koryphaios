@@ -214,6 +214,7 @@ function executeLeaseCreationFailure(source: string) {
         calls.push(`spawn:${env.KORY_PERMISSION_LEASE}`);
         onStarted?.({ id, cols: 91, rows: 31 });
       },
+      life: () => null,
     },
     revokePermissionLeaseHandle: () => {},
     clearSessionHandoff: () => {},

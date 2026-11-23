@@ -3918,6 +3918,7 @@ app.whenReady().then(async () => {
       listProcesses: () => listWin32Processes()
     })
     service.setTurnSignalUrl(turnSignalServer?.url ?? null)
+    service.setTurnSignalSubscribe(turnSignalServer?.subscribe ?? null)
   } catch (e) {
     reportError('turn-signal', 'turn signal server failed to start', e)
   }

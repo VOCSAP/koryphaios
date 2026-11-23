@@ -638,6 +638,110 @@ test('a hold revoked while the Escape settles never types its command', async ()
   await held
 })
 
+test('a hold that ends while its injection waits for the tile to go idle is logged, not reported as an error', async () => {
+  for (const end of ['revoked', 'settled'] as const) {
+    let endHold = (): void => undefined
+    let polls = 0
+    const { injector, writes, reports, logs } = fixture({
+      lastOutputAt: () => {
+        if (polls++ > 0) return null
+        endHold()
+        return Date.now()
+      }
+    })
+    const { hold, held, finish } = await openHold(injector)
+    endHold = end === 'revoked' ? () => void injector.revokeHold('t1', 'operator typed') : finish
+
+    const message = await refusalMessage(hold.inject('/clear', { escape: false, idleWaitMs: 1000 }))
+    finish()
+    await held
+
+    expect(message, end).toContain('injection callback refused for t1')
+    expect(writes, end).toEqual([])
+    expect(reports, end).toEqual([])
+    expect(logs, end).toContain('injection callback refused for t1: its turn is no longer current')
+  }
+})
+
+test('a hold revoked while the Escape settles is logged, not reported as an error', async () => {
+  const clock = new FakeClock()
+  const { injector, reports, logs } = fixture({ clock })
+  const { hold, held, finish } = await openHold(injector)
+
+  const outcome = refusalMessage(hold.inject('/clear'))
+  await microtasks()
+  injector.revokeHold('t1', 'operator typed')
+  clock.advance(5)
+
+  expect(await outcome).toContain('injection callback refused for t1')
+  expect(reports).toEqual([])
+  expect(logs).toContain('injection callback refused for t1: its turn is no longer current')
+  finish()
+  await held
+})
+
+test('a turn without a hold still reports a stale injection on a tile that held one before', async () => {
+  const clock = new FakeClock()
+  let lastOutputAt: number | null = 0
+  const { injector, writes, reports, logs } = fixture({
+    turnCeilingMs: 50,
+    lastOutputAt: () => lastOutputAt,
+    clock
+  })
+  const earlier = await openHold(injector)
+  earlier.finish()
+  await earlier.held
+
+  let started!: () => void
+  const injectionStarted = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const stale = injector.serializeTile('t1', async (inject) => {
+    const attempt = inject('/compact', 1_000)
+    started()
+    return attempt
+  })
+  await reachedWithin(injectionStarted, 'the stale injection idle wait')
+  let currentStarted!: () => void
+  const currentReady = new Promise<void>((resolve) => {
+    currentStarted = resolve
+  })
+  let releaseCurrent!: () => void
+  const currentReleased = new Promise<void>((resolve) => {
+    releaseCurrent = resolve
+  })
+  const current = injector.serializeTile('t1', async () => {
+    currentStarted()
+    await currentReleased
+    return 'current-finished'
+  })
+
+  for (let i = 0; i < 9; i++) {
+    clock.advance(5)
+    await Promise.resolve()
+  }
+  clock.advance(5)
+  await reachedWithin(currentReady, 'the newer turn after stale idle wait')
+  lastOutputAt = null
+  clock.advance(5)
+  for (let i = 0; i < 2; i++) await Promise.resolve()
+  clock.advance(5)
+  const staleError = await stale.then(
+    () => '',
+    (error) => (error instanceof Error ? error.message : String(error))
+  )
+  releaseCurrent()
+  expect(await current).toBe('current-finished')
+
+  expect(staleError).toContain('injection callback refused for t1')
+  expect(writes).toEqual([])
+  expect(reports).toEqual([
+    'injection turn of tile t1 still running after 50 ms; its queue is released',
+    'injection callback refused for t1: its turn is no longer current'
+  ])
+  expect(logs).not.toContain('injection callback refused for t1: its turn is no longer current')
+})
+
 test('an injection with escape false refuses a draft that appeared while it waited for the tile to go idle', async () => {
   let draft = false
   let polls = 0

@@ -99,7 +99,8 @@ import { TileTelemetryPublisher } from './peer-telemetry-publisher'
 import { TELEMETRY_CAPABILITY_ENV } from '../../../shared/peer-telemetry'
 import { windowsPtyFor } from '../shared/windows-pty'
 import type { TilePty } from './tile-process-owner'
-import type { TileRef } from './turn-signal-server'
+import { runSequence, type SequenceHandle, type SequenceInput } from './session-turn-runner'
+import type { TileRef, TurnSignalServer } from './turn-signal-server'
 import { isToolNameList } from '../shared/tool-names'
 import { assertClodexContextInput, clodexContextEnv, isClodexContextTokens } from '../shared/clodex-context'
 
@@ -674,9 +675,17 @@ export class SessionService extends EventEmitter {
 
   /** Where the tiles report their turns; null while no server is up. */
   private turnSignalUrl: string | null = null
+  private turnSignalSubscribe: TurnSignalServer['subscribe'] | null = null
+  /** The signal URL each PTY life was launched with: a tile has a source only while its PTY posts to the current server. */
+  private turnSignalSources = new WeakMap<object, string>()
+  private sequenceSlots = new Map<string, { handle: SequenceHandle | null }>()
 
   setTurnSignalUrl(url: string | null): void {
     this.turnSignalUrl = url
+  }
+
+  setTurnSignalSubscribe(subscribe: TurnSignalServer['subscribe'] | null): void {
+    this.turnSignalSubscribe = subscribe
   }
 
   /** The live PTYs of the tiles: the turn-signal server decides which tile owns a connection from these alone. */
@@ -689,6 +698,11 @@ export class SessionService extends EventEmitter {
       tiles.push({ id, generation, ptyPid, isCurrent: () => this.pty.life(id) === generation })
     }
     return tiles
+  }
+
+  private hasTurnSignalSource(id: string): boolean {
+    const life = this.pty.life(id)
+    return life !== null && this.turnSignalUrl !== null && this.turnSignalSources.get(life) === this.turnSignalUrl
   }
 
   /** Sandboxed tiles use container telemetry and do not install the host hook. */
@@ -1970,6 +1984,8 @@ export class SessionService extends EventEmitter {
         sessionEnv,
         ({ id, cols, rows }) => this.screenGuard.start(id, cols, rows)
       )
+      const spawnedLife = this.pty.life(def.id)
+      if (spawnedLife !== null && sessionEnv.KORY_TURN_SIGNAL_URL !== '') this.turnSignalSources.set(spawnedLife, sessionEnv.KORY_TURN_SIGNAL_URL)
       if (telemetryLaunchHash !== null && !wrapped) this.peerTelemetryPublisher?.start(def.id, telemetryLaunchHash)
       if (handoffLaunch) this.sessionHandoffLaunches.set(def.id, handoffLaunch)
       this.deadWriteReported.delete(def.id)
@@ -2155,8 +2171,53 @@ export class SessionService extends EventEmitter {
     return this.injector.revokeHold(id, reason)
   }
 
-  /** The operator's stop: it never waits behind a queued directive or a magic_compact. */
+  runSequence(id: string, input: SequenceInput, journal: (line: string) => void): SequenceHandle {
+    const subscribe = this.turnSignalSubscribe
+    const slot: { handle: SequenceHandle | null } = { handle: null }
+    const handle = runSequence(
+      {
+        holdTile: async (tile, fn) => this.holdTile(tile, fn),
+        subscribe: (tile, listener) => subscribe!(tile, listener),
+        life: (tile) => this.pty.life(tile),
+        hasSource: (tile) => subscribe !== null && this.hasTurnSignalSource(tile),
+        tryClaim: (tile) => {
+          if (this.sequenceSlots.has(tile)) return null
+          this.sequenceSlots.set(tile, slot)
+          return () => {
+            this.sequenceSlots.delete(tile)
+          }
+        },
+        clock: { setTimeout, clearTimeout },
+        mintNonce: () => randomBytes(8).toString('hex'),
+        journal,
+        reportError: (message, error) => reportError('session', message, error)
+      },
+      id,
+      input
+    )
+    slot.handle = handle
+    return handle
+  }
+
+  /** Cancels the sequence running in tile `id`; false when none runs. */
+  cancelSequence(id: string): boolean {
+    const handle = this.sequenceSlots.get(id)?.handle
+    if (!handle) return false
+    handle.cancel()
+    return true
+  }
+
+  /** Types the next step of the sequence in tile `id` without waiting for background tasks; false when none runs. */
+  overrideQuiescence(id: string): boolean {
+    const handle = this.sequenceSlots.get(id)?.handle
+    if (!handle) return false
+    handle.override()
+    return true
+  }
+
+  /** The operator's stop: it never waits behind a queued directive or a magic_compact, and it ends the tile's running hold. */
   injectCommandOutOfTurn(id: string, command: string, idleWaitMs: number): Promise<DirectiveOutcome> {
+    this.revokeHold(id, 'operator stop')
     return this.injector.injectCommand(id, command, idleWaitMs)
   }
 

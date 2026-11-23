@@ -858,6 +858,38 @@ describe("a hold on a tile ends with its terminal", () => {
       await held;
     }));
 
+  test("the operator's out-of-turn stop ends the running hold", () =>
+    withTile(async (service, id) => {
+      const { hold, release, held } = await openServiceHold(service, id);
+      const stop = service.injectCommandOutOfTurn(id, "/stop", 0);
+      expect(hold.isCurrent()).toBe(false);
+      expect(await reachedWithin(hold.revoked, "the revocation")).toBe("operator stop");
+      await reachedWithin(stop, "the stop");
+      release();
+      await held;
+    }));
+
+  test("the operator's out-of-turn stop types its text, with a running hold and without one", () =>
+    withTile(async (service, id, pty) => {
+      const rule = String.fromCodePoint(0x2500).repeat(120);
+      const lines = Array<string>(40).fill("");
+      lines[0] = rule;
+      lines[1] = String.fromCodePoint(0x276f);
+      lines[2] = rule;
+      const clearComposer = { status: "ready", snapshot: { cols: 120, rows: 40, lines, cursor: { x: 0, y: 1 }, revision: 1 } };
+      (service as unknown as { screenGuard: { read: () => unknown } }).screenGuard.read = () => clearComposer;
+
+      expect(await reachedWithin(service.injectCommandOutOfTurn(id, "/stop-one", 0), "the stop without a hold")).toBe("written");
+      expect(pty.writes.join("")).toContain("/stop-one");
+
+      const { hold, release, held } = await openServiceHold(service, id);
+      expect(await reachedWithin(service.injectCommandOutOfTurn(id, "/stop-two", 0), "the stop with a hold")).toBe("written");
+      expect(hold.isCurrent()).toBe(false);
+      expect(pty.writes.join("")).toContain("/stop-two");
+      release();
+      await held;
+    }));
+
   test("a spontaneous exit of the PTY, clean or not, revokes it", () =>
     withTile(async (service, id, pty) => {
       const { hold, release, held } = await openServiceHold(service, id);
