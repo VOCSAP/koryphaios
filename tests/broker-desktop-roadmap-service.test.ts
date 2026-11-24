@@ -179,6 +179,92 @@ test("list/upsert/archive round-trip against a live broker", async () => {
   expect(withArchived.map((i) => i.id)).toContain(created.id);
 });
 
+// The broker stamps a content date with `new Date().toISOString()`, one
+// millisecond at a time: two writes served in the same millisecond carry the
+// same date, so a date that must differ is written only after the clock has
+// passed the one it is compared with.
+// The wall clock is only the condition waited on: the budget runs on the
+// monotonic clock, which a wall clock set backwards cannot stall.
+interface ClockPastIo {
+  now: () => string;
+  yieldTurn: () => Promise<void>;
+  elapsedMs: () => number;
+}
+const realClockPastIo: ClockPastIo = {
+  now: () => new Date().toISOString(),
+  yieldTurn: () => new Promise((resolve) => setImmediate(resolve)),
+  elapsedMs: () => performance.now(),
+};
+
+async function clockPast(date: string | null, io: ClockPastIo = realClockPastIo): Promise<void> {
+  if (date === null) throw new Error("a write that must move the content date returned none");
+  const deadline = io.elapsedMs() + 1_000;
+  while (io.now() <= date) {
+    if (io.elapsedMs() > deadline) throw new Error(`the clock did not move past ${date}`);
+    await io.yieldTurn();
+  }
+}
+
+test("clockPast waits while the clock still reads the date it is compared with", async () => {
+  const date = "2026-01-01T00:00:00.000Z";
+  const reads = [date, date, "2026-01-01T00:00:00.001Z"];
+  let turns = 0;
+  await clockPast(date, {
+    now: () => reads.shift() ?? "2026-01-01T00:00:00.002Z",
+    yieldTurn: async () => {
+      turns += 1;
+    },
+    elapsedMs: () => 0,
+  });
+  expect(turns, "one turn for each read that still shows the date").toBe(2);
+});
+
+test("clockPast refuses a missing date and gives up on its own budget", async () => {
+  await expect(clockPast(null)).rejects.toThrow("returned none");
+  const date = "2026-01-01T00:00:00.000Z";
+  let elapsed = 0;
+  let turns = 0;
+  const outcome = await reachedWithin(
+    clockPast(date, {
+      now: () => date,
+      yieldTurn: () =>
+        new Promise<void>((resolve) => setImmediate(resolve)).then(() => {
+          elapsed += 500;
+          turns += 1;
+        }),
+      elapsedMs: () => elapsed,
+    }).then(
+      () => "returned",
+      (error: unknown) => String(error)
+    ),
+    "clockPast on a clock that never moves"
+  );
+  expect(outcome).toContain("did not move past");
+  expect(turns, "it gives up at the first check after 1000 ms, not at 1000 ms and not later").toBe(3);
+});
+
+test("the real clockPast budget runs on a clock that a wall clock set backwards cannot move", () => {
+  const wallClock = Date.now;
+  Date.now = () => -1;
+  try {
+    const first = realClockPastIo.elapsedMs();
+    const second = realClockPastIo.elapsedMs();
+    expect(first, "the budget clock does not read the wall clock").toBeGreaterThanOrEqual(0);
+    expect(second).toBeGreaterThanOrEqual(first);
+  } finally {
+    Date.now = wallClock;
+  }
+});
+
+test("the real clockPast hands the turn to the event loop, not to a microtask", async () => {
+  let ran = false;
+  setImmediate(() => {
+    ran = true;
+  });
+  await realClockPastIo.yieldTurn();
+  expect(ran, "a turn of the event loop passed before the wait ended").toBe(true);
+});
+
 test("the idle sweep keeps a card's content date, the operator stop and the dispatch writes move it", async () => {
   const endpoint = { url: broker.url, token: null };
   const key = "github.com/acme/deck-content-date";
@@ -188,32 +274,40 @@ test("the idle sweep keeps a card's content date, the operator stop and the disp
   const created = await upsertRoadmap(endpoint, key, { title: "Content date", kind: "idea", status: "idea" });
   expect(typeof created.content_updated_at).toBe("string");
 
+  await clockPast(created.content_updated_at);
   const planned = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "planned" });
   expect(planned.content_updated_at).not.toBe(created.content_updated_at);
+  await clockPast(planned.content_updated_at);
   const dequeued = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "planned" });
   expect(dequeued.content_updated_at).toBe(planned.content_updated_at);
 
+  await clockPast(planned.content_updated_at);
   const assigned = await upsertRoadmap(endpoint, key, { id: created.id, status: "in_progress", queue: null });
   expect(assigned.content_updated_at).not.toBe(planned.content_updated_at);
 
   const locked = await upsertRoadmap(endpoint, key, { id: created.id, locked: true });
   expect(locked.locked).toBe(true);
+  await clockPast(assigned.content_updated_at);
   const swept = await upsertRoadmap(endpoint, key, idleSweepRequest(locked));
   expect(swept.status).toBe("planned");
   expect(swept.content_updated_at).toBe(assigned.content_updated_at);
   expect(await dateOf(created.id)).toBe(assigned.content_updated_at);
 
   const reassigned = await upsertRoadmap(endpoint, key, { id: created.id, status: "in_progress", queue: null });
+  await clockPast(reassigned.content_updated_at);
   const stopped = await upsertRoadmap(endpoint, key, operatorStopRequest(reassigned));
   expect(stopped.status).toBe("planned");
   expect(stopped.content_updated_at).not.toBe(reassigned.content_updated_at);
 
+  await clockPast(stopped.content_updated_at);
   const appended = await appendRoadmapContext(endpoint, created.id, "directive report");
   expect(appended.content_updated_at).not.toBe(stopped.content_updated_at);
 
   await upsertRoadmap(endpoint, key, { id: created.id, queue: 1 });
+  await clockPast(appended.content_updated_at);
   const done = await upsertRoadmap(endpoint, key, { id: created.id, queue: null, status: "done" });
   expect(done.status).toBe("done");
+  expect(typeof done.content_updated_at, "the write that closes the card still dates its content").toBe("string");
   expect(done.content_updated_at).not.toBe(appended.content_updated_at);
 });
 
