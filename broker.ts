@@ -7375,11 +7375,9 @@ function handleRoadmapReorder(
     const ranksBefore = new Map<string, number>();
     const queueBefore: { id: string; queue: number }[] = [];
     if (BROKER_MODE === "replica") {
-      for (const row of db
-        .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
-        .all(projectKey) as { id: string; queue: number; status: RoadmapStatus }[]) {
+      for (const row of queueRowsOf(projectKey)) {
         ranksBefore.set(row.id, row.queue);
-        if (!isTerminalStatus(row.status)) queueBefore.push({ id: row.id, queue: row.queue });
+        if (!terminalForQueue(row)) queueBefore.push({ id: row.id, queue: row.queue });
       }
     }
     // Unqueue everything first: the per-id UPDATE below re-stamps the kept ones.
@@ -7401,7 +7399,10 @@ function handleRoadmapReorder(
       }
     });
     if (BROKER_MODE === "replica") {
-      journalQueueMutation(projectKey, diffToDeltaOps(queueToWaves(queueBefore), waves), ranksBefore);
+      const wavesForUpstream = waves
+        .map((wave) => wave.filter((id) => !terminalForQueue(getRoadmapRow(id))))
+        .filter((wave) => wave.length > 0);
+      journalQueueMutation(projectKey, diffToDeltaOps(queueToWaves(queueBefore), wavesForUpstream), ranksBefore);
       clearRankOnlyDirty(projectKey);
     }
   });
@@ -9867,6 +9868,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       JSON.stringify(remote),
       remote.id,
     ]);
+    if (isTerminalStatus(content.status)) unnameTerminalCard(local.project_key, remote.id);
   } else if (
     // A lock replicated without a hitch leaves this row CLEAN, so without
     // this branch the sweep protection below is unreachable for it: the
@@ -9922,6 +9924,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       remote.id,
     ]);
     log.info(`roadmap sync: card ${remote.id} diverged from the upstream, operator arbitration needed`);
+    if (isTerminalStatus(content.status)) unnameTerminalCard(local.project_key, remote.id);
   }
 
   // Queue and locks travel outside the content protocol and are applied on
@@ -9961,6 +9964,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
 let queueRevsRefusalLogged = false;
 
 function refuseQueueRevs(why: string): void {
+  queueRevsDoubt = why;
   if (queueRevsRefusalLogged) return;
   queueRevsRefusalLogged = true;
   log.warn(`roadmap sync: pull queue_revs refused (${why}), upstream queue revisions left as they were`);
@@ -10083,8 +10087,12 @@ async function syncPullPass(): Promise<void> {
     const nextRev = typeof res.body.next_rev === "number" ? res.body.next_rev : since;
     const finalPage = res.body.items.length < SYNC_PULL_LIMIT_MAX;
     applyPulledPage(res.body.items, nextRev, finalPage ? res.body.queue_revs : undefined);
-    if (finalPage) return;
+    if (finalPage) {
+      if (res.body.queue_revs === undefined) refuseQueueRevs("it is absent: the upstream predates queue-delta");
+      return;
+    }
   }
+  queueRevsDoubt = "the pull stopped at its page cap";
   log.warn("roadmap sync: pull stopped at the page cap, continuing on the next pass");
 }
 
@@ -10204,11 +10212,18 @@ function parseWithheld(text: string): WithheldRanks {
  */
 let queueFrozenProjects = new Set<string>();
 /**
- * Projects whose last acknowledged mutation moved the upstream revision this
- * replica has not adopted yet; the next final pull page clears it. Sending the
- * next entry before would quote the revision its own predecessor just moved.
+ * Projects whose revision a terminal card's content push just moved upstream
+ * (it clears the rank); the next final pull page clears the mark. Sending an
+ * entry before would quote the revision that push moved.
  */
 const queueRevStaleProjects = new Set<string>();
+/**
+ * Why the running pass could not bring the upstream's revisions up to date, or
+ * null: the revisions of its final pull page were refused or absent, or the pull
+ * stopped at its page cap. The stored ones may then be behind the upstream's,
+ * and an entry not sent yet would quote them.
+ */
+let queueRevsDoubt: string | null = null;
 const QUEUE_REFUSALS_KEPT = 20;
 const syncQueueRefusals: RoadmapQueueOutboxRefusal[] = [];
 
@@ -10247,7 +10262,7 @@ function queueCoveredCards(): Set<string> {
  * (`known`), after the operations of the entries ahead of it. Only the cards
  * queued here or named by `named` take part, so a card another operator queued
  * meanwhile is neither removed nor moved, and a terminal card (the upstream
- * refuses an operation on it) is left out.
+ * refuses an operation on it, see `terminalForQueue`) is left out.
  */
 function compactQueueOps(
   projectKey: string,
@@ -10257,13 +10272,9 @@ function compactQueueOps(
 ): QueueDeltaOp[] {
   const live = (id: string): boolean => {
     const row = getRoadmapRow(id);
-    return row !== null && !isTerminalStatus(row.status as RoadmapStatus);
+    return row !== null && !terminalForQueue(row);
   };
-  const local = (
-    db
-      .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
-      .all(projectKey) as { id: string; queue: number; status: string }[]
-  ).filter((row) => !isTerminalStatus(row.status as RoadmapStatus));
+  const local = queueRowsOf(projectKey).filter((row) => !terminalForQueue(row));
   const relevant = new Set([...local.map((row) => row.id), ...queueDeltaCardIds(named)]);
   let waves = queueToWaves(
     Object.entries(known)
@@ -10348,21 +10359,37 @@ function directiveWaveRefusal(projectKey: string, id: string, kind: string, rank
   return directive === undefined ? null : `directive item '${directive}' must be in a singleton wave`;
 }
 
+interface QueueStateRow {
+  id: string;
+  queue: number;
+  status: string;
+  sync_state: string | null;
+  sync_remote: string | null;
+}
+
+/**
+ * A card the upstream refuses in a queue operation: terminal here, or waiting in
+ * conflict against an upstream row that is terminal (its local status still
+ * reads live and its local rank stays).
+ */
+function terminalForQueue(row: Pick<QueueStateRow, "id" | "status" | "sync_state" | "sync_remote"> | null): boolean {
+  if (row === null) return false;
+  if (isTerminalStatus(row.status as RoadmapStatus)) return true;
+  if (readSyncState(row.sync_state) !== "conflict") return false;
+  const remote = parseSyncRemote(row.id, row.sync_remote);
+  return remote !== null && isTerminalStatus(remote.status);
+}
+
 /** The queued rows of a project as they stand, to be read before a write that moves one rank. */
-function queueRowsOf(projectKey: string): { id: string; queue: number; status: string }[] {
+function queueRowsOf(projectKey: string): QueueStateRow[] {
   return db
-    .query("SELECT id, queue, status FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
-    .all(projectKey) as { id: string; queue: number; status: string }[];
+    .query("SELECT id, queue, status, sync_state, sync_remote FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
+    .all(projectKey) as QueueStateRow[];
 }
 
 /** Journals the rank one card was just written with, against the queue `queueBefore` as it stood before the write. */
-function journalRankMove(
-  projectKey: string,
-  queueBefore: { id: string; queue: number; status: string }[],
-  id: string,
-  rank: number | null
-): void {
-  const live = queueBefore.filter((row) => !isTerminalStatus(row.status as RoadmapStatus));
+function journalRankMove(projectKey: string, queueBefore: QueueStateRow[], id: string, rank: number | null): void {
+  const live = queueBefore.filter((row) => !terminalForQueue(row));
   journalQueueMutation(
     projectKey,
     rankMoveToDeltaOps(live, id, rank),
@@ -10437,7 +10464,6 @@ function applyQueueDeltaAck(entry: QueueOutboxRow, response: RoadmapQueueDeltaRe
       ]);
     }
   });
-  queueRevStaleProjects.add(entry.project_key);
 }
 
 /** The upstream refused the mutation: the ranks go back to the upstream's, the entry goes, the refusal stays visible. */
@@ -10501,9 +10527,14 @@ class QueueDeliveryError extends Error {
  * carry a timestamp or a request id that would make every pass a new line.
  */
 const syncQueueDeltaFailures = new Map<string, { cause: string; message: string }>();
+/** Terminal cards the content push of the running pass held back, per project, for a mutation sent and not answered. */
+const syncQueueHeldTerminals = new Map<string, string[]>();
 
 function noteQueueDeltaFailure(entry: QueueOutboxRow, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const held = syncQueueHeldTerminals.get(entry.project_key) ?? [];
+  const message =
+    (error instanceof Error ? error.message : String(error)) +
+    (held.length > 0 ? `; terminal card(s) ${held.join(", ")} wait for it` : "");
   const cause = `${error instanceof QueueDeliveryError ? error.status : "transport"}:${entry.mutation_id}`;
   if (syncQueueDeltaFailures.get(entry.project_key)?.cause !== cause) {
     log.error(
@@ -10538,7 +10569,7 @@ async function syncQueueDeltaPass(): Promise<void> {
   }
 }
 
-/** Throws when the upstream could not be reached or did not settle the mutation; returns when it was held back or answered. */
+// Throws for retryable non-delivery or a visible hold; returns after an ack, a handled refusal, or a transient local wait.
 async function sendQueueMutation(head: QueueOutboxRow): Promise<void> {
   // The pass read its heads before sending another project's: a gesture
   // journaled since is in the row, not in the copy.
@@ -10547,18 +10578,18 @@ async function sendQueueMutation(head: QueueOutboxRow): Promise<void> {
   const ops = JSON.parse(entry.ops) as QueueDeltaOp[];
   let expected = entry.expected_queue_rev;
   if (entry.sent_at === null) {
-    if (queueRevStaleProjects.has(entry.project_key)) return;
     const unpushed = queueDeltaCardIds(ops).find((id) => getRoadmapRow(id)?.sync_base_rev === null);
-    if (unpushed !== undefined) {
-      const refused = syncRefusedPushes.get(unpushed);
-      if (refused) {
-        throw new QueueDeliveryError(
-          `the mutation waits for card ${unpushed}, which the upstream refuses to take: ${refused.message}`,
-          0
-        );
-      }
-      return;
+    const refused = unpushed === undefined ? undefined : syncRefusedPushes.get(unpushed);
+    if (unpushed !== undefined && refused) {
+      throw new QueueDeliveryError(
+        `the mutation waits for card ${unpushed}, which the upstream refuses to take: ${refused.message}`,
+        0
+      );
     }
+    if (queueRevsDoubt !== null) {
+      throw new QueueDeliveryError(`held: upstream queue revisions not adopted this pass (${queueRevsDoubt})`, 0);
+    }
+    if (unpushed !== undefined || queueRevStaleProjects.has(entry.project_key)) return;
     expected = adoptedUpstreamQueueRev(entry.project_key);
     if (expected === null) return;
     db.run("UPDATE roadmap_queue_outbox SET expected_queue_rev = ?, sent_at = datetime('now') WHERE seq = ?", [
@@ -10641,6 +10672,7 @@ async function syncPushPass(): Promise<void> {
       `SELECT * FROM roadmap_items WHERE ${SYNC_PENDING_PUSH_WHERE}${skipClause} ORDER BY content_rev LIMIT ?`
     )
     .all(...skipped, SYNC_PUSH_BATCH) as RoadmapRow[];
+  syncQueueHeldTerminals.clear();
   const coveredByQueueMutation = queueCoveredCards();
   const projectsWithQueueMutation = new Set(
     (db.query("SELECT DISTINCT project_key FROM roadmap_queue_outbox").all() as { project_key: string }[]).map(
@@ -10665,6 +10697,7 @@ async function syncPushPass(): Promise<void> {
       coveredByQueueMutation.has(row.id) &&
       projectsWithSentMutation.has(row.project_key)
     ) {
+      syncQueueHeldTerminals.set(row.project_key, [...(syncQueueHeldTerminals.get(row.project_key) ?? []), row.id]);
       continue;
     }
     const content = pickSyncContent(rowToRoadmapItem(row));
@@ -11543,6 +11576,7 @@ async function relayOutboundMessage(
 async function runSyncPass(): Promise<void> {
   if (syncInFlight) return;
   syncInFlight = true;
+  queueRevsDoubt = null;
   try {
     await syncPullPass();
     await syncContextDocumentPullPass();
