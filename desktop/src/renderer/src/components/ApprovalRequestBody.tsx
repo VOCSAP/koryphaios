@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { Approval, ApprovalTextFlag } from '@shared/types'
+import type { Approval, ApprovalTextFlag, DangerView, DangerViewEntry } from '@shared/types'
 import type { TFn } from '../i18n'
 import { GLYPH_BADGES } from './icons'
 import { displayApprovalText, splitCommandLine } from './approval-display'
@@ -7,7 +7,8 @@ import { displayApprovalText, splitCommandLine } from './approval-display'
 interface Props {
   t: TFn
   approval: Pick<Approval, 'kind' | 'question'> & { text_flags?: ApprovalTextFlag[] }
-  danger?: string | null
+  /** The Deck's own reading of the risky patterns; the agent-sent `danger` list is never shown. */
+  dangerView?: DangerView
   className: string
   /** How a question's agent-written text is shown: the Deck makes its links clickable, another host may not. */
   renderText: (text: string) => ReactNode
@@ -29,7 +30,36 @@ function TextFlagsBadge({ t, flags }: { t: TFn; flags: ApprovalTextFlag[] }): Re
   )
 }
 
-export function ApprovalRequestBody({ t, approval, danger, className, renderText }: Props): React.JSX.Element {
+const VOICE_KEYS = {
+  kory: 'inbox.dangerVoiceKory',
+  user: 'inbox.dangerVoiceUser',
+  repo: 'inbox.dangerVoiceRepo'
+} as const
+
+function DangerRow({ t, entry }: { t: TFn; entry: DangerViewEntry }): React.JSX.Element {
+  return (
+    <span className="approval-danger-row">
+      {/* An id this Deck cannot vouch for is never drawn in the danger colour. */}
+      <span className={entry.known ? 'approval-danger-badge' : 'approval-danger-badge approval-danger-unknown'}>
+        {GLYPH_BADGES.warning}
+        {t('inbox.dangerBadge')}
+        <code>{entry.id}</code>
+      </span>
+      <span className="approval-danger-note">
+        {!entry.known || entry.message === null
+          ? t('inbox.dangerUnknownKory')
+          : t(entry.messageFrom === 'agent' ? 'inbox.dangerVoiceAgent' : VOICE_KEYS[entry.source], {
+              message: displayApprovalText(entry.message)
+            })}
+      </span>
+      {!entry.confirmed && (
+        <span className="approval-danger-note approval-danger-unconfirmed">{t('inbox.dangerUnconfirmed')}</span>
+      )}
+    </span>
+  )
+}
+
+export function ApprovalRequestBody({ t, approval, dangerView, className, renderText }: Props): React.JSX.Element {
   const text = displayApprovalText(approval.question)
   const flags = approval.text_flags ?? []
   if (approval.kind !== 'permission') {
@@ -54,11 +84,10 @@ export function ApprovalRequestBody({ t, approval, danger, className, renderText
       </div>
       <div className="approval-signal">
         {flags.length > 0 && <TextFlagsBadge t={t} flags={flags} />}
-        {danger && (
-          <span className="approval-danger-badge">
-            {GLYPH_BADGES.warning}
-            {t('inbox.dangerBadge')}
-            <code>{danger}</code>
+        {dangerView?.entries.map((entry) => <DangerRow key={entry.id} t={t} entry={entry} />)}
+        {dangerView && dangerView.reevaluation !== 'done' && (
+          <span className="approval-danger-recheck">
+            {t(dangerView.reevaluation === 'partial' ? 'inbox.dangerRecheckPartial' : 'inbox.dangerRecheckUnavailable')}
           </span>
         )}
         {/* Unconditional: a missing badge must never read as "checked and safe". */}

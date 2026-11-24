@@ -34,6 +34,7 @@ interface Row {
   questions: Q[] | null;
   created_at: string;
   origin: { tile_ref: string };
+  danger_view?: unknown;
 }
 
 interface FakeState {
@@ -144,6 +145,16 @@ test("form A: a hook permission offers hand back, Deny and Allow, with the comma
   expect(actions()).toEqual(["inbox.handback", "inbox.permissionDeny", "inbox.permissionAllow"]);
   expect(container.querySelector(".tile-approval-text")?.textContent).toBe("rm -rf build");
   expect(container.querySelector(".tile-approval-title")?.textContent).toBe("Bash: rm -rf build");
+});
+
+test("a danger view leaves the verdict buttons as they are: same order, same classes", () => {
+  const buttons = (): string[] =>
+    [...container.querySelectorAll(".tile-approval-actions > button")].map((b) => `${b.textContent}:${b.className}`);
+  mount([row({})]);
+  const plain = buttons();
+  mount([row({ danger_view: { reevaluation: "partial", entries: [{ id: "kory/rm-recursive", source: "kory", message: "m", messageFrom: "deck", known: true, confirmed: false }] } })]);
+  expect(container.querySelector(".approval-danger-row"), "the view is rendered").not.toBeNull();
+  expect(buttons()).toEqual(plain);
 });
 
 test("a hook question or plan links its URLs, a hook permission command does not", () => {

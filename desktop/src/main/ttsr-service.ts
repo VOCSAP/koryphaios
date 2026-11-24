@@ -885,22 +885,35 @@ export class TtsrService {
     this.approvalsSig = statSig(file)
   }
 
+  /**
+   * The rules a Deck-side check of an approval runs. The tile id comes from
+   * the agent's own request, so it only selects the repo rules: Kory and user
+   * rules apply whatever tile it names, the supervisor's included.
+   */
+  dangerRulesFor(deskId: string): TtsrEffectiveRule[] {
+    return this.enabledRules(false, this.tiles.get(deskId)?.project ?? null)
+  }
+
   private compile(tile: TileState): TtsrEffectiveFile {
+    return { version: 1, rules: this.enabledRules(tile.supervisor, tile.project) }
+  }
+
+  private enabledRules(supervisor: boolean, project: TtsrProjectRef | null): TtsrEffectiveRule[] {
     const disabled = new Set(this.deps.getDisabled())
     const rules: TtsrEffectiveRule[] = KORY_EFFECTIVE_RULES.filter((r) => !disabled.has(ttsrToggleKey('kory', r.id)))
-    if (tile.supervisor) return { version: 1, rules }
+    if (supervisor) return rules
     if (this.global.status === 'ok' && this.global.probed) {
       for (const r of this.global.rules) {
         if (!disabled.has(ttsrToggleKey('user', r.id))) rules.push(qualifyRule('user', r))
       }
     }
-    const state = tile.project ? this.projects.get(tile.project.root) : undefined
+    const state = project ? this.projects.get(project.root) : undefined
     if (state && this.isApproved(state)) {
       for (const r of state.snap.rules) {
         if (!disabled.has(ttsrToggleKey('repo', r.id, state.key))) rules.push(qualifyRule('repo', r))
       }
     }
-    return { version: 1, rules }
+    return rules
   }
 
   /** Compiles, self-checks through the shared parser, writes when changed (or forced). */

@@ -2208,6 +2208,26 @@ export interface ApprovalDanger {
   message: string;
 }
 
+/** One risky-pattern signal as the Deck shows it, resolved from rules the Deck holds. */
+export interface DangerViewEntry {
+  /** `<source>/<rule id>`. */
+  id: string;
+  source: "kory" | "user" | "repo";
+  /** Kory's built-in text for a kory rule, the rule author's text otherwise; null for a kory id the Deck does not know. */
+  message: string | null;
+  /** "deck" when `message` is the text of a rule the Deck holds (or there is none); "agent" when it is the text the agent's hook sent. */
+  messageFrom: "deck" | "agent";
+  /** False only for a kory id absent from the built-in rules. */
+  known: boolean;
+  /** True when the Deck's own evaluation matched; false when only the agent's hook reported it. */
+  confirmed: boolean;
+}
+
+export interface DangerView {
+  reevaluation: "done" | "partial" | "unavailable";
+  entries: DangerViewEntry[];
+}
+
 export interface Approval {
   id: string;
   operator_id: string;
@@ -2219,6 +2239,8 @@ export interface Approval {
   text_flags: ApprovalTextFlag[];
   /** Rules the producer says matched; its absence never means the call is safe. Empty for a row that carries none. */
   danger: ApprovalDanger[];
+  /** Never set by the broker: the Deck adds it before a row reaches a renderer. */
+  danger_view?: DangerView;
   options: string[];
   /** Index into `options` of the answer the agent recommends, null when it names none. Optional on the wire: a broker without the field omits it. */
   recommended?: number | null;

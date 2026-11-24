@@ -53,7 +53,7 @@ test("rows answered on screen or elsewhere, or not waited on by the module, ligh
 function tickProbe(options: { deps?: string | null; fetch?: () => Promise<Approval[]> } = {}) {
   const awaited: string[][] = [];
   const reports: string[] = [];
-  const broadcasts: Approval[][] = [];
+  const broadcasts: Parameters<PendingApprovalsIo<string>["broadcastPending"]>[0][] = [];
   const io: PendingApprovalsIo<string> = {
     deps: () => (options.deps === undefined ? "deps" : options.deps),
     fetchPending: options.fetch ?? (async () => []),
@@ -141,6 +141,96 @@ test("disarmed approvals announce the list as unavailable on every tick", async 
   expect(probe.broadcasts).toEqual([]);
 });
 
+test("the list is enriched with the Deck's danger signal before any consumer receives it", async () => {
+  const list = [approval({ status: "pending", reply_route: "hook", tile_ref: "tile-a" })];
+  const probe = tickProbe({ fetch: async () => list });
+  const view = { reevaluation: "done" as const, entries: [] };
+  probe.io.enrich = async (rows) => rows.map((a) => ({ ...a, danger_view: view }));
+
+  await probe.tick();
+
+  expect(probe.broadcasts).toEqual([[{ ...list[0]!, danger_view: view }]]);
+  expect(probe.awaited, "the tile flags do not wait for the danger check").toEqual([["tile-a"]]);
+});
+
+test("a list still being enriched is never broadcast after a newer one: a call during a tick runs after it", async () => {
+  const old = [approval({ status: "pending", reply_route: "hook", tile_ref: "tile-a" })];
+  const lists: Approval[][] = [old, []];
+  let fetches = 0;
+  const probe = tickProbe({ fetch: async () => lists[fetches++] ?? [] });
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  probe.io.enrich = async (rows) => {
+    if (rows.length > 0) await held;
+    return rows;
+  };
+
+  const first = probe.tick();
+  await Bun.sleep(0);
+  const second = probe.tick();
+  await Bun.sleep(0);
+  expect(fetches, "the second call does not read the broker while the first is enriching").toBe(1);
+  release();
+  await Promise.all([first, second]);
+
+  expect(fetches, "the call made during the tick is not lost").toBe(2);
+  expect(probe.broadcasts, "the newer, empty list is the last one broadcast").toEqual([old, []]);
+});
+
+test("two calls during one tick ask for exactly one more pass", async () => {
+  let fetches = 0;
+  const probe = tickProbe({ fetch: async () => (fetches++, []) });
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  let first = true;
+  probe.io.enrich = async (rows) => {
+    if (first) {
+      first = false;
+      await held;
+    }
+    return rows;
+  };
+
+  const running = probe.tick();
+  await Bun.sleep(0);
+  const second = probe.tick();
+  const third = probe.tick();
+  release();
+  await Promise.all([running, second, third]);
+
+  expect(fetches).toBe(2);
+});
+
+test("a tick that fails does not block the ticks after it", async () => {
+  let fetches = 0;
+  const probe = tickProbe({ fetch: async () => (fetches++, []) });
+  let fail = true;
+  probe.io.enrich = async (rows) => {
+    if (fail) throw new Error("enrich broke");
+    return rows;
+  };
+
+  await expect(probe.tick()).rejects.toThrow("enrich broke");
+  fail = false;
+  await probe.tick();
+
+  expect(fetches, "the next call reads the broker again").toBe(2);
+});
+
+test("a danger view that changes on an unchanged row is broadcast again", async () => {
+  const list = [approval({ status: "pending", reply_route: "hook", tile_ref: "tile-a" })];
+  const probe = tickProbe({ fetch: async () => list });
+  let entries: { id: string; source: "kory"; message: string; messageFrom: "deck"; known: boolean; confirmed: boolean }[] = [];
+  probe.io.enrich = async (rows) => rows.map((a) => ({ ...a, danger_view: { reevaluation: "done" as const, entries } }));
+
+  await probe.tick();
+  entries = [{ id: "kory/rm-recursive", source: "kory", message: "m", messageFrom: "deck", known: true, confirmed: true }];
+  await probe.tick();
+  await probe.tick();
+
+  expect(probe.broadcasts.map((b) => b[0]!.danger_view!.entries.length)).toEqual([0, 1]);
+});
+
 test("the Deck's poll timer runs the tested tick and notifies on the service's needs-you event", () => {
   const index = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   expect(index).toMatch(/const pollPendingApprovals = createPendingApprovalsTick\(/);
@@ -153,6 +243,9 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
   const tickBody = tick.slice(0, tick.indexOf("\n})"));
   expect(tickBody, "the list kept for the Avatar is the one broadcast").toMatch(/broadcastPending: \(list\) => \{\s*lastPendingApprovals = list/);
   expect(tickBody, "an unreadable poll empties the list kept for the Avatar").toMatch(/pendingUnavailable: \(\) => \{\s*lastPendingApprovals = \[\]/);
+  expect(tickBody, "the broadcast list carries the Deck's own danger check, run in the isolated evaluator").toMatch(
+    /enrich: createDangerEnricher\(\{\s*rulesFor: \(tileRef\) => ttsr\.dangerRulesFor\(tileRef\),\s*evaluate: \(rules, call\) => evaluateIsolated\(rules, call,/
+  );
   const avatarClientAssignment = index.indexOf("avatarClient = createAvatarClient(");
   expect(avatarClientAssignment, "the Avatar client is assigned after scope lifecycle setup").toBeGreaterThanOrEqual(0);
   const clientBody = extractParenBody(index, index.indexOf("(", avatarClientAssignment));

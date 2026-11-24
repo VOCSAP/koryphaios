@@ -1,5 +1,8 @@
 import type { Approval } from './approval-auth'
 import { awaitsModuleVerdict } from '../shared/hook-await'
+import type { DangerView } from '../shared/types'
+
+type PendingApproval = Approval & { danger_view?: DangerView }
 
 /**
  * Tiles whose Claude Code module is waiting on an operator verdict: an open
@@ -17,7 +20,9 @@ export interface PendingApprovalsIo<Deps> {
   deps(): Deps | null
   fetchPending(deps: Deps): Promise<Approval[]>
   setHookAwaited(tiles: ReadonlySet<string>): void
-  broadcastPending(list: Approval[]): void
+  /** Attaches the Deck's own danger signal before any consumer sees the list; never rejects. */
+  enrich?(list: Approval[]): Promise<PendingApproval[]>
+  broadcastPending(list: PendingApproval[]): void
   /** No list could be read this tick: a consumer holding the last one must drop it. */
   pendingUnavailable?(): void
   report(text: string, err?: unknown): void
@@ -44,7 +49,29 @@ export function createPendingApprovalsTick<Deps>(io: PendingApprovalsIo<Deps>): 
     failing = true
     io.report(text, err)
   }
-  return async () => {
+  // One tick at a time: an older list still being enriched must never be
+  // broadcast after a newer one. A call during a tick asks for one more pass,
+  // so a refresh requested right after a verdict still reads fresh rows.
+  let running: Promise<void> | null = null
+  let again = false
+  const loop = async (): Promise<void> => {
+    do {
+      again = false
+      await tick()
+    } while (again)
+  }
+  return () => {
+    if (running) {
+      again = true
+      return running
+    }
+    running = loop().finally(() => {
+      running = null
+    })
+    return running
+  }
+
+  async function tick(): Promise<void> {
     const deps = io.deps()
     if (!deps) return unavailable()
     let list: Approval[]
@@ -55,10 +82,12 @@ export function createPendingApprovalsTick<Deps>(io: PendingApprovalsIo<Deps>): 
     }
     failing = false
     io.setHookAwaited(hookAwaitedTiles(list))
-    const signature = list.map((a) => `${a.id}:${a.status}`).join(',')
+    const shown: PendingApproval[] = io.enrich ? await io.enrich(list) : list
+    // The view changes without the row when the operator toggles a rule.
+    const signature = shown.map((a) => `${a.id}:${a.status}:${a.danger_view ? JSON.stringify(a.danger_view) : ''}`).join(',')
     if (signature !== lastSignature) {
       lastSignature = signature
-      io.broadcastPending(list)
+      io.broadcastPending(shown)
     }
   }
 }

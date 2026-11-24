@@ -302,6 +302,8 @@ import {
   type SpawnGrantStore
 } from './approval-service'
 import { createPendingApprovalsTick } from './hook-attention'
+import { createDangerEnricher } from './danger-view'
+import { evaluateIsolated } from '../shared/ttsr-probe'
 import { pendingQuestionTarget } from './pending-question-target'
 import { matchPermissionDialog, permissionDialogShown } from './permission-dialog'
 import { describeUnknownDialog, trustPromptShown, unknownDialogOnScreen, type AttentionEvent } from './attention'
@@ -2102,6 +2104,11 @@ const pollPendingApprovals = createPendingApprovalsTick({
   deps: () => approvals.deps(),
   fetchPending: fetchPendingApprovals,
   setHookAwaited: (tiles) => service.setHookAwaited(tiles),
+  enrich: createDangerEnricher({
+    rulesFor: (tileRef) => ttsr.dangerRulesFor(tileRef),
+    evaluate: (rules, call) => evaluateIsolated(rules, call, (message, e) => reportError('ttsr', message, e)),
+    report: (text, err) => reportError('approvals', text, err)
+  }),
   broadcastPending: (list) => {
     lastPendingApprovals = list
     broadcast('approvals:pending', list)

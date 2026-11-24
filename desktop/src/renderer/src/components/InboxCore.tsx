@@ -522,6 +522,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                 <ApprovalRequestBody
                   t={t}
                   approval={open.approval}
+                  dangerView={open.approval.danger_view}
                   className="inbox-modal-text"
                   renderText={renderText}
                 />

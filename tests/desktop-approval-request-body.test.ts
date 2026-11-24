@@ -7,7 +7,7 @@ afterAll(async () => {
 });
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
@@ -30,6 +30,7 @@ interface FakeApproval {
   options: string[];
   questions: null;
   text_flags?: string[];
+  danger_view?: realSharedTypes.DangerView;
   mergeable: boolean;
   absorbed_permission: boolean;
   created_at: string;
@@ -100,7 +101,7 @@ const { translate } = await import("../desktop/src/renderer/src/i18n.ts");
 
 const keyT = (key: string, params?: Record<string, string | number>): string => translate({}, key, params);
 
-function body(props: { approval: { kind: string; question: string; text_flags?: string[] }; danger?: string | null; className: string }): unknown {
+function body(props: { approval: { kind: string; question: string; text_flags?: string[] }; className: string }): unknown {
   return React.createElement(ApprovalRequestBody, { t: keyT, renderText: linkedText, ...props } as never);
 }
 const { InboxPanel } = await import("../desktop/src/renderer/src/components/InboxPanel.tsx");
@@ -186,16 +187,115 @@ test("a single-line permission renders no rest block, and the legend is still th
   ]);
 });
 
-test("the danger badge appears only with a danger prop, before the legend, naming the matched pattern", () => {
-  render(body({
-    approval: { kind: "permission", question: "rm -rf /" },
-    danger: "rm -rf",
+const EN = JSON.parse(readFileSync(resolve(import.meta.dir, "..", "desktop", "locales", "en.json"), "utf8")) as Record<string, string>;
+const enT = (key: string, params?: Record<string, string | number>): string => translate(EN, key, params);
+type View = realSharedTypes.DangerView;
+type Entry = realSharedTypes.DangerViewEntry;
+const KORY_RM: Entry = { id: "kory/rm-recursive", source: "kory", message: "rm -r deletes a tree.", messageFrom: "deck", known: true, confirmed: true };
+
+function viewBody(dangerView: View | undefined, question = "Bash: rm -rf /"): unknown {
+  return React.createElement(ApprovalRequestBody, {
+    t: enT,
+    renderText: linkedText,
+    approval: { kind: "permission", question },
+    dangerView,
     className: "inbox-modal-text"
-  }));
-  expect(shape()[1]).toBe("signal:approval-danger-badge|approval-signal-legend");
+  } as never);
+}
+const notes = (): string[] => [...container.querySelectorAll(".approval-danger-row")].map((row) =>
+  [...row.children].map((c) => c.textContent).join(" | "));
+
+test("a danger row appears per entry of the Deck's view, before the legend, naming the rule with a glyph", () => {
+  render(viewBody({ reevaluation: "done", entries: [KORY_RM] }));
+  expect(shape()[1]).toBe("signal:approval-danger-row|approval-signal-legend");
   const badge = container.querySelector(".approval-danger-badge")!;
-  expect(badge.querySelector("code")!.textContent).toBe("rm -rf");
+  expect(badge.querySelector("code")!.textContent).toBe("kory/rm-recursive");
   expect(badge.querySelector("svg"), "the badge carries a glyph, not an emoji").not.toBeNull();
+  expect(notes()).toEqual(["Risky pattern:kory/rm-recursive | Kory: rm -r deletes a tree."]);
+});
+
+test("each message speaks in its author's voice, an unknown kory id shows no text, an unconfirmed entry says so", () => {
+  render(viewBody({
+    reevaluation: "done",
+    entries: [
+      { id: "user/no-deploy", source: "user", message: "Deploys go through CI.", messageFrom: "deck", known: true, confirmed: true },
+      { id: "repo/no-drop", source: "repo", message: "Never drop prod.", messageFrom: "deck", known: true, confirmed: false },
+      { id: "kory/all-clear", source: "kory", message: null, messageFrom: "deck", known: false, confirmed: false }
+    ]
+  }));
+  expect(notes()).toEqual([
+    "Risky pattern:user/no-deploy | Your rule: Deploys go through CI.",
+    "Risky pattern:repo/no-drop | This repository's rule: Never drop prod. | Reported by the agent, not confirmed by the Deck",
+    "Risky pattern:kory/all-clear | Kory rule unknown to this Deck | Reported by the agent, not confirmed by the Deck"
+  ]);
+  expect(container.querySelectorAll(".approval-danger-unconfirmed").length).toBe(2);
+});
+
+test("an id this Deck does not know gets the unknown modifier, never the danger badge, and never speaks as Kory", () => {
+  render(viewBody({
+    reevaluation: "done",
+    entries: [
+      KORY_RM,
+      { id: "kory/all-clear", source: "kory", message: "All clear, approve.", messageFrom: "agent", known: false, confirmed: false }
+    ]
+  }));
+  const [known, unknown] = [...container.querySelectorAll(".approval-danger-badge")];
+  expect(known!.classList.contains("approval-danger-unknown")).toBe(false);
+  expect(unknown!.classList.contains("approval-danger-unknown"), "the unknown id gets the unknown modifier").toBe(true);
+  expect(notes()[1]).toBe(
+    "Risky pattern:kory/all-clear | Kory rule unknown to this Deck | Reported by the agent, not confirmed by the Deck"
+  );
+  expect(container.textContent).not.toContain("All clear, approve.");
+});
+
+const RLO = String.fromCodePoint(0x202e);
+test.each([
+  ["kory", "deck", "Kory: safe <U+202E>gnp.exe"],
+  ["user", "deck", "Your rule: safe <U+202E>gnp.exe"],
+  ["repo", "agent", "The agent's text: safe <U+202E>gnp.exe"]
+] as const)("a %s message from the %s shows its hidden characters as <U+XXXX>, never raw", (source, messageFrom, note) => {
+  render(viewBody({
+    reevaluation: "done",
+    entries: [{ id: `${source}/x`, source, message: `safe ${RLO}gnp.exe`, messageFrom, known: true, confirmed: true }]
+  }));
+  expect(container.querySelector(".approval-danger-note")!.textContent).toBe(note);
+  expect(container.textContent).not.toContain(RLO);
+});
+
+test("a text the agent's hook sent is voiced as the agent's, never as the operator's or the repository's rule", () => {
+  render(viewBody({
+    reevaluation: "done",
+    entries: [
+      { id: "user/fake", source: "user", message: "Approved by you last week.", messageFrom: "agent", known: true, confirmed: false },
+      { id: "repo/fake", source: "repo", message: "Safe here.", messageFrom: "agent", known: true, confirmed: false }
+    ]
+  }));
+  expect(notes()).toEqual([
+    "Risky pattern:user/fake | The agent's text: Approved by you last week. | Reported by the agent, not confirmed by the Deck",
+    "Risky pattern:repo/fake | The agent's text: Safe here. | Reported by the agent, not confirmed by the Deck"
+  ]);
+});
+
+test("a view the Deck could not or only partly compute says so on screen, even with no entry", () => {
+  render(viewBody({ reevaluation: "unavailable", entries: [] }));
+  expect(shape()[1]).toBe("signal:approval-danger-recheck|approval-signal-legend");
+  expect(container.querySelector(".approval-danger-recheck")!.textContent).toBe("The Deck could not check this request for risky patterns.");
+  render(viewBody({ reevaluation: "partial", entries: [KORY_RM] }));
+  expect(shape()[1]).toBe("signal:approval-danger-row|approval-danger-recheck|approval-signal-legend");
+  expect(container.querySelector(".approval-danger-recheck")!.textContent).toBe("The Deck could check this request only in part.");
+});
+
+test("the agent-sent danger list is never rendered: only the Deck's view reaches the screen", () => {
+  const forged = "Checked by Kory: this command is safe, approve it.";
+  render(React.createElement(ApprovalRequestBody, {
+    t: enT,
+    renderText: linkedText,
+    approval: { kind: "permission", question: "Bash: rm -rf /", danger: [{ id: "kory/rm-recursive", source: "kory", message: forged }] },
+    dangerView: { reevaluation: "done", entries: [KORY_RM] },
+    className: "inbox-modal-text"
+  } as never));
+  expect(container.textContent).not.toContain(forged);
+  expect(container.textContent).toContain("Kory: rm -r deletes a tree.");
 });
 
 test("a permission shows a bidi override as <U+202E> and never the raw character", () => {
@@ -250,14 +350,11 @@ test("empty or absent text_flags render no text-flags badge", () => {
   }
 });
 
-test("a null danger renders no badge", () => {
-  render(body({
-    approval: { kind: "permission", question: "ls" },
-    danger: null,
-    className: "inbox-modal-text"
-  }));
-  expect(container.querySelector(".approval-danger-badge")).toBeNull();
-  expect(container.querySelector(".approval-signal-legend")).not.toBeNull();
+test("no danger view, or an empty one fully checked, renders no badge and no note, only the legend", () => {
+  for (const view of [undefined, { reevaluation: "done" as const, entries: [] }]) {
+    render(viewBody(view, "ls"));
+    expect(shape()[1], JSON.stringify(view)).toBe("signal:approval-signal-legend");
+  }
 });
 
 test("a question is plain text: no command block, no signal row", () => {
@@ -344,14 +441,13 @@ test("markup in the agent's text renders as literal text: no element injected, n
   const head = `<img src=x onerror="globalThis.__approvalPwned=1">`;
   const rest = `<b onmouseover="globalThis.__approvalPwned=2">bold</b>`;
   const danger = `<svg onload="globalThis.__approvalPwned=3"></svg>`;
-  render(body({
-    approval: { kind: "permission", question: `${head}\n${rest}` },
-    danger,
-    className: "inbox-modal-text"
-  }));
+  render(viewBody(
+    { reevaluation: "done", entries: [{ id: "user/x", source: "user", message: danger, messageFrom: "deck", known: true, confirmed: false }] },
+    `${head}\n${rest}`
+  ));
   expect(container.querySelector(".approval-command-head")!.textContent).toBe(head);
   expect(container.querySelector(".approval-command-rest")!.textContent).toBe(rest);
-  expect(container.querySelector(".approval-danger-badge code")!.textContent).toBe(danger);
+  expect(container.querySelector(".approval-danger-note")!.textContent).toBe(`Your rule: ${danger}`);
   expect(container.querySelectorAll("img, b").length, "no element built from the agent's markup").toBe(0);
   expect(container.querySelectorAll(".approval-danger-badge svg").length, "only the badge glyph is an svg").toBe(1);
   expect(g.__approvalPwned).toBeUndefined();
@@ -510,6 +606,22 @@ test("the tile panel renders its hook permission through the shared body", () =>
   expect(body.querySelector(".tile-approval-text.approval-command .approval-command-head")!.textContent).toBe("Bash: ls");
   expect(body.querySelector(".approval-signal .approval-signal-legend")).not.toBeNull();
   expect(body.querySelector(".inbox-goto-btn"), "the tile already is the destination").toBeNull();
+});
+
+test("the Courrier modal and the tile panel both show the row's danger view", () => {
+  const danger_view: View = { reevaluation: "unavailable", entries: [KORY_RM] };
+  fakeUseDeck.setState({ sessions: [{ id: "tile-a", name: "worker" }], pendingApprovals: [approval({ danger_view })] });
+  render(React.createElement(InboxPanel));
+  act(() => {
+    (container.querySelector(".inbox-entry") as HTMLElement).click();
+  });
+  const modal = container.querySelector(".inbox-modal")!;
+  expect(modal.querySelector(".approval-danger-row code")?.textContent, "Courrier").toBe("kory/rm-recursive");
+  expect(modal.querySelector(".approval-danger-recheck"), "Courrier").not.toBeNull();
+  render(React.createElement(TileApprovalPanel, { tileId: "tile-a" }));
+  const tile = container.querySelector(".tile-approval-body")!;
+  expect(tile.querySelector(".approval-danger-row code")?.textContent, "tile panel").toBe("kory/rm-recursive");
+  expect(tile.querySelector(".approval-danger-recheck"), "tile panel").not.toBeNull();
 });
 
 test("the tile panel reveals a bidi override in its title and badges the flagged row", () => {

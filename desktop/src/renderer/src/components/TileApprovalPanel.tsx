@@ -54,7 +54,13 @@ export function TileApprovalPanel({ tileId }: { tileId: string }): React.JSX.Ele
       {!folded && (
         <div className="tile-approval-body">
           {!formQuestions(row) && (
-            <ApprovalRequestBody t={t} approval={row} className="tile-approval-text" renderText={linkedText} />
+            <ApprovalRequestBody
+              t={t}
+              approval={row}
+              dangerView={row.danger_view}
+              className="tile-approval-text"
+              renderText={linkedText}
+            />
           )}
           <HookApprovalAnswer key={row.id} approval={row} actionsClassName="tile-approval-actions approval-actions" />
         </div>

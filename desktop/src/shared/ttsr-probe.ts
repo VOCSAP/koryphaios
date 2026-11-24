@@ -14,8 +14,8 @@
 
 import { spawn } from 'node:child_process'
 import { Worker } from 'node:worker_threads'
-import { TTSR_REGEX_BUDGET_MS, fieldCap } from './ttsr-rules'
-import type { TtsrRule } from './ttsr-types'
+import { TTSR_REGEX_BUDGET_MS, extractField, fieldCap, hookEvaluationOrder } from './ttsr-rules'
+import type { TtsrEffectiveRule, TtsrRule } from './ttsr-types'
 
 /** Hard deadline of one isolated match, compile included. */
 export const TTSR_TEST_TIMEOUT_MS = 500
@@ -523,4 +523,122 @@ async function probeUnderBun(
     pending = batch.filter((j) => j.index >= outcome.next)
   }
   return { errors }
+}
+
+/** One tool call to judge the way the hook would, as a PreToolUse call. */
+export interface IsolatedCall {
+  tool_name: string
+  tool_input: Record<string, unknown>
+  cwd?: string
+}
+
+/** Qualified ids of the warn rules that fired, and of those that could not be judged. */
+export interface IsolatedEvaluation {
+  matched: string[]
+  unevaluated: string[]
+}
+
+/** Hard deadline of one rule in evaluateIsolated, worker start included. */
+export const TTSR_EVALUATE_RULE_DEADLINE_MS = 1000
+
+const EVALUATE_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads')
+for (const job of workerData.jobs) {
+  parentPort.postMessage({ type: 'start', index: job.index })
+  let hit = false
+  let error = null
+  try {
+    const re = new RegExp(job.pattern, job.flags)
+    for (const s of job.texts) {
+      re.lastIndex = 0
+      if (re.test(s)) { hit = true; break }
+    }
+  } catch (e) {
+    error = String(e && e.message ? e.message : e)
+  }
+  parentPort.postMessage({ type: 'done', index: job.index, hit, error })
+}
+parentPort.postMessage({ type: 'end' })
+`
+
+type EvaluateMessage =
+  | { type: 'start'; index: number }
+  | { type: 'done'; index: number; hit: boolean; error: string | null }
+  | { type: 'end' }
+
+/**
+ * The warn rules of `rules` that fire on `call`, with the hook's field
+ * extraction and caps, every regex run in a worker restarted after any rule
+ * that passes `ruleDeadlineMs`: the patterns of user and repo rules have no
+ * execution bound of their own. A rule with `paths` is listed unevaluated
+ * rather than judged without its project root. Never rejects.
+ */
+export async function evaluateIsolated(
+  rules: readonly TtsrEffectiveRule[],
+  call: IsolatedCall,
+  onError: WorkerErrorSink,
+  ruleDeadlineMs: number = TTSR_EVALUATE_RULE_DEADLINE_MS,
+  createWorker: (source: string, workerData: unknown) => Worker = (source, workerData) =>
+    new Worker(source, { eval: true, workerData })
+): Promise<IsolatedEvaluation> {
+  const payload = { ...call, hook_event_name: 'PreToolUse' }
+  const applicable = hookEvaluationOrder(rules).filter(
+    (r) => r.mode === 'warn' && r.event === 'PreToolUse' && (r.tools as readonly string[]).includes(call.tool_name)
+  )
+  const unevaluated = applicable.filter((r) => (r.paths?.length ?? 0) > 0).map((r) => r.qualifiedId)
+  const judged = applicable.filter((r) => (r.paths?.length ?? 0) === 0)
+  const jobs = judged.map((r, index) => ({
+    index,
+    pattern: r.pattern,
+    flags: r.flags ?? '',
+    texts: extractField(payload, r.field)
+  }))
+  const hits = new Set<number>()
+  const settledJobs = new Set<number>()
+  let pending = jobs.filter((j) => j.texts.length > 0)
+  for (const j of jobs) if (j.texts.length === 0) settledJobs.add(j.index)
+  while (pending.length > 0) {
+    const batch = pending
+    const next = await new Promise<number>((resolve) => {
+      let settled = false
+      let current = batch[0]!.index
+      const worker = createWorker(EVALUATE_WORKER, { jobs: batch })
+      const settle = (n: number): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        terminate(worker, onError)
+        resolve(n)
+      }
+      // Armed before the first 'start' too: a worker that never starts costs its first rule.
+      let timer = setTimeout(() => settle(current + 1), ruleDeadlineMs)
+      worker.on('message', (m: EvaluateMessage) => {
+        // terminate() is not awaited: a message the worker posted before it died still arrives.
+        if (settled) return
+        if (m.type === 'start') {
+          current = m.index
+          clearTimeout(timer)
+          timer = setTimeout(() => settle(current + 1), ruleDeadlineMs)
+        } else if (m.type === 'done') {
+          settledJobs.add(m.index)
+          if (m.error !== null) {
+            onError(`guard rule ${judged[m.index]!.qualifiedId} could not be evaluated`, m.error)
+            unevaluated.push(judged[m.index]!.qualifiedId)
+          } else if (m.hit) hits.add(m.index)
+        } else settle(Number.POSITIVE_INFINITY)
+      })
+      worker.once('error', (e: Error) => {
+        if (settled) return
+        onError('rule evaluation worker failed', e)
+        settle(current + 1)
+      })
+      worker.once('exit', () => settle(current + 1))
+    })
+    pending = batch.filter((j) => j.index >= next && !settledJobs.has(j.index))
+  }
+  for (const j of jobs) if (!settledJobs.has(j.index)) unevaluated.push(judged[j.index]!.qualifiedId)
+  return {
+    matched: judged.filter((_, i) => hits.has(i)).map((r) => r.qualifiedId),
+    unevaluated
+  }
 }

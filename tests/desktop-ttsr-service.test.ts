@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   appendFileSync,
   existsSync,
@@ -44,9 +45,11 @@ import {
 } from "../desktop/src/main/ttsr-approvals";
 import { TTSR_DISABLED_MAX, isTtsrToggleKey, sanitizeTtsrDisabled, ttsrToggleKey } from "../desktop/src/main/ttsr-toggles";
 import { matchIsolated } from "../desktop/src/main/ttsr-regex-worker";
-import { MAX_FILE_BYTES, parseEffectiveFile, parseRulesFile, rulesHash } from "../desktop/src/shared/ttsr-rules";
+import { MAX_FILE_BYTES, parseEffectiveFile, parseRulesFile, qualifyRule, rulesHash } from "../desktop/src/shared/ttsr-rules";
 import { fileIdentityMismatch, readBounded } from "../desktop/src/shared/ttsr-fs";
-import { KORY_RULES } from "../desktop/src/shared/ttsr-builtin";
+import { KORY_EFFECTIVE_RULES, KORY_RULES } from "../desktop/src/shared/ttsr-builtin";
+import { evaluateIsolated } from "../desktop/src/shared/ttsr-probe";
+import type { TtsrRule } from "../desktop/src/shared/ttsr-types";
 import { extractBracedBody } from "./_braced-body";
 
 const roots: string[] = [];
@@ -872,6 +875,121 @@ describe("rule test (isolated regex)", () => {
     const res = await matchIsolated("(a|a)*c", "", Array(8).fill("a".repeat(40)), 300);
     expect(res).toEqual({ timedOut: true });
     expect(Date.now() - t0, "the deadline must bound the call").toBeLessThan(3000);
+  });
+
+  const warn = (source: "user" | "repo", id: string, extra: Record<string, unknown> = {}) =>
+    qualifyRule(source, rule(id, { tools: ["Bash"], field: "command", mode: "warn", ...extra }) as unknown as TtsrRule);
+  const noErrors = (m: string, e: unknown): void => {
+    throw new Error(`${m}: ${String(e)}`);
+  };
+
+  test("evaluateIsolated returns the warn rules that fire on the call, the hook's deny rules aside", async () => {
+    const res = await evaluateIsolated(
+      [...KORY_EFFECTIVE_RULES, warn("user", "no-build", { pattern: "\\bbuild\\b" })],
+      { tool_name: "Bash", tool_input: { command: "git add -A && rm -rf build" } },
+      noErrors
+    );
+    expect(res).toEqual({ matched: ["kory/rm-recursive", "user/no-build"], unevaluated: [] });
+  });
+
+  test("evaluateIsolated cuts a catastrophic rule at its deadline and still judges the rules after it", async () => {
+    const t0 = Date.now();
+    const res = await evaluateIsolated(
+      [warn("user", "slow", { pattern: "(a|a)*c" }), warn("repo", "after", { pattern: "a{10}" })],
+      { tool_name: "Bash", tool_input: { command: "a".repeat(40) } },
+      () => undefined,
+      100
+    );
+    expect(res).toEqual({ matched: ["repo/after"], unevaluated: ["user/slow"] });
+    expect(Date.now() - t0, "the deadline must bound the call").toBeLessThan(3000);
+  });
+
+  test("evaluateIsolated applies a rule's flags", async () => {
+    const res = await evaluateIsolated(
+      [warn("user", "no-deploy", { pattern: "deploy", flags: "i" })],
+      { tool_name: "Bash", tool_input: { command: "DEPLOY now" } },
+      noErrors
+    );
+    expect(res).toEqual({ matched: ["user/no-deploy"], unevaluated: [] });
+  });
+
+  test("evaluateIsolated terminates the worker of a rule past its deadline before it answers", async () => {
+    const events: string[] = [];
+    const silent = Object.assign(new EventEmitter(), {
+      terminate: async () => {
+        events.push("terminate");
+        return 0;
+      },
+    });
+    const res = await evaluateIsolated(
+      [warn("user", "stuck", { pattern: "x" })],
+      { tool_name: "Bash", tool_input: { command: "x" } },
+      noErrors,
+      20,
+      () => silent as never
+    );
+    events.push("result");
+    expect(res).toEqual({ matched: [], unevaluated: ["user/stuck"] });
+    expect(events).toEqual(["terminate", "result"]);
+  });
+
+  test("evaluateIsolated ignores a result the worker posted after its rule's deadline", async () => {
+    const late = Object.assign(new EventEmitter(), {
+      // The worker had already posted its answer: it is delivered while terminate() runs.
+      terminate: async () => {
+        late.emit("message", { type: "done", index: 0, hit: true, error: null });
+        return 0;
+      },
+    });
+    const res = await evaluateIsolated(
+      [warn("user", "late", { pattern: "x" })],
+      { tool_name: "Bash", tool_input: { command: "x" } },
+      noErrors,
+      20,
+      () => late as never
+    );
+    expect(res).toEqual({ matched: [], unevaluated: ["user/late"] });
+  });
+
+  test("evaluateIsolated lists a pattern that does not compile as unevaluated, with a trace", async () => {
+    const traces: string[] = [];
+    const res = await evaluateIsolated(
+      [warn("user", "broken", { pattern: "(" })],
+      { tool_name: "Bash", tool_input: { command: "x" } },
+      (m) => void traces.push(m)
+    );
+    expect(res).toEqual({ matched: [], unevaluated: ["user/broken"] });
+    expect(traces).toEqual(["guard rule user/broken could not be evaluated"]);
+  });
+
+  test("evaluateIsolated lists a rule with paths as unevaluated instead of judging it without its project", async () => {
+    const res = await evaluateIsolated(
+      [warn("user", "scoped", { pattern: "rm", paths: ["src/**"] })],
+      { tool_name: "Bash", tool_input: { command: "rm -rf x" }, cwd: "/p/src" },
+      noErrors
+    );
+    expect(res).toEqual({ matched: [], unevaluated: ["user/scoped"] });
+  });
+
+  test("dangerRulesFor: the tile named by the request selects only the repo rules", async () => {
+    const h = harness();
+    mkdirSync(join(h.dir, "config"), { recursive: true });
+    writeFileSync(h.globalFile, fileOf(rule("g-one")));
+    const cwd = tmp();
+    writeRepoRules(cwd, fileOf(rule("r-one")));
+    h.answer.value = true;
+    h.svc.tick();
+    const worker = randomUUID();
+    const sup = randomUUID();
+    h.svc.fileFor({ id: worker, cwd });
+    h.svc.fileFor({ id: sup, cwd, supervisor: true });
+    await flush();
+    h.disabled.push("kory/rm-recursive");
+    const ids = (deskId: string): string[] => h.svc.dangerRulesFor(deskId).map((r) => r.qualifiedId);
+    const kory = KORY_IDS.filter((k) => k !== "kory/rm-recursive");
+    expect(ids(worker)).toEqual([...kory, "user/g-one", "repo/r-one"]);
+    expect(ids(sup), "naming the supervisor tile does not drop the user rules").toEqual([...kory, "user/g-one"]);
+    expect(ids("not-a-tile")).toEqual([...kory, "user/g-one"]);
   });
 
   test("a worker timeout reaches the rule tester as a timed-out result, not as a miss", async () => {

@@ -5603,12 +5603,46 @@ body:has(.rm-modal) .rm-conflict-modal {
   border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent);
   border-radius: 999px;
   color: var(--danger);
+  /* The label stays on one line in a narrow tile; only the id below may break. */
+  white-space: nowrap;
 }
 
 .approval-danger-badge code,
 .approval-text-flags code {
   font-family: var(--mono);
+  white-space: normal;
   word-break: break-all;
+}
+
+/* One line per matched rule: the pill names the rule, the note says whose
+   words follow, so a user or repo message is never read as Kory's. */
+.approval-danger-row {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.approval-danger-note {
+  min-width: 0;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+
+.approval-danger-unconfirmed {
+  font-style: italic;
+}
+
+.approval-danger-badge.approval-danger-unknown {
+  border-color: color-mix(in srgb, var(--fg-dim) 50%, transparent);
+  color: var(--fg-dim);
+}
+
+.approval-danger-recheck {
+  flex: 1 1 100%;
+  color: var(--fg-dim);
 }
 
 .approval-signal-legend {
