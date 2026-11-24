@@ -1475,6 +1475,18 @@ test("deck_run_directive lists a refused injection under refused with its outcom
   expect(r.journal).toContain('directive /clear -> "alpha": refused-modal');
 });
 
+test("a plain directive hands its name, not its typed text, to the tile so a sequence banner can say what waits", async () => {
+  const r = recorder([session("t1", "alpha")]);
+  const named: string[] = [];
+  r.deps.injectCommand = (_tileId, keys, directive) => {
+    named.push(`${directive}|${keys}`);
+    return Promise.resolve("written");
+  };
+  await runDirectiveForCaller("clear", ["alpha"], undefined, "team-lead-ab12", r.deps);
+  await runDirectiveForCaller("compact", ["alpha"], "keep the plan", "team-lead-ab12", r.deps);
+  expect(named).toEqual(["clear|/clear", "compact|/compact keep the plan"]);
+});
+
 test("deck_run_directive reports a target still busy at the report cap as pending, and journals its later outcome", async () => {
   const r = recorder([session("t1", "alpha")]);
   const busy = deferred<string>();

@@ -601,7 +601,14 @@ export interface SessionSequenceView {
   background: number | null
   /** Why the sequence stopped; null while it runs or when it is done. */
   reason: SequenceStopReason | null
+  /** Unique per sequence run in this Deck run: a dismissed view is refused by it, never by its phase, since a run can stop without ever running. */
+  run: number
+  /** Directives queued behind this sequence, oldest first; each leaves the list when its own turn starts. */
+  waitingDirectives: SequenceWaitingDirective[]
 }
+
+/** A directive name, never its typed text: a compact prompt stays in the main process. */
+export type SequenceWaitingDirective = RoadmapDirective | 'clear_reload'
 
 export type SessionSkillRefusal =
   | 'bad-request'

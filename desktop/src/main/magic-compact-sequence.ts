@@ -8,7 +8,7 @@ import type { DirectiveOutcome } from './session-service'
 import type { InTurnInject } from './tile-injector'
 
 export interface MagicCompactHost {
-  serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T>
+  serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>, directive: 'magic_compact'): Promise<T>
   waitForOutput<T>(id: string, timeoutMs: number, test: (buf: string) => T | null): Promise<T | null>
 }
 
@@ -53,5 +53,5 @@ export function runMagicCompactInTurn(
     const why = res?.kind === 'shim' ? 'plugin shim (not intercepted)' : 'no banner within timeout'
     journal(`magic_compact -> "${peerId}": ${why}, fell back to /compact (${o})`)
     return o
-  })
+  }, 'magic_compact')
 }

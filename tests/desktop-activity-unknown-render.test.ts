@@ -330,7 +330,7 @@ test("TerminalTile docks the verdict panel of a request its module waits on, and
 test("TerminalTile lays its own sequence banner between the head and the terminal, and no other tile's", () => {
   renderTerminalTile(session({}));
   expect(container.querySelector(".tile-seq") === null).toBe(true);
-  const view = { spawnGeneration: 1, moment: "start", step: 0, total: 2, phase: "running", background: null, reason: null };
+  const view = { spawnGeneration: 1, moment: "start", step: 0, total: 2, phase: "running", background: null, reason: null, run: 1, waitingDirectives: [] };
   act(() => fakeDeck.setState({ sessionSequences: { "tile-b": { ...view, tileId: "tile-b" } } }));
   expect(container.querySelector(".tile-seq") === null, "a neighbour's sequence must not show here").toBe(true);
   act(() => fakeDeck.setState({ sessionSequences: { "tile-a": { ...view, tileId: "tile-a" } } }));

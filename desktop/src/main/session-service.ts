@@ -11,7 +11,9 @@ import type {
   PeerStatus,
   SessionDef,
   SessionLiveStatus,
+  SequenceWaitingDirective,
   SessionRuntime,
+  SessionSequenceView,
   SessionSkillRefusal,
   SessionSkillRunResult,
   SessionStatus,
@@ -472,6 +474,8 @@ export class SessionService extends EventEmitter {
           this.dropTileFeed(id)
           this.runtime.delete(id)
           this.spawnGenerations.delete(id)
+          this.lastSequenceViews.delete(id)
+          this.waitingDirectives.delete(id)
           this.persist()
           this.broadcast()
         }
@@ -676,6 +680,10 @@ export class SessionService extends EventEmitter {
   /** The signal URL each PTY life was launched with: a tile has a source only while its PTY posts to the current server. */
   private turnSignalSources = new WeakMap<object, string>()
   private sequenceSlots = new Map<string, { handle: SequenceHandle | null }>()
+  /** One entry per queued directive, so two waiting on the same tile each leave on their own turn. */
+  private waitingDirectives = new Map<string, Array<{ directive: SequenceWaitingDirective }>>()
+  private lastSequenceViews = new Map<string, Omit<SessionSequenceView, 'waitingDirectives'>>()
+  private sequenceRuns = 0
   private sessionSkillsStateDir: string | null = null
   private sequenceJournal: (line: string) => void = () => {}
   /** The tile's one subscription to the signal server; `generation` is the PTY life of the last event it carried. */
@@ -1199,6 +1207,8 @@ export class SessionService extends EventEmitter {
       this.runtime.delete(id)
       this.spawnGenerations.delete(id)
       this.outputAt.delete(id)
+      this.lastSequenceViews.delete(id)
+      this.waitingDirectives.delete(id)
       this.persist()
       this.broadcast()
     }
@@ -1285,6 +1295,8 @@ export class SessionService extends EventEmitter {
     this.defs = []
     this.runtime.clear()
     this.outputAt.clear()
+    this.lastSequenceViews.clear()
+    this.waitingDirectives.clear()
     this.persist()
     this.broadcast()
   }
@@ -1377,6 +1389,8 @@ export class SessionService extends EventEmitter {
     }
     this.runtime.clear()
     this.outputAt.clear()
+    this.lastSequenceViews.clear()
+    this.waitingDirectives.clear()
     this.defs = defs.map((d, i) => ({
       ...d,
       color: d.color || paletteColor(this.getConfig().palette ?? DEFAULT_PALETTE, i)
@@ -2227,14 +2241,50 @@ export class SessionService extends EventEmitter {
   }
 
   /** Types a command into tile `id` once its earlier injections are done. */
-  injectCommand(id: string, command: string, idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS): Promise<DirectiveOutcome> {
-    return this.injector.inTurn(id, (isCurrent) => this.injector.injectCommand(id, command, idleWaitMs, isCurrent))
+  injectCommand(
+    id: string,
+    command: string,
+    directive: SequenceWaitingDirective,
+    idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS
+  ): Promise<DirectiveOutcome> {
+    const started = this.queueBehindSequence(id, directive)
+    return this.injector.inTurn(id, (isCurrent) => {
+      started()
+      return this.injector.injectCommand(id, command, idleWaitMs, isCurrent)
+    })
   }
 
   /** Holds tile `id` for a whole injection sequence; injections inside it take no further turn. */
-  serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>): Promise<T> {
-    if (this.sequenceSlots.has(id)) this.sequenceJournal(`a directive on tile ${id} waits behind a running sequence`)
-    return this.injector.serializeTile(id, fn)
+  serializeTile<T>(id: string, fn: (inject: InTurnInject) => Promise<T>, directive: SequenceWaitingDirective): Promise<T> {
+    const started = this.queueBehindSequence(id, directive)
+    return this.injector.serializeTile(id, (inject) => {
+      started()
+      return fn(inject)
+    })
+  }
+
+  /** Lists `directive` on the tile's sequence view while a sequence holds the tile; the returned call ends the wait. */
+  private queueBehindSequence(id: string, directive: SequenceWaitingDirective): () => void {
+    if (!this.sequenceSlots.has(id)) return () => {}
+    this.sequenceJournal(`directive ${directive} on tile ${id} waits behind a running sequence`)
+    const entry = { directive }
+    this.waitingDirectives.set(id, [...(this.waitingDirectives.get(id) ?? []), entry])
+    this.emitSequenceView(id)
+    let pending = true
+    return () => {
+      if (!pending) return
+      pending = false
+      const rest = (this.waitingDirectives.get(id) ?? []).filter((e) => e !== entry)
+      if (rest.length === 0) this.waitingDirectives.delete(id)
+      else this.waitingDirectives.set(id, rest)
+      this.emitSequenceView(id)
+    }
+  }
+
+  private emitSequenceView(id: string): void {
+    const view = this.lastSequenceViews.get(id)
+    if (!view) return
+    this.emit('sequence', { ...view, waitingDirectives: (this.waitingDirectives.get(id) ?? []).map((e) => e.directive) })
   }
 
   /** Holds tile `id` with no ceiling until `fn` settles or the hold is revoked. */
@@ -2251,6 +2301,7 @@ export class SessionService extends EventEmitter {
     const subscribe = this.turnSignalSubscribe
     const slot: { handle: SequenceHandle | null } = { handle: null }
     const spawnGeneration = this.spawnGenerations.get(id) ?? 0
+    const run = ++this.sequenceRuns
     const handle = runSequence(
       {
         holdTile: async (tile, fn) => this.holdTile(tile, fn),
@@ -2264,13 +2315,22 @@ export class SessionService extends EventEmitter {
           return entry !== null && entry.generation === this.pty.life(tile) ? entry.feed.backgroundTasks() : null
         },
         onState: (view) => {
-          this.emit('sequence', { ...view, spawnGeneration })
+          const full = { ...view, spawnGeneration, run }
+          // A revoked sequence reports its stop after its tile was removed or restored: emit it, keep nothing.
+          if (!this.defs.some((d) => d.id === view.tileId) || this.spawnGenerations.get(view.tileId) !== spawnGeneration) {
+            this.emit('sequence', { ...full, waitingDirectives: [] })
+            return
+          }
+          this.lastSequenceViews.set(view.tileId, full)
+          this.emitSequenceView(view.tileId)
         },
         life: (tile) => this.pty.life(tile),
         hasSource: (tile) => subscribe !== null && this.hasTurnSignalSource(tile),
         tryClaim: (tile) => {
           if (this.sequenceSlots.has(tile)) return null
           this.sequenceSlots.set(tile, slot)
+          // A directive queued before this sequence's first view must not re-emit the previous, maybe dismissed, one.
+          this.lastSequenceViews.delete(tile)
           return () => {
             this.sequenceSlots.delete(tile)
           }

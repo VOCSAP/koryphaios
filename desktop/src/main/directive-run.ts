@@ -32,7 +32,7 @@ export const DIRECTIVE_IDLE_WAIT_MS = CONTEXT_CLEAR_IDLE_WAIT_MS
 
 export interface DirectiveRunDeps {
   listSessions(): SessionRuntime[]
-  injectCommand(tileId: string, keys: string): Promise<DirectiveOutcome>
+  injectCommand(tileId: string, keys: string, directive: DeckDirective): Promise<DirectiveOutcome>
   /** Resolves with the outcome of the command that ends the sequence. */
   runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<DirectiveOutcome>
   runClearReload(tileId: string, peerId: string, workstream: string, contextDepositId?: string): Promise<DirectiveOutcome>
@@ -342,7 +342,7 @@ function launchDirective(
         })
         launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       } else {
-        const outcome = deps.injectCommand(t.id, typed).then(
+        const outcome = deps.injectCommand(t.id, typed, cmd).then(
           (o): DirectiveOutcome => {
             try {
               deps.journal(`directive ${keys} -> "${t.peerId}": ${o}`)

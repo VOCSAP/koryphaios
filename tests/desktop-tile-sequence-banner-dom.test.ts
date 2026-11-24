@@ -24,6 +24,8 @@ interface View {
   background: number | null;
   reason: string | null;
   spawnGeneration: number;
+  run: number;
+  waitingDirectives: string[];
 }
 
 interface FakeState {
@@ -48,7 +50,12 @@ const DICT = {
   "tile.seqWaiting": "waits ({count})",
   "tile.seqWaitingNoCount": "waits",
   "tile.seqDone": "done {total}",
-  "tile.seqStopped": "stopped {step}/{total}: {family}"
+  "tile.seqStopped": "stopped {step}/{total}: {family}",
+  "tile.seqDirectiveQueued": "queued: {directives}",
+  "tile.seqDirective.clear": "CLEAR",
+  "tile.seqDirective.compact": "COMPACTION",
+  "tile.seqDirective.magic_compact": "SMART",
+  "tile.seqDirective.clear_reload": "CLEAR-RELOAD"
 };
 
 function initial(): FakeState {
@@ -87,7 +94,11 @@ afterEach(() => {
 });
 
 function view(over: Partial<View>): View {
-  return { tileId: "tile-a", spawnGeneration: 1, moment: "start", step: 0, total: 4, phase: "running", background: null, reason: null, ...over };
+  return { tileId: "tile-a", spawnGeneration: 1, moment: "start", step: 0, total: 4, phase: "running", background: null, reason: null, run: 1, waitingDirectives: [], ...over };
+}
+
+function queued(): string | null {
+  return banner().querySelector(".tile-seq-queued")?.textContent ?? null;
 }
 
 async function mount(v: View | null, state: Partial<FakeState> = {}): Promise<void> {
@@ -197,6 +208,29 @@ for (const [moment, mode, label] of [
     expect(text()).toBe(`${label} 1/4`);
   });
 }
+
+test("a directive queued behind the sequence is named by its translated label", async () => {
+  await mount(view({ waitingDirectives: ["compact"] }));
+  expect(queued()).toBe("queued: COMPACTION");
+  expect(text(), "the sequence line is unchanged").toBe("START 1/4");
+  expect(buttons(), "the wait carries no action of its own").toEqual(["common.cancel"]);
+});
+
+test("several queued directives are listed oldest first, each by its label and never by a command it may not type", async () => {
+  await mount(view({ waitingDirectives: ["clear_reload", "magic_compact", "clear"] }));
+  expect(queued()).toBe("queued: CLEAR-RELOAD, SMART, CLEAR");
+  expect(queued(), "magic_compact may fall back to /compact").not.toContain("/");
+});
+
+test("a directive still queued when the sequence stops stays visible beside the stop", async () => {
+  await mount(view({ phase: "stopped", step: 0, total: 2, reason: "operator-cancelled", waitingDirectives: ["clear"] }));
+  expect(queued()).toBe("queued: CLEAR");
+});
+
+test("no queued directive renders no waiting row", async () => {
+  await mount(view({ phase: "waiting-background", background: 1 }));
+  expect(banner().querySelector(".tile-seq-queued")).toBeNull();
+});
 
 test("a one-step sequence finishes in the singular", async () => {
   await mount(view({ phase: "done", step: 1, total: 1 }));

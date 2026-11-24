@@ -2284,7 +2284,7 @@ const runClearReload = (
 ): Promise<DirectiveOutcome> =>
   runClearReloadInTurn(
     {
-      serializeTile: (id, fn) => service.serializeTile(id, fn),
+      serializeTile: (id, fn) => service.serializeTile(id, fn, 'clear_reload'),
       currentSessionId: (id) => {
         const session = service.list().find((candidate) => candidate.id === id)
         if (!session) throw new Error(`tile "${id}" no longer exists`)
@@ -2320,7 +2320,7 @@ const runClearReload = (
 
 const directiveRunDeps: DirectiveRunDeps = {
   listSessions: () => service.list(),
-  injectCommand: (tileId, keys) => service.injectCommand(tileId, keys),
+  injectCommand: (tileId, keys, directive) => service.injectCommand(tileId, keys, directive),
   runMagicCompact: (tileId, peerId, useMagic, mode) => runMagicCompact(tileId, peerId, useMagic, mode),
   runClearReload: (tileId, peerId, workstream, contextDepositId) =>
     runClearReload(tileId, peerId, workstream, contextDepositId),

@@ -6,6 +6,7 @@ GlobalRegistrator.register();
 
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import * as sharedTypes from "../desktop/src/shared/types.ts";
+import type { SessionSequenceView } from "../desktop/src/shared/types.ts";
 import * as sharedRoadmapSync from "../desktop/src/shared/roadmap-sync.ts";
 import * as sharedInboxPending from "../desktop/src/shared/inbox-pending.ts";
 import * as sharedQuotaNotice from "../desktop/src/shared/quota-notice.ts";
@@ -197,16 +198,19 @@ test("showToast returns false for an identical repeat and true when the repeat r
   expect(useDeck.getState().toastRaw).toBe(true);
 });
 
-const sequenceView = (tileId: string, spawnGeneration = 1) => ({
-  tileId,
-  moment: "start",
-  spawnGeneration,
-  step: 1,
-  total: 2,
-  phase: "waiting-background",
-  background: 2,
-  reason: null
-});
+const sequenceView = (tileId: string, spawnGeneration = 1) =>
+  ({
+    tileId,
+    moment: "start",
+    spawnGeneration,
+    step: 1,
+    total: 2,
+    phase: "waiting-background",
+    background: 2,
+    reason: null,
+    run: 1,
+    waitingDirectives: []
+  }) satisfies SessionSequenceView;
 const pushSequence = (view: unknown) => (listeners.get("onSessionSequence") as unknown as (v: unknown) => void)(view);
 const changeSessions = (ids: string[], spawnGeneration = 1) =>
   (listeners.get("onSessionsChanged") as unknown as (sessions: unknown[]) => void)(
@@ -324,6 +328,20 @@ test("dismissSequence drops the view of that tile only", () => {
   pushSequence(sequenceView("b"));
   useDeck.getState().dismissSequence("a");
   expect(Object.keys(useDeck.getState().sessionSequences)).toEqual(["b"]);
+  changeSessions([]);
+});
+
+test("a dismissed sequence view never comes back from a later emission of the same run, and the next run shows again", () => {
+  changeSessions(["a"]);
+  const stopped = { ...sequenceView("a"), run: 7, phase: "stopped", background: null, reason: "operator-cancelled", waitingDirectives: ["compact"] };
+  pushSequence(stopped);
+  useDeck.getState().dismissSequence("a");
+  pushSequence({ ...stopped, waitingDirectives: [] });
+  expect(useDeck.getState().sessionSequences["a"], "the queued directive starting re-emits the dismissed run").toBeUndefined();
+
+  const next = { ...sequenceView("a"), run: 8, phase: "stopped", background: null, reason: "revoked", waitingDirectives: [] };
+  pushSequence(next);
+  expect(useDeck.getState().sessionSequences["a"], "a run that stops without ever running is still shown").toEqual(next);
   changeSessions([]);
 });
 

@@ -2817,6 +2817,33 @@ code {
   color: var(--fg-dim);
 }
 
+/* Own glyph class: .tile-seq-glyph would take the amber of a waiting or faulted sequence. */
+.tile-seq-queued {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  color: var(--fg-dim);
+}
+
+.tile-seq-queued-glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* The labels are lowercase so a list reads as one sentence; the line still starts with a capital. */
+.tile-seq-queued-text::first-letter {
+  text-transform: uppercase;
+}
+
+.tile-seq-queued-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tile-seq-actions {
   display: flex;
   flex-shrink: 0;

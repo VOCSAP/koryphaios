@@ -62,6 +62,8 @@ interface DeckState {
   sessions: SessionRuntime[]
   /** Progress of each tile's Skills sequence by tile id; the last view stays until the next run. */
   sessionSequences: Record<string, SessionSequenceView>
+  /** The run of the sequence view each tile's operator closed: a later emission of that run (a queued directive starting) must not reopen it. */
+  dismissedSequenceRuns: Record<string, number>
   /** Tiles whose sequence cancel or override is awaiting main, so every surface disables the same buttons. */
   sequenceActionsInFlight: Record<string, boolean>
   config: AppConfig | null
@@ -596,6 +598,7 @@ export function roadmapConflictCount(s: DeckState): number {
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   sessionSequences: {},
+  dismissedSequenceRuns: {},
   sequenceActionsInFlight: {},
   config: null,
   // The Deck opens on Home: the supervisor is the entry point of the app (it
@@ -783,6 +786,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       set((s) => {
         const tile = s.sessions.find((t) => t.id === view.tileId)
         if (tile === undefined || tile.spawnGeneration !== view.spawnGeneration) return s
+        if (view.tileId in s.dismissedSequenceRuns && s.dismissedSequenceRuns[view.tileId] === view.run) return s
         return { sessionSequences: { ...s.sessionSequences, [view.tileId]: view } }
       })
     })
@@ -1291,10 +1295,11 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   dismissSequence(id) {
     set((s) => {
-      if (!(id in s.sessionSequences)) return s
+      const view = s.sessionSequences[id]
+      if (view === undefined) return s
       const next = { ...s.sessionSequences }
       delete next[id]
-      return { sessionSequences: next }
+      return { sessionSequences: next, dismissedSequenceRuns: { ...s.dismissedSequenceRuns, [id]: view.run } }
     })
   },
 

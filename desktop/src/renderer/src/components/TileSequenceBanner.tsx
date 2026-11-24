@@ -1,19 +1,20 @@
-import type { SessionSequenceView } from '../../../shared/types'
+import type { SequenceWaitingDirective, SessionSequenceView } from '../../../shared/types'
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
 import { stopFamily } from '../sequence-stop-family'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+
+/** A label, never the command: magic_compact may end up typing /compact, so the name cannot predict it. */
+function directiveLabel(t: TFn, directive: SequenceWaitingDirective): string {
+  return t(`tile.seqDirective.${directive}`)
+}
 
 function momentLabel(t: TFn, view: SessionSequenceView): string {
   if (view.moment !== 'stop' || !view.mode) return t(`tile.seqMoment.${view.moment}`)
   return t(view.mode === 'soft' ? 'tile.seqMoment.stopSoft' : 'tile.seqMoment.stopHard')
 }
 
-/**
- * The Skills sequence of one tile, laid over the top rows of its terminal.
- * A done or stopped view stays until the operator closes it: the main process
- * never clears it, and a timer would hide a stop nobody read.
- */
+/** No timer hides a done or stopped view: it would hide a stop nobody read. */
 export function TileSequenceBanner({ tileId }: { tileId: string }): React.JSX.Element | null {
   const t = useT()
   const view = useDeck((s) => s.sessionSequences[tileId])
@@ -27,6 +28,9 @@ export function TileSequenceBanner({ tileId }: { tileId: string }): React.JSX.El
   const total = String(view.total)
   const live = view.phase === 'running' || view.phase === 'waiting-background'
   const family = view.phase === 'stopped' ? stopFamily(view.reason) : null
+  const waiting = view.waitingDirectives
+  const queued =
+    waiting.length === 0 ? null : t('tile.seqDirectiveQueued', { directives: waiting.map((d) => directiveLabel(t, d)).join(', ') })
 
   let glyph: React.JSX.Element
   let text: string
@@ -69,6 +73,12 @@ export function TileSequenceBanner({ tileId }: { tileId: string }): React.JSX.El
         {text}
       </span>
       {family && view.reason && <code className="tile-seq-code">{view.reason}</code>}
+      {queued && (
+        <span className="tile-seq-queued" title={queued}>
+          <span className="tile-seq-queued-glyph">{GLYPH_BADGES.clepsydra}</span>
+          <span className="tile-seq-queued-text">{queued}</span>
+        </span>
+      )}
       <span className="tile-seq-actions">
         {view.phase === 'waiting-background' && !remote && (
           <button type="button" className="btn btn-sm" disabled={inFlight} onClick={act(() => overrideSequence(tileId))}>

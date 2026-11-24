@@ -1975,7 +1975,7 @@ test("runSkillSequence starts the moment's sequence and the sequence event follo
   finishTurn(lead, leadSignals(lead), NATIVE_COMMANDS.start, 0);
   await settle();
 
-  const base = { tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, total: 1, background: null, reason: null };
+  const base = { tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, total: 1, background: null, reason: null, run: expect.any(Number), waitingDirectives: [] };
   expect(lead.views).toEqual([
     { ...base, step: 0, phase: "running" },
     { ...base, step: 1, phase: "done" },
@@ -1989,11 +1989,11 @@ test("the sequence event reports the wait for background tasks with its count, t
   await settle();
   finishTurn(lead, leadSignals(lead), "prepare-notes", 2);
   await settle();
-  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null });
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "waiting-background", background: 2, reason: null, run: expect.any(Number), waitingDirectives: [] });
 
   expect(lead.svc.cancelSequence(lead.tile.id)).toBe(true);
   await settle();
-  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "stopped", background: null, reason: "operator-cancelled" });
+  expect(lead.views.at(-1)).toEqual({ tileId: lead.tile.id, moment: "start", spawnGeneration: lead.tile.spawnGeneration, step: 1, total: 2, phase: "stopped", background: null, reason: "operator-cancelled", run: expect.any(Number), waitingDirectives: [] });
 });
 
 test("a stop sequence types the native stop skill with its mode", async () => {
@@ -2171,19 +2171,139 @@ test("an ineligible tile refuses the run with its reason and types nothing", asy
   expect(lead.writes).toEqual([]);
 });
 
-test("a directive that takes a tile behind a running sequence leaves one Journal line saying why", async () => {
+test("a directive that takes a tile behind a running sequence leaves one Journal line naming it", async () => {
   const lead = leadTile();
   await lead.svc.runSkillSequence(lead.tile.id, "start");
   await settle();
-  const waiting = lead.svc.serializeTile(lead.tile.id, async () => "ran");
+  const waiting = lead.svc.serializeTile(lead.tile.id, async () => "ran", "clear_reload");
   expect(lead.journal.filter((line) => line.includes("waits behind a running sequence"))).toEqual([
-    `a directive on tile ${lead.tile.id} waits behind a running sequence`,
+    `directive clear_reload on tile ${lead.tile.id} waits behind a running sequence`,
   ]);
 
   lead.svc.cancelSequence(lead.tile.id);
   expect(await reachedWithin(waiting, "the directive after the sequence", 1500)).toBe("ran");
 
   const idle = leadTile();
-  await idle.svc.serializeTile(idle.tile.id, async () => "ran");
+  await idle.svc.serializeTile(idle.tile.id, async () => "ran", "magic_compact");
   expect(idle.journal, "no sequence, no line").toEqual([]);
+  expect(idle.views, "no sequence, no view").toEqual([]);
+});
+
+test("the sequence view lists each directive queued behind it, on both entry paths, until its own turn starts", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const waitingOf = () => (lead.views.at(-1) as { waitingDirectives: string[] }).waitingDirectives;
+  expect(waitingOf(), "nothing queued yet").toEqual([]);
+
+  const compact = lead.svc.injectCommand(lead.tile.id, "/compact keep the plan", "compact");
+  const magic = lead.svc.serializeTile(lead.tile.id, async () => "ran", "magic_compact");
+  expect(waitingOf(), "two directives, oldest first").toEqual(["compact", "magic_compact"]);
+  expect(lead.views.at(-1), "the view stays the running sequence's").toMatchObject({ phase: "running" });
+  expect(JSON.stringify(lead.views), "a directive name, never its typed text").not.toContain("keep the plan");
+
+  lead.svc.cancelSequence(lead.tile.id);
+  await reachedWithin(compact, "the queued compact", 1500);
+  expect(await reachedWithin(magic, "the queued magic_compact", 1500)).toBe("ran");
+  expect(waitingOf(), "each left on its own turn").toEqual([]);
+  expect(lead.views.at(-1), "the stopped view survives the last turn").toMatchObject({ phase: "stopped", reason: "operator-cancelled" });
+});
+
+test("a directive leaves the list when its own turn starts, not when it ends, and two of the same name are two entries", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const waitingOf = () => (lead.views.at(-1) as { waitingDirectives: string[] }).waitingDirectives;
+  let started!: () => void;
+  const inTurn = new Promise<void>((resolve) => (started = resolve));
+  let unblock!: () => void;
+  const first = lead.svc.serializeTile(lead.tile.id, () => (started(), new Promise<void>((resolve) => (unblock = resolve))), "compact");
+  const second = lead.svc.serializeTile(lead.tile.id, async () => "ran", "compact");
+  expect(waitingOf(), "two queued compactions").toEqual(["compact", "compact"]);
+
+  lead.svc.cancelSequence(lead.tile.id);
+  await reachedWithin(inTurn, "the first compaction's turn", 1500);
+  expect(waitingOf(), "the first is running, the second still waits").toEqual(["compact"]);
+
+  unblock();
+  await reachedWithin(first, "the first compaction", 1500);
+  expect(await reachedWithin(second, "the second compaction", 1500)).toBe("ran");
+  expect(waitingOf()).toEqual([]);
+});
+
+test("a plain directive leaves the list once its turn starts, while its injection still settles after the Escape", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  const waitingOf = () => (lead.views.at(-1) as { waitingDirectives: string[] }).waitingDirectives;
+  let resolved = false;
+  const compact = lead.svc.injectCommand(lead.tile.id, "/compact", "compact").finally(() => (resolved = true));
+  expect(waitingOf()).toEqual(["compact"]);
+  const mark = lead.writes.length;
+
+  lead.svc.cancelSequence(lead.tile.id);
+  const escape = String.fromCharCode(27);
+  const escaped = (async () => {
+    while (!lead.writes.slice(mark).includes(escape)) await new Promise((resolve) => setTimeout(resolve, 5));
+  })();
+  await reachedWithin(escaped, "the Escape before the compaction", 1500);
+  expect(resolved, "the injection is still settling").toBe(false);
+  expect(waitingOf(), "its turn has started").toEqual([]);
+  expect(await reachedWithin(compact, "the compaction", 1500)).toBe("written");
+});
+
+for (const [how, end] of [
+  // The second close of an id forces the cleanup at once instead of waiting out the graceful /exit.
+  ["removed", (svc: ReturnType<typeof leadTile>["svc"], id: string) => (void svc.remove(id), svc.remove(id))],
+  ["closed with every session", async (svc: ReturnType<typeof leadTile>["svc"]) => svc.closeAll()],
+  ["restored under the same id", async (svc: ReturnType<typeof leadTile>["svc"]) => void svc.restoreFrom(svc.captureSessions())],
+  [
+    "closed by a clean exit of its process",
+    async (svc: ReturnType<typeof leadTile>["svc"], id: string) => {
+      spawned.at(-1)!.exit(0);
+      svc.cancelSequence(id);
+    },
+  ],
+] as const) {
+  test(`a directive that starts after its tile was ${how} never has the old sequence view sent again`, async () => {
+    const lead = leadTile();
+    await lead.svc.runSkillSequence(lead.tile.id, "start");
+    await settle();
+    let unblock!: () => void;
+    const blocker = lead.svc.serializeTile(lead.tile.id, () => new Promise<void>((resolve) => (unblock = resolve)), "clear");
+    const queued = lead.svc.serializeTile(lead.tile.id, async () => "ran", "compact");
+    await reachedWithin(end(lead.svc, lead.tile.id), `the tile ${how}`, 1500);
+    await settle();
+    const mark = lead.views.length;
+
+    unblock();
+    await reachedWithin(blocker, "the blocking directive", 1500);
+    expect(await reachedWithin(queued, "the queued compaction", 1500)).toBe("ran");
+    await settle();
+    expect(lead.views.slice(mark), "nothing of the old sequence after the cleanup").toEqual([]);
+  });
+}
+
+test("a directive queued before a new sequence's first view never re-emits the previous sequence's view", async () => {
+  const lead = leadTile();
+  await lead.svc.runSkillSequence(lead.tile.id, "start");
+  await settle();
+  lead.svc.cancelSequence(lead.tile.id);
+  await settle();
+  expect(lead.views.at(-1)).toMatchObject({ phase: "stopped" });
+
+  let unblock!: () => void;
+  const blocker = lead.svc.serializeTile(lead.tile.id, () => new Promise<void>((resolve) => (unblock = resolve)), "clear");
+  await settle();
+  expect(await lead.svc.runSkillSequence(lead.tile.id, "start")).toEqual({ status: "started" });
+  const before = lead.views.length;
+  const queued = lead.svc.serializeTile(lead.tile.id, async () => "ran", "compact");
+  expect(lead.views.length, "the old stopped view is not sent again").toBe(before);
+
+  unblock();
+  await reachedWithin(blocker, "the blocking directive", 1500);
+  await settle();
+  expect(lead.views.at(-1), "the new sequence's first view carries the wait").toMatchObject({ phase: "running", waitingDirectives: ["compact"] });
+  lead.svc.cancelSequence(lead.tile.id);
+  expect(await reachedWithin(queued, "the queued compact", 1500)).toBe("ran");
 });
