@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -1281,7 +1282,7 @@ describe("hostile files: no hang, no read outside, bounded", () => {
   test.skipIf(process.platform === "win32")("a FIFO as repo rules.json or as a hook log never blocks Deck main", () => {
     const h = harness();
     const cwd = tmp();
-    mkdirSync(join(cwd, ".claude", "claude-peers"), { recursive: true });
+    mkdirSync(dirname(join(cwd, REPO_RULES_REL)), { recursive: true });
     const mk = spawnSync("mkfifo", [join(cwd, REPO_RULES_REL)]);
     if (mk.status !== 0) throw new Error(`mkfifo failed: ${mk.stderr}`);
     const id = randomUUID();
@@ -1312,7 +1313,7 @@ describe("hostile files: no hang, no read outside, bounded", () => {
     const outside = tmp();
     symlinkSync(outside, join(cwd, ".claude"), "junction");
     expect(() => repoRulesPathForWrite(cwd)).toThrow(/outside the project root/);
-    expect(existsSync(join(outside, "claude-peers")), "no directory may be created through the symlink before the check").toBe(false);
+    expect(readdirSync(outside), "no directory may be created through the symlink before the check").toEqual([]);
     const dangling = tmp();
     symlinkSync(join(outside, "not-yet"), join(dangling, ".claude"), "junction");
     expect(() => repoRulesPathForWrite(dangling)).toThrow(/symlink|outside/);
