@@ -69,10 +69,33 @@ function pluginVersion(files: readonly ModFile[], plugin: string): string {
   return version;
 }
 
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160];
+
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+// Windows can refuse a directory rename for a few milliseconds right after its tree was written.
+// Onto an existing directory it refuses for good, so a retry needs the target absent and the source present.
+function renameWithRetry(rename: (from: string, to: string) => void, from: string, to: string, wait: (ms: number) => void): void {
+  for (const delay of RENAME_RETRY_DELAYS_MS) {
+    try {
+      rename(from, to);
+      return;
+    } catch (error) {
+      if (!TRANSIENT_RENAME_CODES.has((error as NodeJS.ErrnoException).code ?? "") || existsSync(to) || !existsSync(from)) throw error;
+      wait(delay);
+    }
+  }
+  rename(from, to);
+}
+
 export function writePlugins(
   modsDir: string,
   plugins: readonly { plugin: string; files: readonly ModFile[] }[],
   rename: (from: string, to: string) => void = renameSync,
+  wait: (ms: number) => void = sleepSync,
 ): void {
   const modsRoot = resolve(modsDir);
   const planned = plugins.map(({ plugin, files }) => {
@@ -108,7 +131,7 @@ export function writePlugins(
     try {
       if (hadRoot) rename(root, retired);
       try {
-        rename(staging, root);
+        renameWithRetry(rename, staging, root, wait);
       } catch (error) {
         if (hadRoot) {
           try {

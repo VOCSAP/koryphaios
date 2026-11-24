@@ -283,6 +283,127 @@ describe('copy writer', () => {
     expect(readdirSync(modsDir).some((name) => name.startsWith('.b.staging-'))).toBe(false)
     expect(readdirSync(modsDir).some((name) => name.startsWith('.b.retired-'))).toBe(true)
   })
+
+  const transient = (code: string): Error => Object.assign(new Error(`${code} injected`), { code })
+  // The fixtures' own renames ride out the transient Windows refusals, so the writer only ever sees the injected ones.
+  const settledRename = (from: string, to: string): void => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(from, to)
+        return
+      } catch (error) {
+        if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
+      }
+    }
+  }
+  const inFreshDir = (body: (dir: string) => void): void => {
+    const dir = mkdtempSync(join(tmpdir(), 'kory-mods-retry-'))
+    try {
+      body(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  for (const code of ['EPERM', 'EBUSY', 'EACCES']) {
+    test(`retries the staging rename after a transient ${code} while the root is absent`, () => {
+      inFreshDir((dir) => {
+        mkdirSync(join(dir, 't'))
+        writeFileSync(join(dir, 't', 'keep.txt'), 'old')
+        let stagingAttempts = 0
+        const delays: number[] = []
+        writePlugins(
+          dir,
+          [{ plugin: 't', files: [file('hooks/x.ts'), file('LICENSE')] }],
+          (from, to) => {
+            if (basename(from).startsWith('.t.staging-') && ++stagingAttempts === 1) throw transient(code)
+            settledRename(from, to)
+          },
+          (ms) => delays.push(ms)
+        )
+        expect(stagingAttempts, 'one refusal, then the retry that lands').toBe(2)
+        expect(delays).toEqual([10])
+        expect(readdirSync(dir)).toEqual(['t'])
+        expect(filesUnder(join(dir, 't')).map((entry) => entry.path).sort()).toEqual(['LICENSE', 'hooks/x.ts'])
+      })
+    })
+  }
+
+  test('tries the staging rename once when the staging directory is gone', () => {
+    inFreshDir((dir) => {
+      let stagingAttempts = 0
+      const delays: number[] = []
+      expect(() =>
+        writePlugins(
+          dir,
+          [{ plugin: 't', files: [file('hooks/x.ts')] }],
+          (from, to) => {
+            if (basename(from).startsWith('.t.staging-')) {
+              stagingAttempts++
+              rmSync(from, { recursive: true, force: true })
+              throw transient('EPERM')
+            }
+            settledRename(from, to)
+          },
+          (ms) => delays.push(ms)
+        )
+      ).toThrow('EPERM injected')
+      expect(stagingAttempts, 'a missing source cannot land on a retry').toBe(1)
+      expect(delays).toEqual([])
+    })
+  })
+
+  test('gives up on the staging rename after the last delay and leaves the previous copy in place', () => {
+    inFreshDir((dir) => {
+      mkdirSync(join(dir, 't'))
+      writeFileSync(join(dir, 't', 'keep.txt'), 'old')
+      let stagingAttempts = 0
+      const delays: number[] = []
+      expect(() =>
+        writePlugins(
+          dir,
+          [{ plugin: 't', files: [file('hooks/x.ts')] }],
+          (from, to) => {
+            if (basename(from).startsWith('.t.staging-')) {
+              stagingAttempts++
+              throw transient('EBUSY')
+            }
+            settledRename(from, to)
+          },
+          (ms) => delays.push(ms)
+        )
+      ).toThrow('EBUSY injected')
+      expect(delays).toEqual([10, 20, 40, 80, 160])
+      expect(stagingAttempts, 'one attempt per delay, then the final one').toBe(6)
+      expect(readFileSync(join(dir, 't', 'keep.txt'), 'utf-8')).toBe('old')
+      expect(readdirSync(dir)).toEqual(['t'])
+    })
+  })
+
+  test('tries the staging rename once when its target exists already', () => {
+    inFreshDir((dir) => {
+      let stagingAttempts = 0
+      const delays: number[] = []
+      expect(() =>
+        writePlugins(
+          dir,
+          [{ plugin: 't', files: [file('hooks/x.ts')] }],
+          (from, to) => {
+            if (basename(from).startsWith('.t.staging-')) {
+              stagingAttempts++
+              mkdirSync(to)
+              throw transient('EPERM')
+            }
+            settledRename(from, to)
+          },
+          (ms) => delays.push(ms)
+        )
+      ).toThrow('EPERM injected')
+      expect(stagingAttempts, 'an existing target refuses for good: no second try').toBe(1)
+      expect(delays).toEqual([])
+    })
+  })
 })
 
 describe('copy file walker', () => {

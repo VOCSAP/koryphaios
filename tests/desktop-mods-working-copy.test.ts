@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { activeClaudePlugins, claudePluginOmissions, ENGINE_JSX, enabledModsFromLock, ensureModWorkingCopy, listLockedMods, loadModsLock, type WorkingCopyRequest } from '../desktop/src/main/mods-working-copy'
@@ -210,6 +210,21 @@ describe('working copy materialization', async () => {
     expect(readdirSync(join(f.workRoot, f.plugin)), 'the loser removes its staging and moves nothing aside').toEqual([f.fingerprint])
   })
 
+  // The simulated rival hits the same transient Windows refusals as the code under test.
+  async function moveAside(parent: string, parked: string): Promise<void> {
+    for (const delay of [10, 20, 40, 80, 160]) {
+      try {
+        renameSync(parent, parked)
+        return
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? ''
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes(code) || existsSync(parked) || !lstatSync(parent).isDirectory()) throw error
+        await new Promise<void>((resolve) => setTimeout(resolve, delay))
+      }
+    }
+    renameSync(parent, parked)
+  }
+
   test('refuses when the plugin parent becomes a junction after staging rename', async () => {
     const f = fixture()
     const outside = scratch()
@@ -220,7 +235,7 @@ describe('working copy materialization', async () => {
         rename: async (from, to) => {
           renameSync(from, to)
           if (from.includes('.staging-')) {
-            renameSync(parent, parked)
+            await moveAside(parent, parked)
             symlinkSync(outside, parent, 'junction')
           }
         }
@@ -246,8 +261,8 @@ describe('working copy materialization', async () => {
           if (attempts === 1) throw Object.assign(new Error('EPERM injected'), { code: 'EPERM' })
           renameSync(from, to)
         },
-        wait: () => {
-          renameSync(parent, parked)
+        wait: async () => {
+          await moveAside(parent, parked)
           symlinkSync(outside, parent, 'junction')
         }
       })
