@@ -519,8 +519,10 @@ describe("paths and symlinks", () => {
     const h = harness();
     const cwd = tmp();
     const outside = tmp();
-    mkdirSync(join(outside, "claude-peers"), { recursive: true });
-    writeFileSync(join(outside, "claude-peers", "rules.json"), fileOf(rule("r-one")));
+    for (const folder of ["claude-peers", "koryphaios"]) {
+      mkdirSync(join(outside, folder), { recursive: true });
+      writeFileSync(join(outside, folder, "rules.json"), fileOf(rule("r-one")));
+    }
     symlinkSync(outside, join(cwd, ".claude"), "junction");
     h.svc.fileFor({ id: randomUUID(), cwd });
     expect(h.svc.list().projects[0]!.file.errors[0]).toContain("outside the project root");
@@ -786,6 +788,11 @@ describe("repo rules in both project folders", () => {
     mkdirSync(join(linked, ".claude"), { recursive: true });
     symlinkSync(outside, join(linked, ".claude", "claude-peers"), "junction");
     expect(() => repoRulesPathForWrite(linked, OLD_REL)).toThrow(/outside the project root/);
+    expect(existsSync(join(outside, "rules.json"))).toBe(false);
+    const linkedNew = tmp();
+    mkdirSync(join(linkedNew, ".claude"), { recursive: true });
+    symlinkSync(outside, join(linkedNew, ".claude", "koryphaios"), "junction");
+    expect(() => repoRulesPathForWrite(linkedNew, NEW_REL)).toThrow(/outside the project root/);
     expect(existsSync(join(outside, "rules.json"))).toBe(false);
   });
 

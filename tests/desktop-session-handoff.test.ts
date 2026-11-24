@@ -463,8 +463,10 @@ helperTest("context ignores hostile skills documents in its working directory", 
   const global = { version: 3 as const, addendum: { start: "global", end: "", stop: "" }, storage: { mode: "kory" as const, instructions: "" }, commands: { start: [], end: [], stop: [] } };
   writeSessionSkills(root, global);
   writeFileSync(join(hostileCwd, "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "cwd", end: "", stop: "" } }));
-  mkdirSync(join(hostileCwd, ".claude", "claude-peers"), { recursive: true });
-  writeFileSync(join(hostileCwd, ".claude", "claude-peers", "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "repo", end: "", stop: "" } }));
+  for (const folder of ["claude-peers", "koryphaios"]) {
+    mkdirSync(join(hostileCwd, ".claude", folder), { recursive: true });
+    writeFileSync(join(hostileCwd, ".claude", folder, "session-skills.json"), JSON.stringify({ version: 1, addendum: { start: "repo", end: "", stop: "" } }));
+  }
 
   expect(readSessionSkills(root)).toEqual(global);
   const context = Bun.spawnSync({ cmd: ["bash", HELPER_WRAPPER, "context"], env, cwd: hostileCwd });

@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Node-only module (no electron / no @shared alias), imports under bun.
 import {
@@ -606,15 +606,17 @@ test.skipIf(!canLink)("templateSaveTarget refuses a rename onto a link (needs sy
 });
 
 test.skipIf(!canLink)("templateSaveTarget refuses a source whose folder is a link leaving the project (needs symlinkSync)", () => {
-  const e = env(tmp());
-  const proj = tmp();
-  const outside = tmp();
-  savedTemplate(outside, "in", "in");
-  mkdirSync(join(proj, ".claude", "claude-peers"), { recursive: true });
-  symlinkSync(outside, legacyDir(proj), "junction");
-  expect(() => templateSaveTarget(proj, true, "attended", "in", join(legacyDir(proj), "in.json"), e)).toThrow(
-    /resolves outside the project/
-  );
+  for (const folderOf of [legacyDir, koryphaiosDir]) {
+    const e = env(tmp());
+    const proj = tmp();
+    const outside = tmp();
+    savedTemplate(outside, "in", "in");
+    mkdirSync(dirname(folderOf(proj)), { recursive: true });
+    symlinkSync(outside, folderOf(proj), "junction");
+    expect(() => templateSaveTarget(proj, true, "attended", "in", join(folderOf(proj), "in.json"), e)).toThrow(
+      /resolves outside the project/
+    );
+  }
 });
 
 // ----- a repo-shipped link as the templates folder (card 0a0b180d) -----

@@ -524,19 +524,21 @@ test('writes launch-approvals.json only from the three native-dialog gates', () 
 })
 
 test('refuses a serve.json reached through a link that leaves the project', async () => {
-  const outer = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-escape-')))
-  try {
-    const project = join(outer, 'project')
-    const elsewhere = join(outer, 'elsewhere')
-    mkdirSync(join(project, '.claude'), { recursive: true })
-    mkdirSync(join(project, 'web'), { recursive: true })
-    mkdirSync(elsewhere, { recursive: true })
-    writeFileSync(join(elsewhere, 'serve.json'), JSON.stringify(validServeJson()), 'utf-8')
-    symlinkSync(elsewhere, join(project, '.claude', 'claude-peers'), 'junction')
+  for (const folder of ['claude-peers', 'koryphaios']) {
+    const outer = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-escape-')))
+    try {
+      const project = join(outer, 'project')
+      const elsewhere = join(outer, 'elsewhere')
+      mkdirSync(join(project, '.claude'), { recursive: true })
+      mkdirSync(join(project, 'web'), { recursive: true })
+      mkdirSync(elsewhere, { recursive: true })
+      writeFileSync(join(elsewhere, 'serve.json'), JSON.stringify(validServeJson()), 'utf-8')
+      symlinkSync(elsewhere, join(project, '.claude', folder), 'junction')
 
-    expect(await readServeConfig(project)).toEqual({ error: 'read' })
-  } finally {
-    rmSync(outer, { recursive: true, force: true })
+      expect(await readServeConfig(project), folder).toEqual({ error: 'read' })
+    } finally {
+      rmSync(outer, { recursive: true, force: true })
+    }
   }
 })
 
@@ -673,31 +675,37 @@ test('refuses a serve.json that is a hard link to a file outside the project', a
 })
 
 test('names a serve.json that is not a regular file as refused, not as an open failure', async () => {
-  const project = createProject()
-  mkdirSync(servePath(project))
-  const logPath = join(logsDir, 'main.log')
-  const before = readFileSync(logPath, 'utf-8').length
+  for (const folder of ['claude-peers', 'koryphaios']) {
+    const project = createProject()
+    mkdirSync(serveIn(project, folder))
+    const logPath = join(logsDir, 'main.log')
+    const before = readFileSync(logPath, 'utf-8').length
 
-  expect(await readServeConfig(project)).toEqual({ error: 'read' })
-  expect(readFileSync(logPath, 'utf-8').slice(before)).toContain('): is not a regular file')
+    expect(await readServeConfig(project), folder).toEqual({ error: 'read' })
+    expect(readFileSync(logPath, 'utf-8').slice(before), folder).toContain('): is not a regular file')
+  }
 })
 
 test('refuses a serve.json larger than the read cap instead of reading it whole', async () => {
-  const project = createProject()
-  writeFileSync(servePath(project), JSON.stringify(validServeJson()) + ' '.repeat(2 * 1024 * 1024), 'utf-8')
-  const logPath = join(logsDir, 'main.log')
-  const before = readFileSync(logPath, 'utf-8').length
+  for (const folder of ['claude-peers', 'koryphaios']) {
+    const project = createProject()
+    writeFileSync(serveIn(project, folder), JSON.stringify(validServeJson()) + ' '.repeat(2 * 1024 * 1024), 'utf-8')
+    const logPath = join(logsDir, 'main.log')
+    const before = readFileSync(logPath, 'utf-8').length
 
-  expect(await readServeConfig(project)).toEqual({ error: 'read' })
-  expect(readFileSync(logPath, 'utf-8').slice(before)).toContain('exceeds')
+    expect(await readServeConfig(project), folder).toEqual({ error: 'read' })
+    expect(readFileSync(logPath, 'utf-8').slice(before), folder).toContain('exceeds')
+  }
 })
 
 test('a rejected serve.json never copies the start of the file into the log', async () => {
-  const project = createProject()
-  writeFileSync(servePath(project), '{"leaked-marker-7f3a": ', 'utf-8')
+  for (const folder of ['claude-peers', 'koryphaios']) {
+    const project = createProject()
+    writeFileSync(serveIn(project, folder), '{"leaked-marker-7f3a": ', 'utf-8')
 
-  expect(await readServeConfig(project)).toEqual({ error: 'invalid JSON' })
-  expect(readFileSync(join(logsDir, 'main.log'), 'utf-8')).not.toContain('leaked-marker-7f3a')
+    expect(await readServeConfig(project), folder).toEqual({ error: 'invalid JSON' })
+    expect(readFileSync(join(logsDir, 'main.log'), 'utf-8')).not.toContain('leaked-marker-7f3a')
+  }
 })
 
 test('neither folder holding a serve.json is reported as missing', async () => {

@@ -184,10 +184,15 @@ test('refuses a missing or invalid serve.json', async () => {
   dirs.push(missing)
   const invalid = project('bun run dev')
   writeFileSync(join(invalid, '.claude', 'claude-peers', 'serve.json'), '{ "version": 2 }')
-  const h = harness({ allowed: [missing, invalid] })
+  const invalidNew = project('bun run dev')
+  rmSync(join(invalidNew, '.claude'), { recursive: true, force: true })
+  mkdirSync(join(invalidNew, '.claude', 'koryphaios'), { recursive: true })
+  writeFileSync(join(invalidNew, '.claude', 'koryphaios', 'serve.json'), '{ "version": 2 }')
+  const h = harness({ allowed: [missing, invalid, invalidNew] })
 
   expect(await h.ipc.start(missing)).toMatchObject({ ok: false, reason: 'config', message: 'serve.json: missing' })
   expect(await h.ipc.start(invalid)).toMatchObject({ ok: false, reason: 'config' })
+  expect(await h.ipc.start(invalidNew)).toMatchObject({ ok: false, reason: 'config' })
   expect(h.started).toEqual([])
 })
 
