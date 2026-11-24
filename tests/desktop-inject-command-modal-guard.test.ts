@@ -55,8 +55,14 @@ test('every injection refusal is a member of DirectiveOutcome, its agent-stop al
 
 test('SessionService passes its turn generation to command injection', () => {
   const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
-  const body = extractBody(src, /injectCommand\(id: string, command: string, idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS\): Promise<DirectiveOutcome> \{/, 'SessionService.injectCommand()')
-  expect(body.trim()).toBe('return this.injector.inTurn(id, (isCurrent) => this.injector.injectCommand(id, command, idleWaitMs, isCurrent))')
+  const body = extractBody(
+    src,
+    /\binjectCommand\(\s*id: string,\s*command: string,\s*directive: SequenceWaitingDirective,\s*idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS\s*\): Promise<DirectiveOutcome> \{/,
+    'SessionService.injectCommand()'
+  )
+  expect(body.replace(/\s+/g, ' ').trim()).toBe(
+    'const started = this.queueBehindSequence(id, directive) return this.injector.inTurn(id, (isCurrent) => { started() return this.injector.injectCommand(id, command, idleWaitMs, isCurrent) })'
+  )
 })
 
 test('SessionService feeds xterm before publishing data and invalidates it when PTY resize fails', () => {
