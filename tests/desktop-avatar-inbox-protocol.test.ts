@@ -178,6 +178,52 @@ test('the chips of a question travel to the Avatar, bounded and marked when cut'
   expect(() => parseAvatarInboxSnapshotFrame(frame, validateQuestions)).toThrow()
 })
 
+test('a recommended marker travels with the chips and is kept only inside the options the frame carries', () => {
+  const marked = project(sources({ approvals: [approval(1, { options: ['Yes', 'No'], recommended: 1 })] }))
+  expect(marked.approvals[0]!.recommended).toBe(1)
+  expect(parseAvatarInboxSnapshotFrame(JSON.parse(frameText(marked)), validateQuestions).approvals[0]!.recommended).toBe(1)
+
+  const unmarked = project(
+    sources({ approvals: [approval(1, { options: ['Yes', 'No'] }), approval(2, { options: ['Yes'], recommended: null })] })
+  )
+  expect(
+    unmarked.approvals.every((a) => !('recommended' in a)),
+    'no marker, no key: a frame without markers is unchanged'
+  ).toBe(true)
+
+  const many = Array.from({ length: MAX_INBOX_OPTIONS + 2 }, (_, i) => `option ${i}`)
+  const lastKept = project(sources({ approvals: [approval(1, { options: many, recommended: MAX_INBOX_OPTIONS - 1 })] }))
+  expect(lastKept.approvals[0]!.recommended).toBe(MAX_INBOX_OPTIONS - 1)
+  for (const past of [MAX_INBOX_OPTIONS, MAX_INBOX_OPTIONS + 1]) {
+    const dropped = project(sources({ approvals: [approval(1, { options: many, recommended: past })] }))
+    expect(dropped.approvals[0]!.options).toHaveLength(MAX_INBOX_OPTIONS)
+    expect('recommended' in dropped.approvals[0]!, `marker ${past} points past the kept options`).toBe(false)
+  }
+
+  for (const bad of [-1, 2, 0.5, Number.NaN]) {
+    const content = project(sources({ approvals: [approval(1, { options: ['Yes', 'No'], recommended: bad })] }))
+    expect('recommended' in content.approvals[0]!, `marker ${bad} is no index into two options`).toBe(false)
+  }
+})
+
+test('the Avatar refuses a recommended marker that is no index into its options, and still refuses an unknown key', () => {
+  const base = project(sources({ approvals: [approval(1, { options: ['Yes', 'No'], recommended: 0 })] }))
+  const parse = (patch: (approvalRecord: Record<string, any>) => void) => {
+    const frame = JSON.parse(frameText(base)) as Record<string, any>
+    patch(frame.approvals[0])
+    return parseAvatarInboxSnapshotFrame(frame, validateQuestions)
+  }
+
+  expect(parse(() => undefined).approvals[0]!.recommended).toBe(0)
+  expect(parse((a) => delete a.recommended).approvals[0]!.recommended).toBeUndefined()
+  expect(parse((a) => (a.recommended = null)).approvals[0]!.recommended).toBeNull()
+  for (const bad of [2, -1, 0.5, '0', true, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => parse((a) => (a.recommended = bad)), `recommended ${String(bad)}`).toThrow('approval recommended')
+  }
+  expect(() => parse((a) => (a.options = [])), 'a marker with no option to point at').toThrow('approval recommended')
+  expect(() => parse((a) => (a.recomended = 0))).toThrow('unknown field recomended')
+})
+
 test('the Deck keeps the newest entries of each list and counts the dropped ones', () => {
   const content = project(sources({ approvals: Array.from({ length: MAX_INBOX_APPROVALS + 7 }, (_, i) => approval(i + 1)) }))
   expect(content.approvals).toHaveLength(MAX_INBOX_APPROVALS)

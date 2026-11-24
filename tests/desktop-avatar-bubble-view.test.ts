@@ -157,6 +157,22 @@ describe('projectAvatarBubble', () => {
     expect(gesturesOf({ kind: 'question', reply_route: 'channel' })).toEqual(['deny', 'text', 'acknowledge'])
   })
 
+  test('a card carries the recommended position of its options for a question only, and null for any other kind or no marker', () => {
+    const cardOf = (patch: Partial<InboxRelayApproval>) =>
+      projectAvatarBubble({ boxes: [box(DECK_A, { approvals: [approval(1, patch)] })], decks, lost: [], now: 0 }).reclame[0]!
+    const question: Partial<InboxRelayApproval> = { kind: 'question', reply_route: 'channel', options: ['A', 'B', 'C'] }
+
+    expect(cardOf({ ...question, recommended: 2 }).recommended).toBe(2)
+    expect(cardOf({ ...question, recommended: 0 }).recommended).toBe(0)
+    expect(cardOf({ ...question }).recommended).toBeNull()
+    expect(cardOf({ ...question, recommended: null }).recommended).toBeNull()
+    expect(cardOf({ kind: 'permission', reply_route: 'hook', options: ['A', 'B'], recommended: 0 }).recommended).toBeNull()
+    expect(cardOf({ kind: 'plan', reply_route: 'hook', options: ['A', 'B'], recommended: 1 }).recommended).toBeNull()
+
+    const card = cardOf({ ...question, options: [`a${NUL}`, 'B', 'C'], recommended: 1 })
+    expect(card.options[card.recommended!]).toMatchObject({ value: 'B' })
+  })
+
   test('an approval settled locally leaves the queue before the next snapshot', () => {
     const settled = approval(1)
     const model = projectAvatarBubble({

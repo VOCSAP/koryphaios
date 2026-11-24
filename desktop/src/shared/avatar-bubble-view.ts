@@ -62,6 +62,8 @@ export interface AvatarBubbleCard {
   title: string
   question: string
   options: AvatarBubbleOption[]
+  /** Position in `options` of the answer the agent recommends; null on any kind but a question. */
+  recommended: number | null
   questions: AvatarBubbleQuestion[] | null
   fromPeerId: string
   tileName: string | null
@@ -197,6 +199,7 @@ function projectCard(identity: AvatarDeckIdentity, deckLabel: string, approval: 
     title: safeLine(approval.title),
     question: safeBlock(approval.question),
     options: approval.options.map((option) => ({ value: option, label: safeLine(option) })),
+    recommended: approval.kind === 'question' ? (approval.recommended ?? null) : null,
     questions:
       approval.questions?.map((question) => ({
         key: question.question,

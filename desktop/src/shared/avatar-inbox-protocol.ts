@@ -51,6 +51,8 @@ export interface InboxRelayApproval {
   title: string
   question: string
   options: string[]
+  /** Index into `options` of the answer the agent recommends; absent when it names none. */
+  recommended?: number | null
   questions: ApprovalQuestion[] | null
   created_at: string
   from_peer_id: string
@@ -210,9 +212,20 @@ function parseQuestions(value: unknown, validateQuestions: InboxQuestionsValidat
   return result.value
 }
 
+function parseRecommended(value: unknown, optionCount: number): { recommended?: number | null } {
+  if (value === undefined) return {}
+  if (value === null) return { recommended: null }
+  const index = count(value, 'approval recommended')
+  if (index >= optionCount) invalid('approval recommended')
+  return { recommended: index }
+}
+
 function parseApproval(raw: unknown, validateQuestions: InboxQuestionsValidator): InboxRelayApproval {
-  const input = exactRecord(raw, APPROVAL_FIELDS, ['cut'], 'approval')
+  const input = exactRecord(raw, APPROVAL_FIELDS, ['cut', 'recommended'], 'approval')
   if (!isApprovalId(input.id)) invalid('approval id')
+  const options = boundedList(input.options, MAX_INBOX_OPTIONS, 'approval options', (raw) =>
+    boundedString(raw, MAX_INBOX_OPTION, 'approval option')
+  )
   return {
     id: input.id as string,
     kind: oneOf(input.kind, APPROVAL_KINDS, 'approval kind'),
@@ -223,9 +236,8 @@ function parseApproval(raw: unknown, validateQuestions: InboxQuestionsValidator)
     absorbed_permission: bool(input.absorbed_permission, 'approval absorbed_permission'),
     title: boundedString(input.title, MAX_INBOX_TITLE, 'approval title'),
     question: boundedString(input.question, MAX_INBOX_TEXT, 'approval question'),
-    options: boundedList(input.options, MAX_INBOX_OPTIONS, 'approval options', (raw) =>
-      boundedString(raw, MAX_INBOX_OPTION, 'approval option')
-    ),
+    options,
+    ...parseRecommended(input.recommended, options.length),
     questions: parseQuestions(input.questions, validateQuestions),
     created_at: boundedString(input.created_at, MAX_INBOX_TIMESTAMP, 'approval created_at'),
     from_peer_id: boundedString(input.from_peer_id, MAX_INBOX_PEER_ID, 'approval from_peer_id'),
@@ -321,6 +333,9 @@ function projectApproval(
   const question = cut(approval.question, MAX_INBOX_TEXT)
   const options = approval.options.slice(0, MAX_INBOX_OPTIONS).map((option) => cut(option, MAX_INBOX_OPTION))
   const optionsCut = approval.options.length > MAX_INBOX_OPTIONS || options.some((option) => option.cut)
+  const recommended = approval.recommended
+  const keepsMarker =
+    typeof recommended === 'number' && Number.isSafeInteger(recommended) && recommended >= 0 && recommended < options.length
   const from = cut(approval.origin.from_peer, MAX_INBOX_PEER_ID)
   const createdAt = cut(approval.created_at, MAX_INBOX_TIMESTAMP)
   const tile = tileName === null ? null : cut(tileName, MAX_INBOX_TILE_NAME)
@@ -338,6 +353,7 @@ function projectApproval(
     title: title.value,
     question: question.value,
     options: options.map((option) => option.value),
+    ...(keepsMarker ? { recommended } : {}),
     questions: questions !== null && questions.ok ? questions.value : null,
     created_at: createdAt.value,
     from_peer_id: from.value,
