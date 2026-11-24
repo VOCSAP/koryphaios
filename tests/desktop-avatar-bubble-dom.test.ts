@@ -35,6 +35,7 @@ interface Card {
   gestures: string[];
   openInDeck: boolean;
   settledElsewhere: boolean;
+  recommended: number | null;
 }
 
 function card(over: Partial<Card> = {}): Card {
@@ -57,6 +58,7 @@ function card(over: Partial<Card> = {}): Card {
     gestures: ["allow", "deny"],
     openInDeck: false,
     settledElsewhere: false,
+    recommended: null,
     ...over
   };
 }
@@ -380,6 +382,37 @@ test("an option chip shows its label and sends its raw value, and a pick shows i
   await click(container.querySelector('button[title="avatarBubble.next"]'));
   await arm();
   expect(container.querySelector(".avb-pick .aq-desc")?.textContent).toBe("the safe one");
+});
+
+const OPTIONS = [
+  { value: "main", label: "main" },
+  { value: "dev", label: "dev" },
+  { value: "prod", label: "prod" },
+];
+const reclameChips = (): HTMLButtonElement[] => [...container.querySelectorAll<HTMLButtonElement>(".inbox-modal-options .inbox-option")];
+
+test("the Réclame chip an agent recommended carries the class, the star and its spoken label, and still sends its own value", async () => {
+  await mount(state([card({ kind: "question", options: OPTIONS, recommended: 1, gestures: ["deny", "text"] })]));
+  const chips = reclameChips();
+  expect(chips.map((c) => c.classList.contains("is-recommended"))).toEqual([false, true, false]);
+  const mark = chips[1]!.querySelector(".inbox-option-mark");
+  expect(mark?.getAttribute("role")).toBe("img");
+  expect(mark?.getAttribute("aria-label")).toBe("inbox.recommendedByAgent");
+  expect(mark?.querySelector("svg")).not.toBeNull();
+  expect(chips.filter((c) => c.querySelector(".inbox-option-mark")).length).toBe(1);
+  await click(chips[1]);
+  expect((calls.acts[0] as { action: unknown }).action).toEqual({ approval_id: "aaaaaaaa-0000-4000-8000-000000000001", action: "text", text: "dev" });
+});
+
+test("a Réclame permission marks neither Allow nor Deny, and a card without a recommendation renders plain chips", async () => {
+  await mount(state([card({ recommended: 0 })]));
+  expect(container.querySelector(".is-recommended, .inbox-option-mark")).toBeNull();
+  await mount(state([card({ kind: "question", options: OPTIONS, gestures: ["deny", "text"] })]));
+  expect(reclameChips().map((c) => [c.className, c.innerHTML])).toEqual([
+    ["chip inbox-option", "main"],
+    ["chip inbox-option", "dev"],
+    ["chip inbox-option", "prod"],
+  ]);
 });
 
 // Mutant: the closure banner falling back to a "?" authority when the relay carries none.

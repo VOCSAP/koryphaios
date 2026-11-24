@@ -752,6 +752,7 @@
   "inbox.ack": "Acquitter",
   "inbox.permissionAllow": "Autoriser",
   "inbox.permissionDeny": "Refuser",
+  "inbox.recommendedByAgent": "Recommandé par l'agent",
   "inbox.reply": "Répondre",
   "inbox.decline": "Décliner",
   "inbox.delete": "Supprimer",

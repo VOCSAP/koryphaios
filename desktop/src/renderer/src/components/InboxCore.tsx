@@ -163,6 +163,14 @@ function ClosedBanner(props: { t: TFn; closure: ClosureInfo; report?: (message: 
   )
 }
 
+export function RecommendedMark({ label }: { label: string }): React.JSX.Element {
+  return (
+    <span className="inbox-option-mark" role="img" aria-label={label} title={label}>
+      {GLYPH_BADGES.starFilled}
+    </span>
+  )
+}
+
 function listTimestamp(e: InboxEntry, today: Date): string {
   const at = new Date(entryAt(e))
   const isToday =
@@ -543,10 +551,11 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                     : open.approval.options
                   ).map((opt, idx) => {
                     const answerKind = verdictAnswerKindFor(open.approval.kind, idx)
+                    const recommended = open.approval.kind === 'question' && open.approval.recommended === idx
                     return (
                       <button
                         key={opt}
-                        className="chip inbox-option"
+                        className={recommended ? 'chip inbox-option is-recommended' : 'chip inbox-option'}
                         disabled={sending}
                         onClick={() =>
                           answer(
@@ -555,6 +564,7 @@ export function InboxCore(props: InboxCoreProps): React.JSX.Element {
                           )
                         }
                       >
+                        {recommended && <RecommendedMark label={t('inbox.recommendedByAgent')} />}
                         {displayApprovalText(opt)}
                       </button>
                     )

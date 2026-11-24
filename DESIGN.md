@@ -30,6 +30,7 @@ use the variables so both themes keep working.
 | `--action-prompt` | `#e0b341` | `#b07d10` | Yellow — "compose / insert a prompt" |
 | `--action-expand` | `#a06bff` | `#7c3aed` | Violet — "maximize / restore a tile" |
 | `--locked`     | `#e0b341` | `#9a6700` | Amber: "held, agents may not act on it"  |
+| `--recommend`  | `#ffb26b` | `#b45309` | Light orange: "recommended by the agent" |
 | `--select-arrow` | data URI | data URI | Chevron drawn for `<select>` (see §4)  |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
@@ -58,6 +59,14 @@ Colour is meaning. Do not repurpose these:
 - **Orange `#e08a3c`** — restoration actions ("Restore previous",
   template "Apply"). Filled, white text. (Worktree "orphan" warning uses the
   close `#e08a2e`.)
+- **Light orange `var(--recommend)`** -- recommended by the agent: the answer
+  chip an agent marked with `recommended` on `ask_operator`, in the Deck inbox
+  and the Avatar Réclame card (`.inbox-option.is-recommended`). Border and
+  filled-star glyph only, the label keeps `--fg`; the star says it without the
+  colour. Never the restore orange `#e08a3c`, never `--glow`. 3:1 or more on
+  the chip background `--bg-3` (8.09 dark, 4.10 light) and on its 12% tint
+  (6.24, 3.53). The light value stays at hue 26: a redder orange read as the
+  Decline red next to it.
 - **Red `var(--danger)`** — destructive: filled for the confirming action of a
   deletion (`.primary.danger`, `.ws-btn-danger`, `.template-del`), red
   text/border outline for row-level destructive actions (`.wt-actions
@@ -506,7 +515,8 @@ crown = team lead, scales of Themis = judge, crossed xiphos = battle,
 clepsydra = waiting (rate-limit, queue), head profile = the operator's graph
 node, Olympic torch lit/out = remote link reconnecting/gone, plus universal
 marks (lock, warning, gear, capsa = workspaces, paperclip, archive, star,
-checkboxes). **Kind marks** (`GLYPH_KINDS`) are the roadmap types (4-point
+checkboxes). The filled star also marks the agent's recommended answer
+chip, in `--recommend` (§2). **Kind marks** (`GLYPH_KINDS`) are the roadmap types (4-point
 star, scarab, brick wall, oil lamp, broom), each tinted by a
 `.kind-glyph-*` class so the kanban keeps colour scanning. Provider sigils
 (`✴ ◆ ✦ ⌂ ◇`) stay typographic characters: abstract, monochrome, and they

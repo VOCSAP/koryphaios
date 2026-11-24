@@ -63,6 +63,7 @@ interface FakeApproval {
   options: string[];
   questions: unknown;
   text_flags?: string[];
+  recommended?: number | null;
   mergeable: boolean;
   absorbed_permission: boolean;
   informational: boolean;
@@ -285,6 +286,46 @@ test("channel chips route by kind: a permission's are verdicts, a question's rel
     { id: "q", action: { kind: "text", text: "dev" } }
   ]);
 });
+
+const optionChips = (): HTMLButtonElement[] => [...container.querySelectorAll<HTMLButtonElement>(".inbox-modal .inbox-option")];
+
+test("the chip an agent recommended carries the class, the star and its spoken label, its neighbours none, and it sends the same answer", async () => {
+  await mount({ approvals: [approval({ id: "q", kind: "question", options: ["main", "dev", "prod"], recommended: 1 })] });
+  await click(container.querySelector(".inbox-entry"));
+  const chips = optionChips();
+  expect(chips.map((c) => c.classList.contains("is-recommended"))).toEqual([false, true, false]);
+  const mark = chips[1]!.querySelector(".inbox-option-mark");
+  expect(mark?.getAttribute("role")).toBe("img");
+  expect(mark?.getAttribute("aria-label")).toBe("inbox.recommendedByAgent");
+  expect(mark?.querySelector("svg"), "a glyph, not a colour alone").not.toBeNull();
+  expect(chips.filter((c) => c.querySelector(".inbox-option-mark")).length).toBe(1);
+  expect(chips[1]!.textContent).toBe("dev");
+  await click(chips[1]);
+  expect(calls.answers).toEqual([{ id: "q", action: { kind: "text", text: "dev" } }]);
+});
+
+test("a permission never marks Allow or Deny, even when it carries a recommended index", async () => {
+  await mount({ approvals: [approval({ id: "perm", recommended: 0 })] });
+  await click(container.querySelector(".inbox-entry"));
+  expect(optionChips().length).toBe(2);
+  expect(container.querySelector(".inbox-modal .is-recommended, .inbox-modal .inbox-option-mark")).toBeNull();
+});
+
+for (const [what, recommended] of [
+  ["no recommendation", undefined],
+  ["a null recommendation", null],
+  ["an index past the options", 3],
+] as const) {
+  test(`with ${what} every chip renders as a plain label`, async () => {
+    await mount({ approvals: [approval({ id: "q", kind: "question", options: ["main", "dev", "prod"], recommended })] });
+    await click(container.querySelector(".inbox-entry"));
+    expect(optionChips().map((c) => [c.className, c.innerHTML])).toEqual([
+      ["chip inbox-option", "main"],
+      ["chip inbox-option", "dev"],
+      ["chip inbox-option", "prod"],
+    ]);
+  });
+}
 
 test("a Reclame decline goes through the callback, and a failed one keeps the entry open", async () => {
   outcome = "failed";

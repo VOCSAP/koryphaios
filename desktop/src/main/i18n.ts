@@ -952,6 +952,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.ack': 'Acknowledge',
   'inbox.permissionAllow': 'Allow',
   'inbox.permissionDeny': 'Deny',
+  'inbox.recommendedByAgent': 'Recommended by the agent',
   'inbox.reply': 'Reply',
   'inbox.decline': 'Decline',
   'inbox.delete': 'Delete',

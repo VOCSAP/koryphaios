@@ -104,6 +104,9 @@
      wears, named so the operator's session lock does not borrow
      --action-prompt, which the same sidebar row spends on the context ring. */
   --locked: #e0b341;
+  /* "Recommended by the agent": a light orange, kept apart from the restore
+     orange #e08a3c; 8.09:1 on --bg-3. */
+  --recommend: #ffb26b;
   /* Drop-down chevron drawn by us: the native <select> arrow cannot be themed,
      so `appearance: none` hides it and this data URI takes over (--fg-dim). */
   --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a9a9a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -127,6 +130,8 @@
   --action-expand: #7c3aed;
   --action-halt: #7c3aed;
   --locked: #9a6700;
+  /* 4.10:1 on --bg-3. Hue 26: a redder #c2410c read as the Decline red beside it. */
+  --recommend: #b45309;
   --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236a6a6a' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
@@ -5507,6 +5512,25 @@ body:has(.rm-modal) .rm-conflict-modal {
 .inbox-option:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* The agent's recommended answer: the border and the glyph carry the orange,
+   the label keeps --fg so its text contrast does not depend on the tint. */
+.inbox-option.is-recommended {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-color: var(--recommend);
+  background: color-mix(in srgb, var(--recommend) 12%, var(--bg-3));
+}
+
+.inbox-option.is-recommended:hover:not(:disabled) {
+  border-color: var(--recommend);
+}
+
+.inbox-option-mark {
+  display: inline-flex;
+  color: var(--recommend);
 }
 
 .inbox-modal-reply {

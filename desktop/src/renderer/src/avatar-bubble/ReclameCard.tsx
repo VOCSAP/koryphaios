@@ -3,6 +3,7 @@ import type { AvatarBubbleCard } from '@shared/avatar-bubble-view'
 import type { AvatarInboxAction, InboxActionKind } from '@shared/avatar-inbox-protocol'
 import { ApprovalRequestBody } from '../components/ApprovalRequestBody'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from '../components/icons'
+import { RecommendedMark } from '../components/InboxCore'
 import type { TFn } from '../translate'
 
 export interface ReclameCardProps {
@@ -118,7 +119,13 @@ export function ReclameCard(props: ReclameCardProps): React.JSX.Element {
       {freeText && card.options.length > 0 && (
         <div className="inbox-modal-options">
           {card.options.map((opt, oi) => (
-            <button key={oi} className="chip inbox-option" disabled={locked} onClick={() => send({ action: 'text', text: opt.value })}>
+            <button
+              key={oi}
+              className={card.recommended === oi ? 'chip inbox-option is-recommended' : 'chip inbox-option'}
+              disabled={locked}
+              onClick={() => send({ action: 'text', text: opt.value })}
+            >
+              {card.recommended === oi && <RecommendedMark label={t('inbox.recommendedByAgent')} />}
               {opt.label}
             </button>
           ))}
