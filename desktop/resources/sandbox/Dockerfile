@@ -35,7 +35,7 @@ ENV HOME=/home/kory
 ENV CLAUDE_CONFIG_DIR=/home/kory/.claude
 ENV PATH="/home/kory/.local/bin:/home/kory/.bun/bin:${PATH}"
 
-ARG BUN_VERSION=1.4.2
+ARG BUN_VERSION=1.4.5
 ARG CLAUDE_VERSION=2.1.308
 # Without this the native CLI replaces the pinned version at runtime.
 ENV DISABLE_AUTOUPDATER=1
