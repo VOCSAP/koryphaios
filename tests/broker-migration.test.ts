@@ -94,6 +94,7 @@ test("the Inbox provenance migration extends an older database twice over and ke
     .query(`SELECT close_reason, closed_by_authority, closed_by_instance_ref, closed_by_peer_id_snapshot FROM pending_approvals WHERE id = 'old-approval'`)
     .get();
   const oldInformational = db.query(`SELECT informational FROM pending_approvals WHERE id = 'old-approval'`).get();
+  const oldRecommended = db.query(`SELECT recommended_option FROM pending_approvals WHERE id = 'old-approval'`).get();
   const registryRows = (db.query("SELECT COUNT(*) AS n FROM inbox_message_entries").get() as { n: number }).n;
   const oldToken = db
     .query(
@@ -110,6 +111,7 @@ test("the Inbox provenance migration extends an older database twice over and ke
   expect(oldCloseColumns).toEqual({ close_reason: null, closed_by_authority: null, closed_by_instance_ref: null, closed_by_peer_id_snapshot: null });
   // Mutant: the column added with DEFAULT 1, or without a default.
   expect(oldInformational, "a historical approval is a blocking question, never an information").toEqual({ informational: 0 });
+  expect(oldRecommended, "a historical approval recommends nothing").toEqual({ recommended_option: null });
   const nulls = (keys: string[]) => Object.fromEntries(keys.map((k) => [k, null]));
   expect(oldMessage, "a historical message is never promoted").toEqual(
     nulls(["inbox_operator_id", "inbox_run_ref", "inbox_group_id", "inbox_project_key", "author_instance_ref", "author_peer_id_snapshot", "source_kind", "provenance_version"])

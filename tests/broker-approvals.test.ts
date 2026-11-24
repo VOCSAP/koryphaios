@@ -185,6 +185,89 @@ describe("approval lifecycle", () => {
     expect(listed.body.approvals.find((a) => a.id === added.id)?.text_flags).toEqual(["bidi"]);
   });
 
+  test("a recommended marker is remapped past the empty options, stored, and projected by add and list; absent and null mean none", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const picked = await addApproval(b, op, { kind: "question", options: ["", "A", "  ", "B"], recommended: 3 });
+    expect(picked.options).toEqual(["A", "B"]);
+    expect(picked.recommended, "the raw index 3 names B, now at stored index 1").toBe(1);
+    const twins = await addApproval(b, op, { kind: "question", options: ["", "X", "X"], recommended: 2 });
+    expect(twins.options).toEqual(["X", "X"]);
+    expect(twins.recommended, "the second identical label keeps its own position").toBe(1);
+    const first = await addApproval(b, op, { kind: "question", options: ["A", "B"], recommended: 0 });
+    expect(first.recommended, "zero is a marker, not an absent one").toBe(0);
+    const none = await addApproval(b, op, { kind: "question", options: ["A", "B"] });
+    const nulled = await addApproval(b, op, { kind: "question", options: ["A", "B"], recommended: null });
+    expect([none.recommended, nulled.recommended]).toEqual([null, null]);
+
+    const listed = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), {
+      cred: op.cred,
+      operator_id: op.id,
+    });
+    expect(listed.body.approvals.find((a) => a.id === picked.id)?.recommended).toBe(1);
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    const stored = db.query("SELECT recommended_option FROM pending_approvals WHERE id = ?").get(picked.id);
+    db.close();
+    expect(stored, "the column holds the remapped index").toEqual({ recommended_option: 1 });
+  });
+
+  test("a stored marker outside its options is read as none, with a trace naming the row", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const logPath = join(b.tmpDir, "logs", "broker.log");
+    for (const bad of [9, -1, 1.5]) {
+      const row = await addApproval(b, op, { kind: "question", options: ["A", "B"], recommended: 1 });
+      const db = openBrokerDb(b.dbPath);
+      db.run("UPDATE pending_approvals SET recommended_option = ? WHERE id = ?", [bad, row.id]);
+      db.close();
+
+      const listed = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), {
+        cred: op.cred,
+        operator_id: op.id,
+      });
+      expect(listed.body.approvals.find((a) => a.id === row.id)?.recommended, `stored ${bad}`).toBeNull();
+      const line = `approval ${row.id}: recommended_option ${bad} is outside its 2 options, read as none`;
+      const deadline = Date.now() + 2000;
+      let traced = false;
+      while (!traced && Date.now() < deadline) {
+        traced = readFileSync(logPath, "utf8").includes(line);
+        if (!traced) await Bun.sleep(50);
+      }
+      expect(traced, `a trace for stored ${bad}`).toBe(true);
+    }
+  });
+
+  test("a recommended marker that names no kept option is refused with its reason, and nothing is stored", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const signer = { cred: op.cred, operator_id: op.id };
+    const count = async () =>
+      (await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody(DEFAULT_PROJECT_KEY), signer)).body.approvals.length;
+    const before = await count();
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["a string index", { options: ["A", "B"], recommended: "1" }, "recommended must be an integer index into options"],
+      ["a fractional index", { options: ["A", "B"], recommended: 1.5 }, "recommended must be an integer index into options"],
+      ["a boolean", { options: ["A", "B"], recommended: true }, "recommended must be an integer index into options"],
+      ["a negative index", { options: ["A", "B"], recommended: -1 }, "recommended must be between 0 and 1"],
+      ["an index equal to the option count", { options: ["A", "B"], recommended: 2 }, "recommended must be between 0 and 1"],
+      ["an empty option", { options: ["", "A"], recommended: 0 }, "recommended points to an empty option"],
+      ["no options", { options: [], recommended: 0 }, "recommended needs options"],
+      ["a permission", { kind: "permission", options: ["Allow", "Deny"], recommended: 0 }, "recommended belongs to kind question"],
+      ["a plan", { kind: "plan", options: ["Go", "Stop"], recommended: 0 }, "recommended belongs to kind question"],
+    ];
+    for (const [label, over, reason] of cases) {
+      const res = await signedPost<{ error?: string }>(
+        b,
+        "/approval/add",
+        { kind: "question", title: "Q", question: "Which?", origin: { host: "bureau", project_key: DEFAULT_PROJECT_KEY }, ...over },
+        signer
+      );
+      expect(res.status, label).toBe(400);
+      expect(res.body.error, label).toContain(reason);
+    }
+    expect(await count(), "no refused marker stored a row").toBe(before);
+  });
+
   test("a permission's danger list is normalised, served, flagged for hidden characters and listed again", async () => {
     const b = await boot();
     const op = newOperator();
@@ -3670,6 +3753,7 @@ describe("Attested channel questions", () => {
         const bad = async (over: Record<string, unknown>) => (await ask(w.b, w.op, w.run, info(w.bound.instance_token, over))).status;
 
         expect(await bad({ options: ["a"] }), "options").toBe(400);
+        expect(await bad({ recommended: 0 }), "a recommended marker on an information").toBe(400);
         expect(await bad({ kind: "permission" }), "a permission").toBe(400);
         expect(await bad({ merge: "tile" }), "a mergeable row").toBe(400);
         expect(await bad({ informational: "true" }), "a string flag").toBe(400);

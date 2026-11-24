@@ -2220,6 +2220,8 @@ export interface Approval {
   /** Rules the producer says matched; its absence never means the call is safe. Empty for a row that carries none. */
   danger: ApprovalDanger[];
   options: string[];
+  /** Index into `options` of the answer the agent recommends, null when it names none. Optional on the wire: a broker without the field omits it. */
+  recommended?: number | null;
   status: ApprovalStatus;
   /** Where the answer will be delivered. The routing TOKEN is never exposed. */
   reply_route: ApprovalReplyRoute;
@@ -2319,6 +2321,8 @@ export interface ApprovalAddRequest {
   title?: string;
   question?: string;
   options?: string[];
+  /** Index into `options` as the agent sent it; validated broker-side. */
+  recommended?: number | null;
   session_ref?: string;
   tile_ref?: string;
   /** Defaults to 'pty'. 'channel' additionally needs reply_peer_id; 'hook' needs merge 'never'. */

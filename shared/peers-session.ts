@@ -724,7 +724,7 @@ export const DECK_ONLY_TOOLS = [
   {
     name: "ask_operator",
     description:
-      "Ask the HUMAN operator a question on their phone or the Deck. Returns a ticket at once, never the answer: the answer, or a notice that the question was closed, arrives later as a channel message from operator. End your turn or continue other work; never assume an answer. If you suspect a lost message, call check_messages.",
+      "Ask the HUMAN operator a question on their phone or the Deck. Returns a ticket at once, never the answer: the answer, or a notice that the question was closed, arrives later as a channel message from operator. If you suspect a lost message, call check_messages.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -742,6 +742,10 @@ export const DECK_ONLY_TOOLS = [
           items: { type: "string" as const },
           maxItems: APPROVAL_OPTIONS_MAX,
           description: "Optional suggested answers, offered as one-tap buttons.",
+        },
+        recommended: {
+          type: "integer" as const,
+          description: "0-based index in options of your pick.",
         },
         blocking: {
           type: "boolean" as const,
@@ -1014,6 +1018,13 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
       };
     }
     const rawOptions = (args as { options?: unknown }).options;
+    const recommended = (args as { recommended?: unknown }).recommended;
+    if (recommended !== undefined && recommended !== null && !Number.isInteger(recommended)) {
+      return {
+        content: [{ type: "text" as const, text: "recommended must be an integer index into options" }],
+        isError: true,
+      };
+    }
     const blocking = (args as { blocking?: unknown }).blocking;
     if (blocking !== undefined && typeof blocking !== "boolean") {
       return { content: [{ type: "text" as const, text: "blocking must be a boolean" }], isError: true };
@@ -1026,6 +1037,7 @@ export async function handleAskOperator(args: unknown, identity: CompanionIdenti
         title,
         question,
         options: Array.isArray(rawOptions) ? rawOptions.map(String) : [],
+        ...(recommended !== undefined ? { recommended } : {}),
         session_ref: cred.sessionRef,
         tile_ref: (ctx.env.CLAUDE_PEERS_DESK_SESSION ?? "").trim(),
         merge: "never",

@@ -74,7 +74,7 @@ interface JsonRpcResponse {
   result?: {
     content?: Array<{ text?: string }>;
     isError?: boolean;
-    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, { maxItems?: number }>; required?: string[] } }>;
+    tools?: Array<{ name: string; inputSchema?: { properties?: Record<string, { maxItems?: number; type?: string }>; required?: string[] } }>;
   };
 }
 
@@ -267,6 +267,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(ask?.inputSchema?.properties?.options?.maxItems).toBe(APPROVAL_OPTIONS_MAX);
     // Mutant: the `blocking` entry removed from the ask_operator inputSchema.
     expect(ask?.inputSchema?.properties?.blocking?.type).toBe("boolean");
+    expect(ask?.inputSchema?.properties?.recommended?.type).toBe("integer");
     expect(ask?.inputSchema?.required).toEqual(["title", "question"]);
   }, 60_000);
 
@@ -471,6 +472,53 @@ describe("ask_operator over MCP stdio", () => {
     expect(await claim(h, approval!.id, "deny")).toBe(200);
     const accepted = await settled(readUntil(h.reader, 2, h.buffer));
     expect(accepted.result?.isError).toBeFalsy();
+  }, 60_000);
+
+  test("a recommended marker reaches the broker remapped past an empty option, and an invalid one is refused to the agent with the broker's reason", async () => {
+    const h = await boot(true);
+    const ask = (id: number, args: Record<string, unknown>) =>
+      h.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "ask_operator", arguments: { title: "Pick", question: "Which one?", ...args } },
+      });
+    const reply = (id: number) => reachedWithin(readUntil(h.reader, id, h.buffer), `the ask_operator result ${id}`, 15_000);
+
+    const refusals: Array<[Record<string, unknown>, string]> = [
+      [{ options: ["A", "B"], recommended: 2 }, "recommended must be between 0 and 1"],
+      [{ options: ["A", "B"], recommended: "1" }, "recommended must be an integer index into options"],
+      [{ recommended: 0 }, "recommended needs options"],
+      [{ blocking: false, recommended: 0 }, "recommended needs options"],
+    ];
+    let id = 1;
+    for (const [args, reason] of refusals) {
+      ask(id, args);
+      const res = await reply(id);
+      expect(res.result?.isError, reason).toBe(true);
+      expect(res.result?.content?.[0]?.text, reason).toContain(reason);
+      id++;
+    }
+
+    (h.proc.stdin as unknown as { write(chunk: string): unknown }).write(
+      `{"jsonrpc":"2.0","id":${id},"method":"tools/call","params":{"name":"ask_operator","arguments":{"title":"Pick","question":"Which one?","options":["X","Y"],"recommended":1e400}}}\n`
+    );
+    const overflow = await reply(id);
+    expect(overflow.result?.isError, "1e400 parses to Infinity, which JSON would carry as null").toBe(true);
+    expect(overflow.result?.content?.[0]?.text).toContain("recommended must be an integer index into options");
+    id++;
+
+    ask(id, { options: ["", "A", "B"], recommended: 2 });
+    expect((await reply(id)).result?.isError).toBeFalsy();
+    const approval = await firstApproval(h);
+    expect(approval?.options).toEqual(["A", "B"]);
+    expect(approval?.recommended, "the raw index 2 names B, stored at index 1").toBe(1);
+    const listBody = approvalListBody(SPAWNED_SERVER_PROJECT_KEY, { public_key: h.op.publicKey, run_ref: h.run!.run });
+    const listed = await post<{ approvals: Approval[] }>(`${h.b.url}/approval/list`, {
+      ...listBody,
+      auth: buildAuthProof(h.op.privateKey, listBody, { kind: "operator", operator_id: h.op.id }),
+    });
+    expect(listed.body.approvals, "no refused marker stored a row").toHaveLength(1);
   }, 60_000);
 
 });

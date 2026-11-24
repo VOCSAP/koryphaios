@@ -332,6 +332,8 @@ export interface Approval {
   text_flags: ApprovalTextFlag[]
   danger: ApprovalDanger[]
   options: string[]
+  /** Index into `options` of the answer the agent recommends, null when it names none. Optional on the wire: a broker without the field omits it. */
+  recommended?: number | null
   status: ApprovalStatus
   reply_route: ApprovalReplyRoute
   mergeable: boolean

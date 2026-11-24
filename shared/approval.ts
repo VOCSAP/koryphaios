@@ -436,6 +436,8 @@ export interface ApprovalDraft {
   title: string;
   question: string;
   options: string[];
+  /** Index into `options` of the answer the agent recommends, null when it names none. */
+  recommended: number | null;
   session_ref: string;
   tile_ref: string;
   /**
@@ -646,6 +648,23 @@ export function validateApprovalAnswers(
 }
 
 /**
+ * `recommended` indexes the options as the agent sent them, but the stored
+ * list drops the empty ones, so the index is remapped onto the stored list.
+ */
+function validateRecommended(raw: unknown, cleaned: readonly string[]): ValidationResult<number | null> {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== "number" || !Number.isInteger(raw)) {
+    return { ok: false, error: "recommended must be an integer index into options" };
+  }
+  if (cleaned.length === 0) return { ok: false, error: "recommended needs options" };
+  if (raw < 0 || raw >= cleaned.length) {
+    return { ok: false, error: `recommended must be between 0 and ${cleaned.length - 1}` };
+  }
+  if (cleaned[raw] === "") return { ok: false, error: "recommended points to an empty option" };
+  return { ok: true, value: cleaned.slice(0, raw).filter((o) => o.length > 0).length };
+}
+
+/**
  * Validate + normalise an /approval/add payload. Everything here comes from an
  * AGENT (hostile input #4): it is length-capped and control-stripped before it
  * can reach a notification channel or an operator's screen.
@@ -655,6 +674,7 @@ export function validateApprovalDraft(body: {
   title?: unknown;
   question?: unknown;
   options?: unknown;
+  recommended?: unknown;
   session_ref?: unknown;
   tile_ref?: unknown;
   merge?: unknown;
@@ -675,9 +695,13 @@ export function validateApprovalDraft(body: {
   if (rawOptions.length > APPROVAL_OPTIONS_MAX) {
     return { ok: false, error: `at most ${APPROVAL_OPTIONS_MAX} options` };
   }
-  const options = rawOptions
-    .map((o) => stripControl(str(o)).trim().slice(0, APPROVAL_OPTION_MAX))
-    .filter((o) => o.length > 0);
+  const cleaned = rawOptions.map((o) => stripControl(str(o)).trim().slice(0, APPROVAL_OPTION_MAX));
+  const options = cleaned.filter((o) => o.length > 0);
+  if (body.recommended !== undefined && body.recommended !== null && kind !== "question") {
+    return { ok: false, error: "recommended belongs to kind question" };
+  }
+  const recommended = validateRecommended(body.recommended, cleaned);
+  if (!recommended.ok) return recommended;
 
   const session_ref = stripControl(str(body.session_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
   const tile_ref = stripControl(str(body.tile_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
@@ -720,7 +744,7 @@ export function validateApprovalDraft(body: {
     danger = parsed.value;
   }
 
-  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge, tile_only, questions, danger } };
+  return { ok: true, value: { kind, title, question, options, recommended: recommended.value, session_ref, tile_ref, merge, tile_only, questions, danger } };
 }
 
 // --- Sanitisers ---

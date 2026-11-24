@@ -1695,6 +1695,47 @@ describe("the kory-operator inbox tools", () => {
     expect(textOf(got)).toContain("NOT the answer");
   });
 
+  test("ask_operator forwards an integer or null recommended exactly as received and sends no key when the caller gave none", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const h = ctx({});
+    h.context.broker = {
+      post: async (_path: string, body: Record<string, unknown>) => {
+        bodies.push(body);
+        return { approval: { id: "appr-43", reply_route: "channel" } };
+      },
+    } as never;
+    const given = [1, 0, null];
+    for (const recommended of given) {
+      await handleAskOperator({ title: "t", question: "q", options: ["a", "b"], recommended }, identity, h.context);
+    }
+    await handleAskOperator({ title: "t", question: "q", options: ["a", "b"] }, identity, h.context);
+
+    expect(bodies.slice(0, given.length).map((b) => b.recommended)).toEqual(given);
+    expect(bodies.slice(0, given.length).every((b) => "recommended" in b)).toBe(true);
+    expect("recommended" in bodies[given.length]!, "no key without a marker").toBe(false);
+  });
+
+  test("ask_operator refuses a recommended that is not an integer before any POST, so JSON never turns it into no marker", async () => {
+    const posts: string[] = [];
+    const h = ctx({});
+    h.context.broker = {
+      post: async (path: string) => {
+        posts.push(path);
+        return { approval: { id: "appr-44", reply_route: "channel" } };
+      },
+    } as never;
+    const refused = [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, "1", 1.5, true];
+    for (const recommended of refused) {
+      const got = await handleAskOperator({ title: "t", question: "q", options: ["a", "b"], recommended }, identity, h.context);
+      expect({ recommended: String(recommended), isError: (got as { isError?: boolean }).isError, text: textOf(got) }).toEqual({
+        recommended: String(recommended),
+        isError: true,
+        text: "recommended must be an integer index into options",
+      });
+    }
+    expect(posts).toEqual([]);
+  });
+
   // Mutants: inbox_list signed under the close gate; the cursor dropped or moved into the signed payload.
   test("inbox_list signs under the author list gate, passes the cursor beside the proof and renders the page as JSON", async () => {
     const page = { outcome: "listed", entries: [{ id: "m_1", type: "message", author: "p", created_at: "t", text: "x", closable: true }], next_cursor: "n2" };
