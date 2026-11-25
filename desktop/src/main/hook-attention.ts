@@ -19,6 +19,8 @@ export function hookAwaitedTiles(approvals: readonly Approval[]): Set<string> {
 export interface PendingApprovalsIo<Deps> {
   deps(): Deps | null
   fetchPending(deps: Deps): Promise<Approval[]>
+  /** Sees each list before setHookAwaited raises the needs-you edges it causes. */
+  observePending?(list: Approval[]): void
   setHookAwaited(tiles: ReadonlySet<string>): void
   /** Attaches the Deck's own danger signal before any consumer sees the list; never rejects. */
   enrich?(list: Approval[]): Promise<PendingApproval[]>
@@ -81,6 +83,7 @@ export function createPendingApprovalsTick<Deps>(io: PendingApprovalsIo<Deps>): 
       return fail('pending approvals poll failed: the tiles waiting on a module verdict are no longer flagged', e)
     }
     failing = false
+    io.observePending?.(list)
     io.setHookAwaited(hookAwaitedTiles(list))
     const shown: PendingApproval[] = io.enrich ? await io.enrich(list) : list
     // The view changes without the row when the operator toggles a rule.

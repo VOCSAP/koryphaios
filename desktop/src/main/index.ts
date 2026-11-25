@@ -1391,7 +1391,7 @@ function raiseTileQuestion(
 ): void {
   const deps = approvals.deps()
   if (!deps) return
-  void addApproval(deps, {
+  const raised = addApproval(deps, {
     kind: 'question',
     title: session.name,
     question,
@@ -1411,6 +1411,10 @@ function raiseTileQuestion(
   })
     .then((a) => openApprovals.set(session.id, a.id))
     .catch((e) => reportError('approvals', 'could not raise an approval', e))
+  tileQuestionRaises.set(session.id, raised)
+  void raised.finally(() => {
+    if (tileQuestionRaises.get(session.id) === raised) tileQuestionRaises.delete(session.id)
+  })
 }
 
 /**
@@ -1678,6 +1682,9 @@ function notifyWaitingSession(id: string): void {
   n.show()
 }
 
+/** The fallback row still being created for a tile, so its sound waits for the row. */
+const tileQuestionRaises = new Map<string, Promise<unknown>>()
+
 const notificationSounder = createNotificationSounder({
   enabled: () => config.notifySound !== false,
   appearance: () => readAvatarAppearance(join(app.getPath('userData'), APP_STATE_SUBDIR, AVATAR_APPEARANCE_FILE), { reportError }),
@@ -1687,6 +1694,7 @@ const notificationSounder = createNotificationSounder({
     mainWindow.webContents.send('notify:sound', kind)
     return true
   },
+  later: (delayMs, run) => void setTimeout(run, delayMs),
   report: (text, err) => reportError('notification-sound', text, err)
 })
 
@@ -1696,7 +1704,15 @@ regOn('notify:sound-ready', () => {
 
 service.on('needs-you', ({ id }: { id: string }) => {
   notifyWaitingSession(id)
-  notificationSounder.noteAttention()
+  notificationSounder.noteNeedsYou(
+    id,
+    () => Promise.resolve(tileQuestionRaises.get(id)).then(() => pollPendingApprovals()),
+    () => service.list().some((s) => s.id === id && s.needsAttention)
+  )
+})
+
+service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
+  if (!waiting) notificationSounder.noteAttentionCleared(id)
 })
 
 // ----- Operator inbox (PLAN C12) -----
@@ -2125,6 +2141,7 @@ let lastPendingApprovals: readonly Approval[] = []
 const pollPendingApprovals = createPendingApprovalsTick({
   deps: () => approvals.deps(),
   fetchPending: fetchPendingApprovals,
+  observePending: (list) => notificationSounder.noteApprovals(list),
   setHookAwaited: (tiles) => service.setHookAwaited(tiles),
   enrich: createDangerEnricher({
     rulesFor: (tileRef) => ttsr.dangerRulesFor(tileRef),
@@ -2134,12 +2151,12 @@ const pollPendingApprovals = createPendingApprovalsTick({
   broadcastPending: (list) => {
     lastPendingApprovals = list
     broadcast('approvals:pending', list)
-    notificationSounder.noteApprovals(list)
     avatarClient?.sessionsChanged()
     avatarClient?.inboxChanged()
   },
   pendingUnavailable: () => {
     lastPendingApprovals = []
+    notificationSounder.approvalsUnavailable()
     avatarClient?.inboxChanged()
   },
   report: (text, err) => reportError('approvals', text, err)

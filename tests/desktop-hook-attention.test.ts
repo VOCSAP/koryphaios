@@ -270,6 +270,9 @@ function indexBodies(): {
   rendererGone: string;
   startLoading: string;
   soundDeps: string;
+  tickDeps: string;
+  clearedAttention: string;
+  tileQuestion: string;
 } {
   const index = stripComments(readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n"));
   const bodyAfter = (anchor: string, arrow: boolean): string => {
@@ -288,7 +291,10 @@ function indexBodies(): {
     soundReady: bodyAfter("regOn('notify:sound-ready'", true),
     rendererGone: bodyAfter("app.on('render-process-gone'", true),
     startLoading: bodyAfter("mainWindow.webContents.on('did-start-loading'", true),
-    soundDeps: extractParenBody(index, index.indexOf("(", index.indexOf("createNotificationSounder(")), true)
+    soundDeps: extractParenBody(index, index.indexOf("(", index.indexOf("createNotificationSounder(")), true),
+    tickDeps: extractParenBody(index, index.indexOf("(", index.indexOf("createPendingApprovalsTick(")), true),
+    clearedAttention: bodyAfter("service.on('attention', ({ id, waiting }", true),
+    tileQuestion: bodyAfter("function raiseTileQuestion(", false)
   };
 }
 
@@ -366,42 +372,182 @@ test("a waiting session raises its OS notification unless the Avatar vouches for
   expect(run({ avatar: true, notifyAttention: false }).replacedAsked(), "the config guard answers first").toBe(0);
 });
 
-test("the needs-you handler and the approvals broadcast both reach the sound decision, and the ready signal reaches the sounder", () => {
+test("the needs-you handler hands the sound a wait on the tile's fallback row then a fresh poll, and the ready signal reaches the sounder", async () => {
   const { needsYou, broadcastPending, soundReady } = indexBodies();
   const calls: string[] = [];
+  let handed: { id: string; rowsSettled: () => Promise<unknown>; stillWaiting: () => boolean } | null = null;
   const sounder = {
-    noteAttention: () => void calls.push("attention"),
-    noteApprovals: (list: unknown) => void calls.push(`approvals:${(list as string[]).join(",")}`),
+    noteNeedsYou: (id: string, rowsSettled: () => Promise<unknown>, stillWaiting: () => boolean) => {
+      handed = { id, rowsSettled, stillWaiting };
+    },
     rendererReady: () => void calls.push("ready")
   };
+  let finishRaise: () => void = () => undefined;
+  const raises = new Map<string, Promise<unknown>>([["s1", new Promise<void>((resolve) => (finishRaise = resolve))]]);
+  let sessions = [{ id: "s1", needsAttention: true }];
 
-  const onNeedsYou = compile("onNeedsYou", ["{ id }: { id: string }"], needsYou, ["notifyWaitingSession", "notificationSounder"])(
+  const onNeedsYou = compile("onNeedsYou", ["{ id }: { id: string }"], needsYou, [
+    "notifyWaitingSession",
+    "notificationSounder",
+    "tileQuestionRaises",
+    "pollPendingApprovals",
+    "service"
+  ])(
     (id: string) => void calls.push(`notify:${id}`),
-    sounder
+    sounder,
+    raises,
+    () => {
+      calls.push("poll");
+      return Promise.resolve();
+    },
+    { list: () => sessions }
   ) as (event: { id: string }) => void;
   onNeedsYou({ id: "s1" });
-  expect(calls, "the OS notification and the sound both run for a needs-you edge").toEqual(["notify:s1", "attention"]);
+  expect(calls).toEqual(["notify:s1"]);
+  const wait = handed!;
+  expect(wait.id).toBe("s1");
+
+  const settled = wait.rowsSettled();
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  expect(calls, "no poll before the tile's row is created").toEqual(["notify:s1"]);
+  finishRaise();
+  await settled;
+  expect(calls).toEqual(["notify:s1", "poll"]);
+
+  expect(wait.stillWaiting()).toBe(true);
+  sessions = [{ id: "s1", needsAttention: false }];
+  expect(wait.stillWaiting(), "a tile that stopped waiting").toBe(false);
 
   calls.length = 0;
-  const list = ["a1", "a2"];
   const avatarClient = { sessionsChanged: () => void calls.push("sessions"), inboxChanged: () => void calls.push("inbox") };
-  const onBroadcast = compile("broadcastPending", ["list: string[]"], broadcastPending, ["lastPendingApprovals", "broadcast", "avatarClient", "notificationSounder"])(
+  const onBroadcast = compile("broadcastPending", ["list: string[]"], broadcastPending, ["lastPendingApprovals", "broadcast", "avatarClient"])(
     [],
     (channel: string) => void calls.push(`broadcast:${channel}`),
-    avatarClient,
-    sounder
+    avatarClient
   ) as (list: string[]) => void;
-  onBroadcast(list);
-  expect(calls, "the sound decision sees the broadcast list, next to the Avatar refresh").toEqual([
-    "broadcast:approvals:pending",
-    "approvals:a1,a2",
-    "sessions",
-    "inbox"
-  ]);
+  onBroadcast(["a1"]);
+  expect(calls).toEqual(["broadcast:approvals:pending", "sessions", "inbox"]);
 
   calls.length = 0;
   (compile("onReady", [], soundReady, ["notificationSounder"])(sounder) as () => void)();
   expect(calls, "the renderer ready signal is forwarded to the sounder").toEqual(["ready"]);
+});
+
+test("a tile that stops waiting clears its held attention sound, and the fallback row is recorded for its tile", async () => {
+  const { clearedAttention, tileQuestion } = indexBodies();
+  const cleared: string[] = [];
+  const onAttention = compile("onAttention", ["{ id, waiting }: { id: string; waiting: boolean }"], clearedAttention, ["notificationSounder"])({
+    noteAttentionCleared: (id: string) => void cleared.push(id)
+  }) as (event: { id: string; waiting: boolean }) => void;
+  onAttention({ id: "s1", waiting: true });
+  expect(cleared).toEqual([]);
+  onAttention({ id: "s1", waiting: false });
+  expect(cleared).toEqual(["s1"]);
+
+  const creations: { resolve: (row: { id: string }) => void; reject: (e: Error) => void }[] = [];
+  const raises = new Map<string, Promise<unknown>>();
+  const openApprovals = new Map<string, string>();
+  const reported: unknown[] = [];
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(
+    `function raise(session: { id: string; name: string }, question: string, tileOnly: boolean) {${tileQuestion}\n}`
+  );
+  const build = new Function(
+    "approvals",
+    "addApproval",
+    "computeDeckProjectKey",
+    "cliContext",
+    "hostname",
+    "activeScope",
+    "openApprovals",
+    "reportError",
+    "tileQuestionRaises",
+    `${js}\nreturn raise;`
+  );
+  const raise = build(
+    { deps: () => ({}) },
+    () => new Promise((resolve, reject) => void creations.push({ resolve, reject })),
+    () => "project",
+    { projectDir: "dir" },
+    () => "host",
+    { groupId: "group" },
+    openApprovals,
+    (...args: unknown[]) => void reported.push(args),
+    raises
+  ) as (session: { id: string; name: string }, question: string, tileOnly: boolean) => void;
+  const settle = async () => {
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  };
+  const session = { id: "s1", name: "Session 1" };
+
+  raise(session, "waiting", false);
+  const first = raises.get("s1")!;
+  let done = false;
+  void first.then(() => (done = true));
+  await settle();
+  expect(done, "the recorded wait ends only when the row exists").toBe(false);
+  raise(session, "waiting again", false);
+  const second = raises.get("s1")!;
+  expect(second).not.toBe(first);
+  creations[0]!.resolve({ id: "appr-1" });
+  await settle();
+  expect(raises.get("s1"), "an older raise that settles does not drop the newer one").toBe(second);
+  creations[1]!.resolve({ id: "appr-2" });
+  await settle();
+  expect(raises.has("s1"), "a settled raise is forgotten").toBe(false);
+  expect(openApprovals.get("s1")).toBe("appr-2");
+
+  raise(session, "waiting", false);
+  creations[2]!.reject(new Error("broker down"));
+  await settle();
+  expect(raises.has("s1"), "a refused raise is forgotten too").toBe(false);
+  expect(reported).toHaveLength(1);
+});
+
+test("the Deck's pending poll feeds every list to the sound decision and tells it when none can be read", () => {
+  const { tickDeps } = indexBodies();
+  const calls: unknown[][] = [];
+  const sounder = {
+    noteApprovals: (list: unknown) => void calls.push(["approvals", list]),
+    approvalsUnavailable: () => void calls.push(["unavailable"])
+  };
+  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`function build() { return (${tickDeps}) }`);
+  const names = [
+    "approvals",
+    "fetchPendingApprovals",
+    "notificationSounder",
+    "service",
+    "createDangerEnricher",
+    "ttsr",
+    "evaluateIsolated",
+    "reportError",
+    "broadcast",
+    "avatarClient",
+    "lastPendingApprovals"
+  ];
+  const make = new Function(...names, `${js}\nreturn build;`);
+  const deps = make({}, () => undefined, sounder, {}, () => undefined, {}, () => undefined, () => undefined, () => undefined, null, [])() as {
+    observePending: (list: unknown) => void;
+    pendingUnavailable: () => void;
+  };
+  const list = ["a1"];
+  deps.observePending(list);
+  deps.pendingUnavailable();
+  expect(calls).toEqual([["approvals", list], ["unavailable"]]);
+});
+
+test("each tick shows its list to the sound decision before it raises the needs-you edges", async () => {
+  const calls: string[] = [];
+  const probe = createPendingApprovalsTick({
+    deps: () => ({}),
+    fetchPending: () => Promise.resolve([] as Approval[]),
+    observePending: (list) => void calls.push(`observe:${list.length}`),
+    setHookAwaited: () => void calls.push("awaited"),
+    broadcastPending: () => undefined,
+    report: () => undefined
+  });
+  await probe();
+  await probe();
+  expect(calls, "observed before the edges, on an unchanged list too").toEqual(["observe:0", "awaited", "observe:0", "awaited"]);
 });
 
 test("a reload or a crash of the main renderer marks it not ready, and no other web contents does", () => {
@@ -435,6 +581,7 @@ test("the sounder the Deck builds follows the config switch, reads the Avatar fi
   const reported: unknown[][] = [];
   const reportError = (...args: unknown[]) => void reported.push(args);
   const appearance = { sound: false, dndUntil: 5 };
+  const timeouts: unknown[][] = [];
   const build = (config: Record<string, unknown>) => {
     const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`function build() { return (${soundDeps}) }`);
     const make = new Function(
@@ -447,6 +594,7 @@ test("the sounder the Deck builds follows the config switch, reads the Avatar fi
       "reportError",
       "mainWindow",
       "Date",
+      "setTimeout",
       `${js}\nreturn build;`
     );
     return make(
@@ -461,12 +609,14 @@ test("the sounder the Deck builds follows the config switch, reads the Avatar fi
       },
       reportError,
       null,
-      { now: () => 4242 }
+      { now: () => 4242 },
+      (run: () => void, delayMs: number) => void timeouts.push([run, delayMs])
     )() as {
       enabled: () => boolean;
       appearance: () => unknown;
       now: () => number;
       report: (text: string, err?: unknown) => void;
+      later: (delayMs: number, run: () => void) => void;
     };
   };
 
@@ -483,6 +633,10 @@ test("the sounder the Deck builds follows the config switch, reads the Avatar fi
   const boom = new Error("boom");
   deps.report("some text", boom);
   expect(reported).toEqual([["notification-sound", "some text", boom]]);
+
+  const run = () => undefined;
+  deps.later(700, run);
+  expect(timeouts, "a deferred sound runs on a real timer, after the delay asked").toEqual([[run, 700]]);
 });
 
 test("the Deck hands a sound to its window only while that window is alive, and says whether it did", () => {

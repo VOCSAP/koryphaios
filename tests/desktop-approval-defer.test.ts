@@ -93,7 +93,7 @@ ${LISTENER}
 const registerRaise = await evaluate<{ raise: (session: unknown, question: string, tileOnly: boolean) => void }>(
   `export function register(env) {
   const { approvals, addApproval, computeDeckProjectKey, cliContext, hostname, activeScope,
-          openApprovals, reportError } = env
+          openApprovals, reportError, tileQuestionRaises } = env
 ${RAISE}
   return { raise: raiseTileQuestion }
 }
@@ -862,6 +862,7 @@ describe("raiseTileQuestion", () => {
       hostname: () => "host",
       activeScope: { groupId: "g1" },
       openApprovals,
+      tileQuestionRaises: new Map<string, Promise<unknown>>(),
       reportError: (...args: unknown[]) => calls.push({ fn: "reportError", args }),
     });
     return { raise, calls, openApprovals };
