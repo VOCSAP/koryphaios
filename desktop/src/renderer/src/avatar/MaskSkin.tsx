@@ -57,14 +57,27 @@ function badgeCount(value: number): string {
   return value > 99 ? '99+' : String(value)
 }
 
+// Two digits at most: a third does not fit the last slot. The label ends 2
+// units inside the figure: half its 3-unit stroke, plus half a unit for a
+// digit whose ink runs past its advance.
+const OVERFLOW_CAP = 99
+const OVERFLOW_END = FIGURE_VIEWBOX.x + FIGURE_VIEWBOX.width - 2
+
 const PILL_GLYPHS = {
   fault: GLYPH_BADGES.torchOut,
   lost: GLYPH_BADGES.warning,
   quota: GLYPH_BADGES.clepsydra
 } as const
 
+// Chromium sizes the nested glyph viewport from its width attribute (20), not its CSS width.
+const GLYPH_FRAME = 20
+
+// The badge layout around the unread count is drawn for a two-thirds glyph
+// frame whose top-left corner sits at cx-10, cy-8.
+const INBOX_GLYPH = { dx: -10, dy: -8, size: (GLYPH_FRAME * 2) / 3 } as const
+
 function GlyphAt({ x, y, size, children }: { x: number; y: number; size: number; children: React.ReactNode }): React.JSX.Element {
-  const s = size / 24
+  const s = size / GLYPH_FRAME
   return <g transform={`translate(${x - size / 2} ${y - size / 2}) scale(${s})`}>{children}</g>
 }
 
@@ -147,7 +160,9 @@ export function MaskSkin({ summary }: { summary: AvatarSummary }): React.JSX.Ele
         <circle className="avatar-badge-knockout" cx={BADGE.cx} cy={cy} r={BADGE.knockout} />
         <circle className="avatar-badge-disc" cx={BADGE.cx} cy={cy} r={BADGE.r} />
         <g className="avatar-badge-glyph">
-          <GlyphAt x={BADGE.cx - 2} y={cy} size={16}>{GLYPHS.inbox}</GlyphAt>
+          <GlyphAt x={BADGE.cx + INBOX_GLYPH.dx + INBOX_GLYPH.size / 2} y={cy + INBOX_GLYPH.dy + INBOX_GLYPH.size / 2} size={INBOX_GLYPH.size}>
+            {GLYPHS.inbox}
+          </GlyphAt>
         </g>
         <text className="avatar-badge-text is-small" x={BADGE.cx + 6} y={cy + 9} textAnchor="middle">{badgeCount(summary.unread)}</text>
       </g>
@@ -182,8 +197,8 @@ export function MaskSkin({ summary }: { summary: AvatarSummary }): React.JSX.Ele
           <Pill key={deckIdentityKey(deck)} deck={deck} t={slots[i]!} size={markerSize} />
         ))}
         {overflowAt && (
-          <text className="avatar-stage-overflow" data-overflow={stage.hidden} x={overflowAt.x} y={overflowAt.y - PILL.lift - 3} textAnchor="middle">
-            +{stage.hidden}
+          <text className="avatar-stage-overflow" data-overflow={stage.hidden} x={OVERFLOW_END} y={overflowAt.y - PILL.lift - 3} textAnchor="end">
+            +{Math.min(stage.hidden, OVERFLOW_CAP)}
           </text>
         )}
       </g>

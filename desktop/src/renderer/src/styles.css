@@ -10036,8 +10036,8 @@ html.avatar-document body {
 
 /* Reused Greek badge glyphs, sized in the figure's user units, not at 1em. */
 .avatar-root .avatar-skin svg.glyph {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   vertical-align: baseline;
   stroke-width: 2.4;
 }

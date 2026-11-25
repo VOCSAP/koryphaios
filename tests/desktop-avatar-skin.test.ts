@@ -333,6 +333,8 @@ describe("mask skin geometry", () => {
   }
 
   const GLYPH_SHAPES = new Set(["svg", "g", "path", "circle"]);
+  const LABEL_ADVANCE_EM = 0.8;
+  const LABEL_OVERHANG_EM = 0.05;
 
   function markerInk(svg: SVGSVGElement, rules: ReturnType<typeof cssRules>): Box[] {
     const pillPad = strokeOf(rules, ".avatar-root .avatar-skin .avatar-pill") / 2;
@@ -376,10 +378,14 @@ describe("mask skin geometry", () => {
       const pad = strokeOf(rules, ".avatar-root .avatar-skin .avatar-stage-overflow") / 2;
       const x = Number(label.getAttribute("x"));
       const y = Number(label.getAttribute("y"));
-      // Upper bounds, not font metrics: no character of a sans face is wider
-      // than 1em, rises more than 1.25em above its baseline or drops 0.5em below.
-      const half = ((label.textContent ?? "").length * size) / 2;
-      boxes.push({ l: x - half - pad, t: y - 1.25 * size - pad, r: x + half + pad, b: y + 0.5 * size + pad, label: true });
+      // Upper bounds, not font metrics, for any bold sans face of the label's
+      // fallback chain: per-character advance, ink past either end of the
+      // advance, rise above the baseline and drop below it.
+      const advance = (label.textContent ?? "").length * LABEL_ADVANCE_EM * size;
+      const overhang = LABEL_OVERHANG_EM * size;
+      const anchor = label.getAttribute("text-anchor") ?? "start";
+      const start = anchor === "end" ? x - advance : anchor === "middle" ? x - advance / 2 : x;
+      boxes.push({ l: start - overhang - pad, t: y - 1.25 * size - pad, r: start + advance + overhang + pad, b: y + 0.5 * size + pad, label: true });
     }
     return boxes;
   }
@@ -491,7 +497,7 @@ describe("mask skin geometry", () => {
     });
   }
 
-  test("the raised stage stays inside the figure and its markers clear the mask and the Reclame halo, every face, 1 to capacity + 1 decks and the +N label at one, two and three digits (the label's horizontal fit is not covered)", () => {
+  test("the raised stage stays inside the figure and its markers clear the mask and the Reclame halo, every face, 1 to capacity + 1 decks and the +N label at one and two digits and past 99", () => {
     const rules = cssRules(avatarCssBlock());
     const stroke = (selector: string): number => strokeOf(rules, selector);
     const box = geometry.FIGURE_VIEWBOX;
@@ -508,10 +514,11 @@ describe("mask skin geometry", () => {
       ["capsules", new Set(["idle", "working"]), (n) => decks(n, [{ idle: 1 }, { working: 1 }])]
     ];
     const capacity = geometry.STAGE_MARKER.capacity;
-    // The label shows count - (capacity - 1): these counts cross the capacity
-    // and take it from one digit to two and from two to three.
-    const counts = [...Array.from({ length: capacity + 1 }, (_, i) => i + 1), capacity + 8, capacity + 9, capacity + 98, capacity + 99];
+    // The label counts count - (capacity - 1) hidden decks: these counts cross
+    // the capacity and take it from one digit to two, then past 99.
+    const counts = [...Array.from({ length: capacity + 1 }, (_, i) => i + 1), capacity + 2, capacity + 8, capacity + 9, capacity + 12, capacity + 98, capacity + 99, capacity + 1000];
     const labelDigits = new Set<number>();
+    let pastCap = false;
     const facesSeen = new Set<string>();
     const kindsSeen = new Set<string>();
     for (const face of AVATAR_FACES) {
@@ -530,16 +537,15 @@ describe("mask skin geometry", () => {
           rendered.forEach((k) => kindsSeen.add(k));
           const label = svg.querySelector(".avatar-stage-overflow");
           if (label) labelDigits.add((label.textContent ?? "").replace(/\D/g, "").length);
+          if (overflow(svg) > 99) pastCap = true;
           const inks = markerInk(svg, rules);
           expect(inks.length, `${face}/${kind}/${count}: no marker was measured`).toBeGreaterThan(0);
           for (const ink of inks) {
             const where = `${face}/${kind}/${count} decks, ${ink.label ? "+N label" : "marker"} at x ${((ink.l + ink.r) / 2).toFixed(1)}`;
             expect(ink.t, `${where} sticks out of the top of the figure`).toBeGreaterThanOrEqual(box.y);
             expect(ink.b, `${where} is clipped at the bottom of the figure`).toBeLessThanOrEqual(box.y + box.height);
-            if (!ink.label) {
-              expect(ink.l, `${where} is clipped on the left of the figure`).toBeGreaterThanOrEqual(box.x);
-              expect(ink.r, `${where} is clipped on the right of the figure`).toBeLessThanOrEqual(box.x + box.width);
-            }
+            expect(ink.l, `${where} is clipped on the left of the figure`).toBeGreaterThanOrEqual(box.x);
+            expect(ink.r, `${where} is clipped on the right of the figure`).toBeLessThanOrEqual(box.x + box.width);
             for (const { name, segments, half } of obstacles) {
               const gap = Math.min(...segments.map((segment) => segmentToBox(segment, ink))) - OUTLINE_FLATNESS - half;
               expect(gap, `${where} overlaps the ${name}`).toBeGreaterThan(0);
@@ -550,7 +556,8 @@ describe("mask skin geometry", () => {
     }
     expect([...facesSeen].sort(), "a face was never rendered by the stage clearance sweep").toEqual([...AVATAR_FACES].sort());
     expect([...kindsSeen].sort(), "a marker kind of PILL_KINDS was never rendered by the stage clearance sweep").toEqual([...PILL_KINDS].sort());
-    expect([...labelDigits].sort(), "the +N label was not swept at one, two and three digits").toEqual([1, 2, 3]);
+    expect([...labelDigits].sort(), "the +N label was not swept at one and two digits, or shows a third").toEqual([1, 2]);
+    expect(pastCap, "the +N label was never swept past 99 hidden decks").toBe(true);
   });
 
   test("Seul is an empty stage with shut eyes, Endormi a dim stage with half-closed eyes", () => {
@@ -568,17 +575,25 @@ describe("mask skin geometry", () => {
     expect(endormiEyes).not.toEqual(seulEyes);
   });
 
+  // The drawn frame of a glyph marker: Chromium sizes the nested glyph viewport
+  // from its width attribute, so the frame is that width times the group scale.
+  function glyphFrames(svg: SVGSVGElement): { l: number; t: number; size: number }[] {
+    return [...svg.querySelectorAll(".avatar-pill-glyph > g:not(.avatar-glyph-under)")].map((el) => {
+      const match = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
+      if (!match) throw new Error("a glyph marker has no translate/scale transform");
+      const width = Number(el.querySelector("svg.glyph")?.getAttribute("width"));
+      if (!(width > 0)) throw new Error("a glyph marker has no width attribute to size its viewport by");
+      return { l: Number(match[1]), t: Number(match[2]), size: width * Number(match[3]) };
+    });
+  }
+
   function markerSpans(svg: SVGSVGElement): [number, number][] {
     const spans: [number, number][] = [];
     for (const el of svg.querySelectorAll("rect.avatar-pill")) {
       const x = Number(el.getAttribute("x"));
       spans.push([x, x + Number(el.getAttribute("width"))]);
     }
-    for (const el of svg.querySelectorAll(".avatar-pill-glyph > g:not(.avatar-glyph-under)")) {
-      const match = /translate\(([-\d.]+) [-\d.]+\) scale\(([\d.]+)\)/.exec(el.getAttribute("transform") ?? "");
-      if (!match) throw new Error("a glyph marker has no translate/scale transform");
-      spans.push([Number(match[1]), Number(match[1]) + 24 * Number(match[2])]);
-    }
+    for (const frame of glyphFrames(svg)) spans.push([frame.l, frame.l + frame.size]);
     const label = svg.querySelector(".avatar-stage-overflow");
     if (label) {
       const x = Number(label.getAttribute("x"));
@@ -600,6 +615,38 @@ describe("mask skin geometry", () => {
     });
   }
 
+  test("a glyph marker draws a frame of its marker size, centred on its slot and standing on the stage lift, 1 to capacity decks", () => {
+    for (let count = 1; count <= geometry.STAGE_MARKER.capacity; count++) {
+      const svg = render(skin, decks(count, [{ exited: 1 }, { rateLimited: 1 }]));
+      const frames = glyphFrames(svg);
+      const slots = geometry.stageSlots(count);
+      const size = geometry.stageMarkerSize(count);
+      expect(frames.length, `${count} decks: not every deck drew a glyph marker`).toBe(count);
+      frames.forEach((frame, i) => {
+        const slot = geometry.stagePoint(slots[i]!);
+        const where = `${count} decks, glyph ${i}`;
+        expect(Math.abs(frame.size - size), `${where} is drawn at ${frame.size.toFixed(2)} units, not its marker size ${size.toFixed(2)}`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(frame.l + frame.size / 2 - slot.x), `${where} is off its slot centre`).toBeLessThanOrEqual(0.5);
+        expect(Math.abs(frame.t + frame.size - (slot.y - geometry.PILL.lift)), `${where} does not stand on the stage lift`).toBeLessThanOrEqual(0.5);
+      });
+    }
+  });
+
+  test("the unread badge glyph draws a two-thirds frame with its top-left corner at cx-10, cy-8, on either badge row", () => {
+    for (const [scenario, row] of [["courrier", 0], ["reclame", 1]] as const) {
+      const svg = render(skin, SCENARIOS[scenario]());
+      const group = svg.querySelector(".avatar-badge.is-unread .avatar-badge-glyph > g");
+      const match = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([\d.]+)\)/.exec(group?.getAttribute("transform") ?? "");
+      if (!match) throw new Error(`${scenario}: the unread badge glyph has no translate/scale transform`);
+      const width = Number(group!.querySelector("svg.glyph")?.getAttribute("width"));
+      if (!(width > 0)) throw new Error(`${scenario}: the unread badge glyph has no width attribute to size its viewport by`);
+      const cy = geometry.BADGE.rows[row]!;
+      expect(width * Number(match[3]), `${scenario}: the unread badge glyph frame is not two-thirds of its viewport`).toBeCloseTo((width * 2) / 3, 2);
+      expect(Number(match[1]), `${scenario}: the unread badge glyph left edge moved`).toBeCloseTo(geometry.BADGE.cx - 10, 2);
+      expect(Number(match[2]), `${scenario}: the unread badge glyph top edge moved`).toBeCloseTo(cy - 8, 2);
+    }
+  });
+
   test("twelve fault decks keep one torch each, shrunk to fit", () => {
     const allFault = produced((s, clock) => {
       for (let i = 0; i < 12; i++) s.receiveSnapshot({ identity: { deckRunId: `run-${i}`, broker_url: BROKER }, counters: counters({ working: 1 }), unread: 0 });
@@ -619,6 +666,14 @@ describe("mask skin geometry", () => {
     expect(svg.querySelector(".avatar-stage-overflow")?.textContent).toBe("+6");
     const spans = markerSpans(svg);
     for (let i = 1; i < spans.length; i++) expect(spans[i]![0]).toBeGreaterThanOrEqual(spans[i - 1]![1]);
+  });
+
+  test("the +N label reads the hidden count up to 99 and stays +99 past it, while data-overflow keeps the true count", () => {
+    for (const [hidden, text] of [[13, "+13"], [99, "+99"], [100, "+99"], [1001, "+99"]] as const) {
+      const svg = render(skin, decks(hidden + geometry.STAGE_MARKER.capacity - 1, [{ exited: 1 }, { rateLimited: 1 }]));
+      expect(overflow(svg), `${hidden} hidden decks: data-overflow is not the true count`).toBe(hidden);
+      expect(svg.querySelector(".avatar-stage-overflow")?.textContent, `${hidden} hidden decks: wrong label text`).toBe(text);
+    }
   });
 });
 
