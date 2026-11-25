@@ -1,9 +1,13 @@
 import { expect, test } from 'bun:test'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request } from 'node:https'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { connect } from 'node:tls'
 import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certificate.ts'
 import { createAvatarInboxService } from '../desktop/src/main/avatar-inbox-service.ts'
+import { initDeckLog } from '../desktop/src/main/log.ts'
 import type { AvatarNotificationAvailability } from '../desktop/src/main/avatar-notification-policy.ts'
 import {
   createAvatarSocketHub,
@@ -46,6 +50,7 @@ async function openServer(
     inbox?: AvatarInboxSink
     notificationAvailability?: () => AvatarNotificationAvailability
     deckThemeChanged?: () => void
+    info?: (scope: string, message: string) => void
     createHub?: (hubOptions: AvatarSocketHubOptions) => AvatarSocketHub
   } = {}
 ): Promise<{ server: AvatarServer; state: AvatarState; reports: string[]; setNow(now: number): void }> {
@@ -62,6 +67,7 @@ async function openServer(
     ...(options.inbox ? { inbox: options.inbox } : {}),
     ...(options.notificationAvailability ? { notificationAvailability: options.notificationAvailability } : {}),
     ...(options.deckThemeChanged ? { deckThemeChanged: options.deckThemeChanged } : {}),
+    ...(options.info ? { info: options.info } : {}),
     ...(options.createHub ? { createHub: options.createHub } : {})
   })
   return { server, state, reports, setNow: (next) => { now = next } }
@@ -511,6 +517,116 @@ test('retains a live suspect Deck and does not probe a fresh Deck', async () => 
     expect(state.summary().face).toBe('panne')
   } finally {
     await server.close()
+  }
+})
+
+test('writes one info line per Deck the sweep removes, none for a live suspect Deck', async () => {
+  const infos: string[] = []
+  const scopes: string[] = []
+  const gone = {
+    ...attach,
+    deckRunId: 'deck-run-gone',
+    deckPid: 5252,
+    broker_url: 'https://127.0.0.1:7900/hook/path-secret?sig=query-secret'
+  }
+  const { server, setNow } = await openServer({
+    allowedBrokerUrls: [attach.broker_url, gone.broker_url],
+    info: (scope, message) => {
+      scopes.push(scope)
+      infos.push(message)
+    }
+  })
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    expect(await post(server, '/attach', JSON.stringify(gone))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    server.sweepDeadDecks(() => true)
+    expect(infos, 'both suspect Decks are alive').toEqual([])
+
+    server.sweepDeadDecks((pid) => pid === attach.deckPid)
+    expect(infos, 'only the dead one is named').toHaveLength(1)
+    expect(scopes, 'the scope of the Avatar server').toEqual(['avatar-server'])
+    expect(infos[0], 'by the origin of its broker and a short hash').toMatch(
+      /^removed dead Deck deck-run-gone \(broker https:\/\/127\.0\.0\.1:7900 #[0-9a-f]{8}, pid 5252\)$/
+    )
+    expect(infos.join('\n'), 'no path or query of the broker URL').not.toMatch(/path-secret|query-secret/)
+
+    infos.length = 0
+    server.sweepDeadDecks(() => false)
+    expect(infos, 'the last Deck gets its own line').toHaveLength(1)
+    expect(infos[0]).toMatch(/^removed dead Deck deck-run-1 \(broker http:\/\/127\.0\.0\.1:7899 #[0-9a-f]{8}, pid 4242\)$/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('two attachments of one Deck run that differ only by broker path get distinct lines, without the path or query', async () => {
+  const infos: string[] = []
+  const first = { ...attach, broker_url: 'http://127.0.0.1:7899/first-secret?sig=one-secret' }
+  const second = { ...attach, broker_url: 'http://127.0.0.1:7899/second-secret?sig=two-secret' }
+  const { server, setNow } = await openServer({
+    allowedBrokerUrls: [first.broker_url, second.broker_url],
+    info: (_scope, message) => infos.push(message)
+  })
+  try {
+    expect(await post(server, '/attach', JSON.stringify(first))).toMatchObject({ status: 200 })
+    expect(await post(server, '/attach', JSON.stringify(second))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    server.sweepDeadDecks(() => false)
+
+    expect(infos, 'one line per attachment').toHaveLength(2)
+    const hashes = infos.map((line) => /#([0-9a-f]{8}), pid/.exec(line)?.[1])
+    expect(hashes.every((hash) => hash !== undefined), 'each line carries a hash').toBe(true)
+    expect(new Set(hashes).size, 'the two hashes differ').toBe(2)
+    expect(infos.join('\n'), 'no path or query of either URL').not.toMatch(/first-secret|second-secret|one-secret|two-secret/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('two attachments of one Deck run that differ only by the query of the broker URL get distinct lines', async () => {
+  const infos: string[] = []
+  const first = { ...attach, broker_url: 'http://127.0.0.1:7899/same-path?sig=alpha-secret' }
+  const second = { ...attach, broker_url: 'http://127.0.0.1:7899/same-path?sig=beta-secret' }
+  const { server, setNow } = await openServer({
+    allowedBrokerUrls: [first.broker_url, second.broker_url],
+    info: (_scope, message) => infos.push(message)
+  })
+  try {
+    expect(await post(server, '/attach', JSON.stringify(first))).toMatchObject({ status: 200 })
+    expect(await post(server, '/attach', JSON.stringify(second))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    server.sweepDeadDecks(() => false)
+
+    expect(infos, 'one line per attachment').toHaveLength(2)
+    const hashes = infos.map((line) => /#([0-9a-f]{8}), pid/.exec(line)?.[1])
+    expect(hashes.every((hash) => hash !== undefined), 'each line carries a hash').toBe(true)
+    expect(new Set(hashes).size, 'the two hashes differ').toBe(2)
+    expect(infos.join('\n'), 'no path or query of either URL').not.toMatch(/same-path|alpha-secret|beta-secret/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('a server started without an info sink writes the removal as an INFO line of the Deck log, not as an error', async () => {
+  const logsDir = mkdtempSync(join(tmpdir(), 'cp-avatar-server-logs-'))
+  const main = initDeckLog(logsDir)
+  const { server, setNow } = await openServer()
+  try {
+    expect(await post(server, '/attach', JSON.stringify(attach))).toMatchObject({ status: 200 })
+    setNow(15_000)
+
+    server.sweepDeadDecks(() => false)
+
+    const lines = readFileSync(main.file, 'utf-8').split('\n').filter((line) => line.includes('removed dead Deck'))
+    expect(lines, 'one line for the removed Deck').toHaveLength(1)
+    expect(lines[0]).toMatch(/ INFO {2}\[avatar-server\] removed dead Deck deck-run-1 /)
+  } finally {
+    await server.close()
+    rmSync(logsDir, { recursive: true, force: true })
   }
 })
 

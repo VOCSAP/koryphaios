@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import {
   createDeckFocusGesture,
+  deadDeckSweeper,
   deckProcessIsAlive,
   type DeckFocusGestureDeps
 } from '../desktop/src/main/avatar-focus-gesture.ts'
@@ -235,4 +236,23 @@ test('open_question is refused by the same socket owner check as a focus, nothin
 test('a process is alive only when this user may signal it', () => {
   expect(deckProcessIsAlive(process.pid)).toBe(true)
   expect(deckProcessIsAlive(0x7fff_fff0)).toBe(false)
+})
+
+test('the dead-Deck sweep is handed the real liveness probe, not one the caller picks', () => {
+  const probes: Array<(pid: number) => boolean> = []
+  const sweep = deadDeckSweeper(() => ({ sweepDeadDecks: (isAlive) => void probes.push(isAlive) }))
+  sweep()
+  expect(probes).toHaveLength(1)
+  expect(probes[0], 'the probe handed to the sweep').toBe(deckProcessIsAlive)
+})
+
+test('the dead-Deck sweep asks the server at each call and does nothing while there is none', () => {
+  let current: Parameters<typeof deadDeckSweeper>[0] extends () => infer S ? S : never = null
+  let sweeps = 0
+  const sweep = deadDeckSweeper(() => current)
+  expect(() => sweep()).not.toThrow()
+  current = { sweepDeadDecks: () => void (sweeps += 1) }
+  sweep()
+  sweep()
+  expect(sweeps).toBe(2)
 })

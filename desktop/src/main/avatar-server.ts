@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type Server } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
@@ -25,7 +25,7 @@ import { validateQuestions } from '../../../shared/approval'
 import type { AvatarRunCertificate } from './avatar-certificate'
 import type { TcpEndpoint } from './avatar-socket-owner'
 import { AvatarState, type AvatarDeckIdentity } from '../shared/avatar-state'
-import { reportError } from './log'
+import { logInfo, reportError } from './log'
 
 export { MAX_AVATAR_REQUEST_BYTES }
 export const AVATAR_BIND_TIMEOUT_MS = 5_000
@@ -41,6 +41,7 @@ export interface AvatarServerOptions {
   bindTimeoutMs?: number
   commandResultTimeoutMs?: number
   report?: typeof reportError
+  info?: typeof logInfo
   inbox?: AvatarInboxSink
   /** Without it, a3_notify_replace is never negotiated. */
   notificationAvailability?(): AvatarNotificationAvailability
@@ -274,6 +275,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
   const highestGeneration = new Map<string, number>()
   const sockets = new Set<WebSocket>()
   const report = options.report ?? reportError
+  const info = options.info ?? logInfo
   const bindTimeoutMs = options.bindTimeoutMs ?? AVATAR_BIND_TIMEOUT_MS
   const commandResultTimeoutMs = options.commandResultTimeoutMs ?? AVATAR_COMMAND_RESULT_TIMEOUT_MS
 
@@ -477,7 +479,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
             if (!deck.suspect) continue
             const attachedDeck = attached.get(deckKey(deck.identity))
             if (!attachedDeck) continue
-            detachDeckInOrder({
+            const removed = detachDeckInOrder({
               state: () => options.state.removeDeadDeck(deck.identity, !isAlive(attachedDeck.deckPid)),
               hub: () => {
                 attached.delete(deckKey(deck.identity))
@@ -486,6 +488,15 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
               },
               inbox: () => options.inbox?.detach(deck.identity)
             })
+            if (removed) {
+              // Origin plus a short hash, never the URL: it may carry a signed query the log redactor does not know,
+              // and two attachments of one Deck run can differ only by path.
+              const brokerHash = createHash('sha256').update(deck.identity.broker_url).digest('hex').slice(0, 8)
+              info(
+                'avatar-server',
+                `removed dead Deck ${deck.identity.deckRunId} (broker ${new URL(deck.identity.broker_url).origin} #${brokerHash}, pid ${attachedDeck.deckPid})`
+              )
+            }
           }
         },
         focusDeck: hub.focusDeck,

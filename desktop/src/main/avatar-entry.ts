@@ -32,7 +32,7 @@ import {
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { createAvatarClickGesture } from './avatar-click-gesture'
 import { avatarAllowedBrokerUrls } from './avatar-deck-link'
-import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gesture'
+import { createDeckFocusGesture, deadDeckSweeper, deckProcessIsAlive } from './avatar-focus-gesture'
 import { createAvatarInboxWiring, type AvatarInboxService } from './avatar-inbox-service'
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
@@ -290,7 +290,7 @@ async function startAvatar(): Promise<void> {
     createTray: () => {
       tray = createAvatarTray({
         summary: trayBrokerSummary(refreshManualStop, assembly.traySummary),
-        sweepDeadDecks: () => server?.sweepDeadDecks(deckProcessIsAlive),
+        sweepDeadDecks: deadDeckSweeper(() => server),
         iconDir: avatarTrayIconDir(app.isPackaged, process.resourcesPath, app.getAppPath()),
         locale,
         attachedDecks: () => server?.attachedDecks() ?? [],

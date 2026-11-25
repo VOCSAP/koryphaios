@@ -1,6 +1,6 @@
 import type { AvatarAttachRequest, AvatarCommand } from '../shared/avatar-protocol'
 import type { AvatarDeckIdentity } from '../shared/avatar-state'
-import type { AvatarCommandResult } from './avatar-server'
+import type { AvatarCommandResult, AvatarServer } from './avatar-server'
 import { logInfo, reportError } from './log'
 
 export interface DeckFocusGestureDeps {
@@ -24,6 +24,11 @@ export function deckProcessIsAlive(pid: number): boolean {
   } catch {
     return false
   }
+}
+
+/** Binds the liveness probe here, so the call site cannot hand the sweep a probe that always answers alive. */
+export function deadDeckSweeper(server: () => Pick<AvatarServer, 'sweepDeadDecks'> | null): () => void {
+  return () => server()?.sweepDeadDecks(deckProcessIsAlive)
 }
 
 function deckKey(identity: AvatarDeckIdentity): string {
