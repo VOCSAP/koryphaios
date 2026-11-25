@@ -140,6 +140,24 @@ test("terminal copy normalization is enabled by default and can be disabled", as
   expect(updateConfigCalls).toEqual([{ normalizeTerminalCopy: false }]);
 });
 
+test("the notification sound switch follows the stored choice and saves its opposite", async () => {
+  await mount(DEFAULT_CONFIG.enabledMods, []);
+  const checkbox = modCheckbox("settings.notifySound");
+
+  expect(checkbox, "the notification sound switch must be visible").not.toBeUndefined();
+  expect(checkbox!.checked, "on by default").toBe(true);
+  await click(checkbox!);
+  expect(updateConfigCalls).toEqual([{ notifySound: false }]);
+
+  await act(async () => {
+    fakeUseDeck.setState({ config: { ...DEFAULT_CONFIG, notifySound: false } });
+    await Promise.resolve();
+  });
+  expect(modCheckbox("settings.notifySound")!.checked, "a stored off reads unticked").toBe(false);
+  await click(modCheckbox("settings.notifySound")!);
+  expect(updateConfigCalls.at(-1)).toEqual({ notifySound: true });
+});
+
 test("with the default configuration every offered mod is shown unchecked", async () => {
   await mount(DEFAULT_CONFIG.enabledMods, ["alpha", "beta"]);
   expect(modCheckbox("alpha"), "alpha must be offered as a switch").not.toBeUndefined();

@@ -240,6 +240,8 @@ export const COMPANION_MANIFEST = {
   onPeersConfig: { kind: 'event', channel: 'peersConfig:summary' },
   onInboxOpen: { kind: 'event', channel: 'inbox:open' },
   onFocusSession: { kind: 'event', channel: 'session:focus' },
+  onNotificationSound: { kind: 'event', channel: 'notify:sound' },
+  notificationSoundReady: { kind: 'send', channel: 'notify:sound-ready' },
   onDesignPick: { kind: 'event', channel: 'design:pick' },
   onConfigChanged: { kind: 'event', channel: 'config:changed' },
   onRulesChanged: { kind: 'event', channel: 'rules:changed' },
@@ -274,6 +276,7 @@ export type CompanionMethodName = keyof typeof COMPANION_MANIFEST
  */
 const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'sessions:set-locked',
+  'notify:sound-ready',
   'dialog:pickDirectory',
   'journal:export',
   'roadmap:import-plan',
@@ -453,6 +456,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'pty:input': 1,
   'pty:resize': 1,
   'app:report-error': 1,
+  'notify:sound-ready': 1,
   'sessions:rename': 1,
   'sessions:set-color': 1,
   'sessions:set-auto-resume': 1,

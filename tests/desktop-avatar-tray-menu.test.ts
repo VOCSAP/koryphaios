@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { avatarFaceCopy } from '../desktop/src/main/avatar-face-copy.ts'
 import { AVATAR_TRAY_COPY } from '../desktop/src/main/avatar-tray-copy.ts'
 import {
+  avatarTrayEvent,
   avatarTrayMayRebound,
   buildAvatarTrayMenu,
   chooseAvatarDnd,
@@ -16,7 +17,7 @@ import type { AvatarViewSummary } from '../desktop/src/shared/avatar-view.ts'
 
 const now = new Date(2026, 4, 14, 10, 30).getTime()
 
-const APPEARANCE: AvatarTrayAppearance = { positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm', frame: 'normal' }
+const APPEARANCE: AvatarTrayAppearance = { positionLocked: false, alwaysOnTop: true, motion: 'continuous', size: 'm', frame: 'normal', sound: true }
 
 function view(summary: AvatarSummary): AvatarViewSummary {
   return { ...summary, faceCopy: avatarFaceCopy(summary, 'en') }
@@ -352,6 +353,15 @@ test('clicking the broker entry hands its value to the Avatar', () => {
   expect(chosen).toEqual(['stop', 'start'])
 })
 
+test('the Sound entry is a checkbox that proposes the opposite of the stored choice and patches only the sound', () => {
+  const entry = (sound: boolean) =>
+    buildAvatarTrayMenu(summary, attached, null, now, { ...APPEARANCE, sound }, true, 'en').items.find((item) => item.label === 'Sound')
+
+  expect(entry(true)).toMatchObject({ type: 'checkbox', checked: true, action: { kind: 'sound', value: false } })
+  expect(entry(false)).toMatchObject({ type: 'checkbox', checked: false, action: { kind: 'sound', value: true } })
+  expect(avatarTrayEvent({ kind: 'sound', value: false })).toEqual({ kind: 'AppearanceChanged', patch: { sound: false } })
+})
+
 test('keeps the tray usable with no attached Deck', () => {
   const menu = buildAvatarTrayMenu(view(new AvatarState({ now: () => now }).summary()), [], null, now, APPEARANCE, true, 'en')
 
@@ -371,6 +381,7 @@ test('a menu built in French carries the French texts', () => {
     fr.showAvatar,
     fr.lockPosition,
     fr.alwaysOnTop,
+    fr.sound,
     fr.motion,
     fr.motionContinuous,
     fr.motionTransitions,

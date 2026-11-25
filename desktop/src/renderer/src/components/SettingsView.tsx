@@ -266,6 +266,15 @@ export function SettingsView(): React.JSX.Element {
               <label className="field field-check">
                 <input
                   type="checkbox"
+                  checked={config.notifySound !== false}
+                  onChange={(e) => set('notifySound', e.target.checked)}
+                />
+                <span>{t('settings.notifySound')}</span>
+              </label>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
                   checked={config.liveStatusLine !== false}
                   onChange={(e) => set('liveStatusLine', e.target.checked)}
                 />

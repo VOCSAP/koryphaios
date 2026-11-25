@@ -11,6 +11,7 @@ const appearance = {
   idleOpacity: 1,
   motion: 'continuous' as const,
   bubbleExpanded: false,
+  sound: true,
   dndUntil: null,
   dndChoice: null,
   positions: {}

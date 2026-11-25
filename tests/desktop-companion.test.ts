@@ -129,6 +129,12 @@ test('regHandle and invoke manifest domains are reciprocal, discovered from main
   expect(unhandled, 'an invoke channel declared in the manifest has no regHandle: the renderer call rejects with no handler').toEqual([])
 })
 
+test('the Deck window sound-ready signal is a manifest send channel a paired phone cannot use', () => {
+  expect(COMPANION_MANIFEST.notificationSoundReady).toEqual({ kind: 'send', channel: 'notify:sound-ready' })
+  expect(REMOTE_BLOCKED_CHANNELS.has('notify:sound-ready'), 'a phone must not flush a sound toward a Deck window that has not subscribed').toBe(true)
+  expect(CHANNEL_TIERS['notify:sound-ready'], 'a local interaction, not a read').toBe(1)
+})
+
 test('broker:start (undoes an operator stop) is remote-blocked by its tier; broker:retry (a poll) is not', () => {
   expect(COMPANION_MANIFEST.startBroker).toEqual({ kind: 'invoke', channel: 'broker:start' })
   expect(CHANNEL_TIERS['broker:start']).toBe(3)

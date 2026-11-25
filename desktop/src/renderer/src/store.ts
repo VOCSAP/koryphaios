@@ -48,6 +48,7 @@ import { workspaceRestoreDemotionToast, workspaceRestoreToastKeyFor } from '@sha
 import { keepDrafts, type QuestionDraft } from './components/approval-answers'
 import { TOAST_ACTION_MS, TOAST_MS } from './toast-timing'
 import { skillRefusalToast } from './sequence-feedback'
+import { playNotificationSound } from './notification-sound-player'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -796,6 +797,8 @@ export const useDeck = create<DeckState>((set, get) => ({
       get().showToast('toast.approvalNotApplied', 'error', { params: { tile: e.tile, reason: e.reason } })
     })
     window.api.onFocusSession((id) => get().focusTile(id))
+    window.api.onNotificationSound(playNotificationSound)
+    window.api.notificationSoundReady()
     window.api.onInboxMessages((batch) => {
       const { inboxMessages } = get()
       // Dedupe by broker id: the disk-history hydration below and the live

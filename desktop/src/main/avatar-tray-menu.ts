@@ -14,7 +14,7 @@ export interface AvatarDndState {
   until: number
 }
 
-export type AvatarTrayAppearance = Pick<AvatarAppearance, 'positionLocked' | 'alwaysOnTop' | 'motion' | 'size' | 'frame'>
+export type AvatarTrayAppearance = Pick<AvatarAppearance, 'positionLocked' | 'alwaysOnTop' | 'motion' | 'size' | 'frame' | 'sound'>
 
 export type AvatarTrayAction =
   | { kind: 'deck-focus'; identity: AvatarDeckIdentity }
@@ -23,6 +23,7 @@ export type AvatarTrayAction =
   | { kind: 'visible'; value: boolean }
   | { kind: 'lock'; value: boolean }
   | { kind: 'always-on-top'; value: boolean }
+  | { kind: 'sound'; value: boolean }
   | { kind: 'motion'; value: AvatarAppearance['motion'] }
   | { kind: 'size'; value: AvatarAppearance['size'] }
   | { kind: 'frame'; value: AvatarAppearance['frame'] }
@@ -36,6 +37,7 @@ export const AVATAR_TRAY_ACTION_KINDS = {
   visible: true,
   lock: true,
   'always-on-top': true,
+  sound: true,
   motion: true,
   size: true,
   frame: true,
@@ -84,7 +86,7 @@ export function avatarTrayMayRebound(dnd: AvatarDndState | null, now: number): b
   return dnd === null || now >= dnd.until
 }
 
-export type AvatarTrayWindowAction = Extract<AvatarTrayAction, { kind: 'dnd-off' | 'visible' | 'lock' | 'always-on-top' | 'motion' | 'size' | 'frame' }>
+export type AvatarTrayWindowAction = Extract<AvatarTrayAction, { kind: 'dnd-off' | 'visible' | 'lock' | 'always-on-top' | 'sound' | 'motion' | 'size' | 'frame' }>
 
 export function avatarTrayEvent(action: AvatarTrayWindowAction): AvatarEvent {
   switch (action.kind) {
@@ -94,6 +96,8 @@ export function avatarTrayEvent(action: AvatarTrayWindowAction): AvatarEvent {
       return { kind: 'LockChanged', value: action.value }
     case 'always-on-top':
       return { kind: 'AppearanceChanged', patch: { alwaysOnTop: action.value } }
+    case 'sound':
+      return { kind: 'AppearanceChanged', patch: { sound: action.value } }
     case 'motion':
       return { kind: 'AppearanceChanged', patch: { motion: action.value } }
     case 'size':
@@ -139,6 +143,7 @@ function windowMenuItems(copy: TrayCopy, appearance: AvatarTrayAppearance, windo
     { label: copy.showAvatar, type: 'checkbox', checked: windowShown, action: { kind: 'visible', value: !windowShown } },
     { label: copy.lockPosition, type: 'checkbox', checked: appearance.positionLocked, action: { kind: 'lock', value: !appearance.positionLocked } },
     { label: copy.alwaysOnTop, type: 'checkbox', checked: appearance.alwaysOnTop, action: { kind: 'always-on-top', value: !appearance.alwaysOnTop } },
+    { label: copy.sound, type: 'checkbox', checked: appearance.sound, action: { kind: 'sound', value: !appearance.sound } },
     {
       label: copy.motion,
       submenu: [

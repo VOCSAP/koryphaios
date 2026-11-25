@@ -491,6 +491,8 @@ export interface AppConfig {
   leadPattern: string
   /** System notification when a session waits for the operator (PLAN C11). */
   notifyAttention: boolean
+  /** A short Kory sound when the operator is awaited: an approval, a question, a tile that waits. */
+  notifySound: boolean
   /**
    * Launch Claude Code tiles with the Deck statusLine (`--settings`) that
    * feeds the session list's model badge and context ring. It replaces Claude
@@ -2470,6 +2472,8 @@ export type ServeChannelStartResult =
   | { ok: true; dir: string; state: ServeChannelState }
   | { ok: false; reason: ServeStartRefusal; message: string; state: ServeChannelState }
 
+export type NotificationSoundKind = 'permission' | 'question' | 'attention'
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -3049,6 +3053,9 @@ export interface DeckApi {
   onInboxOpen(cb: (target?: InboxOpenTarget) => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */
   onFocusSession(cb: (id: string) => void): () => void
+  /** The Deck decided a notification sound is due; the renderer plays it. */
+  onNotificationSound(cb: (kind: NotificationSoundKind) => void): () => void
+  notificationSoundReady(): void
   /** External-app element pick received by the design endpoint (D2b). */
   onDesignPick(cb: (event: DesignPickEvent) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void

@@ -234,7 +234,6 @@ test("a danger view that changes on an unchanged row is broadcast again", async 
 test("the Deck's poll timer runs the tested tick and notifies on the service's needs-you event", () => {
   const index = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8");
   expect(index).toMatch(/const pollPendingApprovals = createPendingApprovalsTick\(/);
-  expect(index).toMatch(/service\.on\('needs-you', \(\{ id \}: \{ id: string \}\) => notifyWaitingSession\(id\)\)/);
 });
 
 test("the Avatar client reads the poll's last list and the Courrier's pending messages", () => {
@@ -260,7 +259,18 @@ test("the Avatar client reads the poll's last list and the Courrier's pending me
 
 // index.ts cannot be imported as a module: the three OS-notification producers are run from their own source
 // against stubs, so the guard sits where the bodies decide, not where a text scan could see it.
-function indexBodies(): { waiting: string; inbox: string; graph: string } {
+function indexBodies(): {
+  waiting: string;
+  inbox: string;
+  graph: string;
+  needsYou: string;
+  broadcastPending: string;
+  soundPlay: string;
+  soundReady: string;
+  rendererGone: string;
+  startLoading: string;
+  soundDeps: string;
+} {
   const index = stripComments(readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf8").replace(/\r\n/g, "\n"));
   const bodyAfter = (anchor: string, arrow: boolean): string => {
     const start = index.indexOf(anchor);
@@ -271,7 +281,14 @@ function indexBodies(): { waiting: string; inbox: string; graph: string } {
   return {
     waiting: bodyAfter("function notifyWaitingSession(", false),
     inbox: bodyAfter("const notifyInbox = (", true),
-    graph: bodyAfter("const pollGraphDrafts = async", true)
+    graph: bodyAfter("const pollGraphDrafts = async", true),
+    needsYou: bodyAfter("service.on('needs-you'", true),
+    broadcastPending: bodyAfter("broadcastPending: (list) => {", true),
+    soundPlay: bodyAfter("play: (kind) => {", true),
+    soundReady: bodyAfter("regOn('notify:sound-ready'", true),
+    rendererGone: bodyAfter("app.on('render-process-gone'", true),
+    startLoading: bodyAfter("mainWindow.webContents.on('did-start-loading'", true),
+    soundDeps: extractParenBody(index, index.indexOf("(", index.indexOf("createNotificationSounder(")), true)
   };
 }
 
@@ -347,6 +364,145 @@ test("a waiting session raises its OS notification unless the Avatar vouches for
   expect(run({ avatar: false, notifyAttention: false }).made, "notifyAttention off").toEqual([]);
   expect(run({ avatar: false, supported: false }).made, "OS notifications unsupported").toEqual([]);
   expect(run({ avatar: true, notifyAttention: false }).replacedAsked(), "the config guard answers first").toBe(0);
+});
+
+test("the needs-you handler and the approvals broadcast both reach the sound decision, and the ready signal reaches the sounder", () => {
+  const { needsYou, broadcastPending, soundReady } = indexBodies();
+  const calls: string[] = [];
+  const sounder = {
+    noteAttention: () => void calls.push("attention"),
+    noteApprovals: (list: unknown) => void calls.push(`approvals:${(list as string[]).join(",")}`),
+    rendererReady: () => void calls.push("ready")
+  };
+
+  const onNeedsYou = compile("onNeedsYou", ["{ id }: { id: string }"], needsYou, ["notifyWaitingSession", "notificationSounder"])(
+    (id: string) => void calls.push(`notify:${id}`),
+    sounder
+  ) as (event: { id: string }) => void;
+  onNeedsYou({ id: "s1" });
+  expect(calls, "the OS notification and the sound both run for a needs-you edge").toEqual(["notify:s1", "attention"]);
+
+  calls.length = 0;
+  const list = ["a1", "a2"];
+  const avatarClient = { sessionsChanged: () => void calls.push("sessions"), inboxChanged: () => void calls.push("inbox") };
+  const onBroadcast = compile("broadcastPending", ["list: string[]"], broadcastPending, ["lastPendingApprovals", "broadcast", "avatarClient", "notificationSounder"])(
+    [],
+    (channel: string) => void calls.push(`broadcast:${channel}`),
+    avatarClient,
+    sounder
+  ) as (list: string[]) => void;
+  onBroadcast(list);
+  expect(calls, "the sound decision sees the broadcast list, next to the Avatar refresh").toEqual([
+    "broadcast:approvals:pending",
+    "approvals:a1,a2",
+    "sessions",
+    "inbox"
+  ]);
+
+  calls.length = 0;
+  (compile("onReady", [], soundReady, ["notificationSounder"])(sounder) as () => void)();
+  expect(calls, "the renderer ready signal is forwarded to the sounder").toEqual(["ready"]);
+});
+
+test("a reload or a crash of the main renderer marks it not ready, and no other web contents does", () => {
+  const { rendererGone, startLoading } = indexBodies();
+  const calls: string[] = [];
+  const sounder = { rendererNotReady: () => void calls.push("not-ready") };
+  const mainContents = { id: "main" };
+  const mainWindow = { webContents: mainContents };
+
+  const onGone = compile("onGone", ["_e: unknown", "contents: unknown", "details: { reason: string; exitCode: number }"], rendererGone, [
+    "reportError",
+    "mainWindow",
+    "notificationSounder",
+    "BrowserWindow",
+    "dialog"
+  ])(() => undefined, mainWindow, sounder, { fromWebContents: () => null }, {}) as (e: unknown, contents: unknown, details: { reason: string; exitCode: number }) => void;
+  onGone(null, mainContents, { reason: "clean-exit", exitCode: 0 });
+  expect(calls, "the main renderer is not ready even on a clean exit, before the early return").toEqual(["not-ready"]);
+  calls.length = 0;
+  onGone(null, { id: "webview" }, { reason: "clean-exit", exitCode: 0 });
+  expect(calls, "another web contents leaves the main renderer ready").toEqual([]);
+
+  const onLoading = compile("onLoading", [], startLoading, ["notificationSounder"])(sounder) as () => void;
+  onLoading();
+  expect(calls, "a navigation of the main window marks its listener gone").toEqual(["not-ready"]);
+});
+
+test("the sounder the Deck builds follows the config switch, reads the Avatar file where the Avatar writes it, and reports under its own scope", () => {
+  const { soundDeps } = indexBodies();
+  const reads: unknown[][] = [];
+  const reported: unknown[][] = [];
+  const reportError = (...args: unknown[]) => void reported.push(args);
+  const appearance = { sound: false, dndUntil: 5 };
+  const build = (config: Record<string, unknown>) => {
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`function build() { return (${soundDeps}) }`);
+    const make = new Function(
+      "config",
+      "app",
+      "join",
+      "APP_STATE_SUBDIR",
+      "AVATAR_APPEARANCE_FILE",
+      "readAvatarAppearance",
+      "reportError",
+      "mainWindow",
+      "Date",
+      `${js}\nreturn build;`
+    );
+    return make(
+      config,
+      { getPath: (name: string) => (name === "userData" ? "USERDATA" : "WRONG") },
+      join,
+      "state-subdir",
+      "avatar-appearance.json",
+      (...args: unknown[]) => {
+        reads.push(args);
+        return appearance;
+      },
+      reportError,
+      null,
+      { now: () => 4242 }
+    )() as {
+      enabled: () => boolean;
+      appearance: () => unknown;
+      now: () => number;
+      report: (text: string, err?: unknown) => void;
+    };
+  };
+
+  expect(build({ notifySound: true }).enabled()).toBe(true);
+  expect(build({ notifySound: false }).enabled(), "the Settings switch decides").toBe(false);
+  expect(build({}).enabled(), "an absent setting reads as on").toBe(true);
+
+  const deps = build({});
+  expect(deps.appearance(), "the Avatar file read is what the sounder sees").toBe(appearance);
+  expect(reads[0]![0], "the file the Avatar writes, under the Deck state dir").toBe(join("USERDATA", "state-subdir", "avatar-appearance.json"));
+  expect((reads[0]![1] as { reportError: unknown }).reportError, "the reader reports through the Deck's sink").toBe(reportError);
+  expect(deps.now(), "the clock is Date.now").toBe(4242);
+
+  const boom = new Error("boom");
+  deps.report("some text", boom);
+  expect(reported).toEqual([["notification-sound", "some text", boom]]);
+});
+
+test("the Deck hands a sound to its window only while that window is alive, and says whether it did", () => {
+  const { soundPlay } = indexBodies();
+  const sent: unknown[][] = [];
+  const window = (destroyed: boolean) => ({
+    isDestroyed: () => destroyed,
+    webContents: { send: (...args: unknown[]) => void sent.push(args) }
+  });
+  const play = (mainWindow: unknown): boolean => {
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(`function play(kind: string) {${soundPlay}\n}`);
+    const build = new Function("mainWindow", `${js}\nreturn play;`) as (window: unknown) => (kind: string) => boolean;
+    return build(mainWindow)("question");
+  };
+
+  expect(play(null), "no window yet").toBe(false);
+  expect(play(window(true)), "a destroyed window").toBe(false);
+  expect(sent).toEqual([]);
+  expect(play(window(false)), "a live window").toBe(true);
+  expect(sent).toEqual([["notify:sound", "question"]]);
 });
 
 test("an Inbox batch raises its OS notification unless the Avatar vouches for the replacement, and an empty batch stays silent", () => {

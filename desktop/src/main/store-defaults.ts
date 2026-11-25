@@ -32,6 +32,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   autoResumeQuota: false,
   leadPattern: 'team-lead',
   notifyAttention: true,
+  notifySound: true,
   liveStatusLine: true,
   thalposAutostart: false,
   mobileApprovals: false,

@@ -24,6 +24,7 @@ function validAppearance(): AvatarAppearance {
     idleOpacity: 1,
     motion: 'continuous',
     bubbleExpanded: true,
+    sound: false,
     dndUntil: 1_800_000_000_000,
     dndChoice: '1h',
     positions: {
@@ -127,6 +128,7 @@ test('rejects one malformed appearance field while preserving validation of ever
       idleOpacity: 1,
       motion: 'continuous',
       bubbleExpanded: false,
+      sound: true,
       dndUntil: null,
       dndChoice: null,
       positions: {}
@@ -181,6 +183,32 @@ test('the expanded bubble round-trips through the file, and so does the normal o
   expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).bubbleExpanded).toBe(true)
   appearance.writeAvatarAppearance(file, { ...validAppearance(), bubbleExpanded: false })
   expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).bubbleExpanded).toBe(false)
+})
+
+test('a file without the sound flag, or with a bad one, reads as sound on and keeps every other choice', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  const { sound: _sound, ...older } = { ...validAppearance(), size: 'l' as const }
+  const written: unknown[] = [older, ...['false', 'no', 0, null, {}, []].map((bad) => ({ ...older, sound: bad }))]
+  for (const record of written) {
+    writeFileSync(file, JSON.stringify(record))
+    const errors: string[] = []
+    const read = appearance.readAvatarAppearance(file, { reportError: (_scope, message) => errors.push(message) })
+    expect(read.sound, `sound in ${JSON.stringify(record).slice(-40)}`).toBe(true)
+    expect(read.size, 'a missing sound flag must not reset the stored appearance to defaults').toBe('l')
+    expect(read.dndChoice).toBe('1h')
+    expect(Object.keys(read.positions)).toEqual(['primary'])
+    expect(errors).toEqual([])
+  }
+})
+
+test('the muted sound round-trips through the file, and so does the sound on', async () => {
+  const appearance = await import('../desktop/src/main/avatar-appearance.ts')
+  const file = appearanceFile()
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), sound: false })
+  expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).sound).toBe(false)
+  appearance.writeAvatarAppearance(file, { ...validAppearance(), sound: true })
+  expect(appearance.readAvatarAppearance(file, { reportError: () => {} }).sound).toBe(true)
 })
 
 test('a full frame round-trips through the file', async () => {

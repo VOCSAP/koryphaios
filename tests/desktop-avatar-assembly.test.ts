@@ -211,6 +211,7 @@ function seed(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     idleOpacity: 1,
     motion: 'continuous',
     bubbleExpanded: false,
+    sound: true,
     dndUntil: null,
     dndChoice: null,
     positions: {},

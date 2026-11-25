@@ -26,6 +26,7 @@ function appearance(patch: Partial<AvatarAppearance> = {}): AvatarAppearance {
     idleOpacity: 1,
     motion: 'continuous',
     bubbleExpanded: false,
+    sound: true,
     dndUntil: null,
     dndChoice: null,
     positions: Object.create(null) as AvatarAppearance['positions'],

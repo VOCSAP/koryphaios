@@ -302,6 +302,8 @@ import {
   type SpawnGrantStore
 } from './approval-service'
 import { createPendingApprovalsTick } from './hook-attention'
+import { AVATAR_APPEARANCE_FILE, readAvatarAppearance } from './avatar-appearance'
+import { createNotificationSounder } from './notification-sound'
 import { createDangerEnricher } from './danger-view'
 import { evaluateIsolated } from '../shared/ttsr-probe'
 import { pendingQuestionTarget } from './pending-question-target'
@@ -311,7 +313,7 @@ import { applyEnrolment, ensureOperatorIdentity, exportEnrolment } from './opera
 import { buildAuthProof, type Approval } from './approval-auth'
 import { INBOX_GATES } from '../../../shared/approval'
 import { revealFormatChars } from '../../../shared/text'
-import { addEventSink, broadcast, regHandle } from './api-registry'
+import { addEventSink, broadcast, regHandle, regOn } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
   SUPERVISOR_BRIEFING,
@@ -379,6 +381,7 @@ installProcessFailureGuard()
 // them explicitly, journal them, and offer a reload when the window died.
 app.on('render-process-gone', (_e, contents, details) => {
   reportError('renderer', `render process gone (${details.reason}, exit ${details.exitCode})`)
+  if (contents === mainWindow?.webContents) notificationSounder.rendererNotReady()
   if (details.reason === 'clean-exit') return
   const win = BrowserWindow.fromWebContents(contents)
   if (!win || win.isDestroyed()) return
@@ -1675,7 +1678,26 @@ function notifyWaitingSession(id: string): void {
   n.show()
 }
 
-service.on('needs-you', ({ id }: { id: string }) => notifyWaitingSession(id))
+const notificationSounder = createNotificationSounder({
+  enabled: () => config.notifySound !== false,
+  appearance: () => readAvatarAppearance(join(app.getPath('userData'), APP_STATE_SUBDIR, AVATAR_APPEARANCE_FILE), { reportError }),
+  now: Date.now,
+  play: (kind) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    mainWindow.webContents.send('notify:sound', kind)
+    return true
+  },
+  report: (text, err) => reportError('notification-sound', text, err)
+})
+
+regOn('notify:sound-ready', () => {
+  notificationSounder.rendererReady()
+})
+
+service.on('needs-you', ({ id }: { id: string }) => {
+  notifyWaitingSession(id)
+  notificationSounder.noteAttention()
+})
 
 // ----- Operator inbox (PLAN C12) -----
 // A lead or supervisor's notify_operator / ask_operator deposit is parked by the
@@ -2112,6 +2134,7 @@ const pollPendingApprovals = createPendingApprovalsTick({
   broadcastPending: (list) => {
     lastPendingApprovals = list
     broadcast('approvals:pending', list)
+    notificationSounder.noteApprovals(list)
     avatarClient?.sessionsChanged()
     avatarClient?.inboxChanged()
   },
@@ -3555,6 +3578,10 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    notificationSounder.rendererNotReady()
+  })
 
   // Open external links (e.g. OAuth completion pages) in the system browser.
   // Scheme-gated: openExternal launches whatever the OS registered for a

@@ -14,6 +14,7 @@ interface AvatarTrayCopy {
   showAvatar: string
   lockPosition: string
   alwaysOnTop: string
+  sound: string
   motion: string
   motionContinuous: string
   motionTransitions: string
@@ -59,6 +60,7 @@ export const AVATAR_TRAY_COPY = {
     showAvatar: 'Show the avatar',
     lockPosition: 'Lock position',
     alwaysOnTop: 'Always on top',
+    sound: 'Sound',
     motion: 'Motion',
     motionContinuous: 'Continuous',
     motionTransitions: 'Transitions only',
@@ -94,6 +96,7 @@ export const AVATAR_TRAY_COPY = {
     showAvatar: "Afficher l'avatar",
     lockPosition: 'Verrouiller la position',
     alwaysOnTop: 'Toujours au premier plan',
+    sound: 'Son',
     motion: 'Animation',
     motionContinuous: 'Continue',
     motionTransitions: 'Transitions seulement',

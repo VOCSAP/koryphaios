@@ -199,6 +199,7 @@ export function createAvatarTray(options: AvatarTrayOptions, dependencies: Avata
       case 'visible':
       case 'lock':
       case 'always-on-top':
+      case 'sound':
       case 'motion':
       case 'size':
       case 'frame':

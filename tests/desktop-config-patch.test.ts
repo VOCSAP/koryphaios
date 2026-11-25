@@ -20,6 +20,12 @@ test("a patchable key lands and nothing is traced", () => {
   expect(reports).toEqual([]);
 });
 
+test("the notification sound switch is a patchable key that lands without a trace", () => {
+  const { kept, reports } = restrict({ notifySound: false });
+  expect(kept).toEqual({ notifySound: false });
+  expect(reports).toEqual([]);
+});
+
 test("a key outside the config is dropped and traced, the rest of the patch lands", () => {
   const { kept, reports } = restrict({ shellHook: "x", theme: "light" });
   expect(kept).toEqual({ theme: "light" });

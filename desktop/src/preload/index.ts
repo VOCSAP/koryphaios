@@ -304,6 +304,8 @@ const api: DeckApi = {
   onInboxOpen: (cb: (target?: InboxOpenTarget) => void) =>
     subscribe<InboxOpenTarget | undefined>('inbox:open', (target) => cb(target)),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
+  onNotificationSound: (cb) => subscribe('notify:sound', cb),
+  notificationSoundReady: () => ipcRenderer.send('notify:sound-ready'),
   onDesignPick: (cb: (event: DesignPickEvent) => void) => subscribe('design:pick', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),
   onRulesChanged: (cb: (list: TtsrRulesList) => void) => subscribe('rules:changed', cb),

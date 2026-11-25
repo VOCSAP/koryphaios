@@ -21,6 +21,7 @@ const APPEARANCE: AvatarAppearance = {
   idleOpacity: 1,
   motion: 'continuous',
   bubbleExpanded: false,
+  sound: true,
   dndUntil: null,
   dndChoice: null,
   positions: {}
@@ -323,6 +324,19 @@ test('Lock position and Always on top reach the machine, the native window and t
   expect(s.appearance().alwaysOnTop).toBe(false)
   expect(window.calls).toContain('alwaysOnTop:false')
   expect(s.locate((a) => a.kind === 'always-on-top').native.checked).toBe(false)
+})
+
+test('Sound is ticked by default and its click stores the choice the Deck reads, then ticks back', async () => {
+  const s = await setup()
+  expect(s.appearance().sound, 'stored on before any click').toBe(true)
+  expect(s.locate((a) => a.kind === 'sound').native.checked).toBe(true)
+
+  s.locate((a) => a.kind === 'sound').native.click!()
+  expect(s.appearance().sound).toBe(false)
+  expect(s.locate((a) => a.kind === 'sound').native.checked).toBe(false)
+
+  s.locate((a) => a.kind === 'sound').native.click!()
+  expect(s.appearance().sound).toBe(true)
 })
 
 test('Motion checks exactly the stored choice', async () => {

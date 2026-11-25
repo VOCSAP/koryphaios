@@ -34,6 +34,8 @@ export interface AvatarAppearance {
   motion: AvatarMotion
   /** The message bubble opens at its larger size. */
   bubbleExpanded: boolean
+  /** The Deck plays its notification sounds; the Deck reads this file for it. */
+  sound: boolean
   dndUntil: number | null
   dndChoice: AvatarDndChoice | null
   positions: Record<string, AvatarScreenPosition>
@@ -83,6 +85,7 @@ function defaultAppearance(): AvatarAppearance {
     idleOpacity: 1,
     motion: 'continuous',
     bubbleExpanded: false,
+    sound: true,
     dndUntil: null,
     dndChoice: null,
     positions: emptyPositions()
@@ -113,6 +116,8 @@ function readAppearance(value: unknown, dependencies: AvatarAppearanceDependenci
   appearance.motion = value.motion
   // A bad flag reads as false: it must not discard the position and Do Not Disturb the file also holds.
   appearance.bubbleExpanded = value.bubbleExpanded === true
+  // An absent or invalid sound state must not silently disable notifications.
+  appearance.sound = value.sound !== false
   appearance.dndUntil = value.dndUntil
   appearance.dndChoice = dndChoice as AvatarDndChoice | null
   for (const [screenId, position] of Object.entries(value.positions)) {

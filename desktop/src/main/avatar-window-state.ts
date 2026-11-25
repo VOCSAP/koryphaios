@@ -123,6 +123,7 @@ const APPEARANCE_FIELD_OWNER = {
   idleOpacity: 'patch',
   motion: 'patch',
   bubbleExpanded: 'patch',
+  sound: 'patch',
   dndUntil: 'patch',
   dndChoice: 'patch'
 } as const satisfies Record<keyof AvatarAppearance, 'fixed' | 'transition' | 'patch'>

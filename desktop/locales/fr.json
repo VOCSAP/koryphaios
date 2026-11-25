@@ -279,6 +279,7 @@
   "attention.dismiss": "Ignorer (ne plus considérer comme en attente)",
   "attention.inInbox": "Attend ta réponse dans le Courrier ; s'efface une fois la réponse donnée",
   "settings.notifyAttention": "Notification système quand une session attend ta réponse",
+  "settings.notifySound": "Jouer un son Kory quand quelque chose attend ta réponse",
   "settings.liveStatusLine": "Afficher le modèle et le remplissage du contexte dans la liste des sessions",
   "settings.liveStatusLineHelp": "Remplace les indications en pied de Claude Code (? for shortcuts, esc to interrupt) dans chaque tuile. Prend effet au prochain démarrage d'une tuile.",
   "settings.thalposAutostart": "Garder le cache du prompt au chaud (thalpos)",

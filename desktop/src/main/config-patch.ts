@@ -28,6 +28,7 @@ export const CONFIG_KEY_ACCESS = {
   autoResumeQuota: 'patch',
   leadPattern: 'file',
   notifyAttention: 'patch',
+  notifySound: 'patch',
   liveStatusLine: 'patch',
   thalposAutostart: 'patch',
   mobileApprovals: 'patch',
