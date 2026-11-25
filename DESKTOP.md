@@ -200,6 +200,42 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   deciding it. Hooks fail CLOSED: no credential, broker down, an unusable
   answer or a spent budget yields no decision at all (exit 0, no stdout),
   leaving the native dialog up.
+- **Notification sound** (`main/notification-sound.ts`, wired in
+  `main/index.ts`, played by `renderer/src/notification-sound-player.ts`): the
+  Deck alone plays, from the main window's renderer; the Avatar plays nothing
+  and only contributes its settings. Three sounds, by what awaits the operator:
+  `permission` for an approval row of kind `permission`, `question` for any
+  other open row (question, plan), `attention` for a tile's needs-you edge.
+  Every open, non-informational row rings by its own kind, whatever its
+  `tile_ref`; several rows in one tick play one sound, `permission` over
+  `question` over `attention`. A row rings once and rings again only after it
+  left the list and came back.
+  Three cuts, any of which silences it: the `notifySound` setting
+  (a checkbox in the Settings view, beside `notifyAttention`; on by default), the **Sound** box of the Avatar
+  tray menu (`sound` in `avatar-appearance.json`, on when absent or invalid),
+  and the Avatar Do Not Disturb (`dndUntil` in the same file, read when a sound
+  is requested or about to play, so a DND started while a sound waits drops it).
+  Rules that are not obvious:
+  - The needs-you edge rings `attention` only if the tile has no open row once
+    the wait is over: the decision re-polls the approvals every
+    `ATTENTION_POLL_MS` for at most `ATTENTION_WAIT_MS`, first waiting for the
+    fallback row still being created for that tile (`tileQuestionRaises`). A
+    row that appears rings by its kind instead; a tile that stops waiting rings
+    nothing. The pending-approvals tick shows its list to the sound decision
+    (`observePending`) before it raises needs-you.
+  - Two sounds are never closer than `MIN_SOUND_GAP_MS`: a sound requested
+    inside the gap is deferred to its end, not dropped, and judged again then
+    (a row resolved meanwhile plays nothing). A clock set back does not mute.
+  - A sound is held, as one kind, until the renderer has sent
+    `notify:sound-ready` (sent once the store subscribes to `notify:sound`).
+    The main window's `did-start-loading` and `render-process-gone` mark it not
+    ready again, so a reload or a crash holds the next sound until the new
+    renderer signals.
+  - A sound the renderer cannot play is reported through `window.api.reportError`.
+  `notify:sound` goes main to the main window only, never broadcast.
+  `notify:sound-ready` is tier 1 and in the remote-blocked floor
+  (`desktop/src/shared/companion.ts`), so a paired phone can neither play nor
+  flush a sound.
 - **Operator identity and broker trust**: one Ed25519 identity per OS user,
   `operator.json` in the app-state dir (`operator-identity.ts`), shared by
   approval arming and roadmap signing. It is created once and published by an
