@@ -2296,6 +2296,48 @@ test("writeTeamLeadMcpConfig writes its OWN file, scoped to TEAM_LEAD_DECK_TOOLS
   expect(supParsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_ROLE).toBe("supervisor");
 });
 
+// Mutation: append roadmap_dispatch even when the caller's Deck allow-list is empty.
+test("writeTeamLeadMcpConfig keeps an empty Deck allow-list empty", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-empty-"));
+  tmpDirs.push(dir);
+  const file = writeTeamLeadMcpConfig(
+    {
+      dir,
+      mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+      execPath: "/usr/bin/electron",
+      controlUrl: "http://127.0.0.1:1234",
+      controlToken: "tok"
+    },
+    "team-lead-empty.json",
+    []
+  );
+  const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
+    mcpServers: Record<string, { env: Record<string, string> }>;
+  };
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(encodeMountCeiling([]));
+});
+
+// Coverage mutation: add roadmap_dispatch only when the caller grants more than one Deck tool.
+test("writeTeamLeadMcpConfig adds roadmap_dispatch to a one-tool Deck allow-list", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-one-tool-"));
+  tmpDirs.push(dir);
+  const file = writeTeamLeadMcpConfig(
+    {
+      dir,
+      mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+      execPath: "/usr/bin/electron",
+      controlUrl: "http://127.0.0.1:1234",
+      controlToken: "tok"
+    },
+    "team-lead-one-tool.json",
+    ["deck_announce"]
+  );
+  const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
+    mcpServers: Record<string, { env: Record<string, string> }>;
+  };
+  expect(parsed.mcpServers["kory-deck"]!.env.DECK_CONTROL_TOOLS).toBe(encodeMountCeiling(["deck_announce", "roadmap_dispatch"]));
+});
+
 test("writeSupervisorMcpConfig also writes the deck-lead key, deck-control untouched", () => {
   const dir = mkdtempSync(join(tmpdir(), "cp-sup-lead-"));
   tmpDirs.push(dir);
@@ -3040,6 +3082,8 @@ test("kory-deck roadmap_dispatch proves itself with the sibling instance token a
   expect(ran.text).toContain("Dispatch ran");
   expect(probe.adds, "exactly one /dispatch-request/add for one call").toHaveLength(1);
   expect(probe.adds[0]!.body.instance_token, "dispatch must carry the sibling tile's instance_token").toBe(SIBLING_TOKEN);
+  // Mutation: change `wait_sec: 25` to `wait_sec: 0` in handleRoadmapDispatch.
+  expect(probe.adds[0]!.body.wait_sec, "dispatch must wait for the Deck outcome before reporting a parked request").toBe(25);
   const wire = JSON.stringify(probe.adds);
   expect(wire, "the Deck control credential reached the broker").not.toContain(CONTROL_TOKEN_FOR_DISPATCH);
 });
@@ -3060,6 +3104,8 @@ test("kory-deck roadmap_dispatch is refused by the broker when the sibling token
     probe.adds.slice(before).map((add) => add.body.instance_token),
     "with no sibling identity the call must not fall back to the control credential"
   ).not.toContain(CONTROL_TOKEN_FOR_DISPATCH);
+  // Coverage mutation: wait only when an instance token is present.
+  expect(probe.adds.map((add) => add.body.wait_sec), "every dispatch wire shape must carry the same wait").toEqual([25, 25]);
 });
 
 test("kory-deck refuses a direct roadmap_dispatch call that DECK_CONTROL_TOOLS hides, with zero broker traffic", async () => {

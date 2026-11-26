@@ -155,7 +155,11 @@ function buildDeckControlMcpConfig(
     ELECTRON_RUN_AS_NODE: '1',
     DECK_CONTROL_URL: input.controlUrl,
     DECK_CONTROL_TOKEN: input.controlToken,
-    [DECK_CEILING_ENV]: checkedCeiling(DECK_CEILING_ENV, [...toolsAllowlist, 'roadmap_dispatch'], DECK_MOUNT_REGISTRY),
+    [DECK_CEILING_ENV]: checkedCeiling(
+      DECK_CEILING_ENV,
+      toolsAllowlist.length === 0 ? [] : [...toolsAllowlist, 'roadmap_dispatch'],
+      DECK_MOUNT_REGISTRY
+    ),
     [DECK_ROLE_ENV]: role
   }
   return {

@@ -9,6 +9,10 @@ export function resolveToolAllowlist(envValue: string | undefined): string[] | n
     .filter((value) => value.length > 0);
 }
 
+export function isToolAllowed(allowlist: readonly string[] | null, name: string): boolean {
+  return allowlist === null || allowlist.includes(name);
+}
+
 export function filterTools<T extends { name: string }>(tools: readonly T[], allowlist: string[] | null): T[] {
   if (allowlist === null) return tools.slice();
   const allowed = new Set(allowlist);

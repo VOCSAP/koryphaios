@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scrubEnv } from "./_scrub-env.ts";
 import { OPERATOR_CEILING_ENV, OPERATOR_TOOLS, encodeMountCeiling } from "../shared/mount-ceiling.ts";
+import * as toolAllowlist from "../shared/tool-allowlist.ts";
 
 interface JsonRpcResponse {
   id?: number;
@@ -120,6 +121,16 @@ async function listedNames(h: Awaited<ReturnType<typeof bootRestricted>>, id = 1
   const listed = await readUntil(h.reader, id, h.buffer);
   return (listed.result?.tools ?? []).map((tool) => tool.name).sort();
 }
+
+// Mutation: let an empty allow-list pass by adding `|| allowlist.length === 0`.
+test("an empty peer allow-list excludes roadmap_dispatch while an absent one stays unrestricted", () => {
+  const isToolAllowed = (toolAllowlist as { isToolAllowed?: (allowlist: string[] | null, name: string) => boolean }).isToolAllowed;
+  expect(typeof isToolAllowed).toBe("function");
+  expect(isToolAllowed?.([], "roadmap_dispatch")).toBe(false);
+  expect(isToolAllowed?.(["list_peers"], "roadmap_dispatch")).toBe(false);
+  expect(isToolAllowed?.(null, "roadmap_dispatch")).toBe(true);
+  expect(isToolAllowed?.(["roadmap_dispatch"], "roadmap_dispatch")).toBe(true);
+});
 
 describe("server-deck.ts honors CLAUDE_PEERS_TOOLS under its mount ceiling", () => {
   test("tools/list omits a tool the allow-list excludes", async () => {

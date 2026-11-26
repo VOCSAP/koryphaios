@@ -351,6 +351,19 @@ describe("ask_operator over MCP stdio", () => {
     expect(res.result?.content?.[0]?.text).toBe("message is required");
   }, 60_000);
 
+  // Mutations: remove `|| !message.trim()`, or replace trim with a scanner limited to ASCII whitespace.
+  test("notify_operator rejects whitespace-only messages before consulting credentials", async () => {
+    const h = await boot(false);
+    let id = 1;
+    for (const message of [" \n\t ", String.fromCodePoint(0x00a0)]) {
+      h.send({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "notify_operator", arguments: { message } } });
+      const res = await readUntil(h.reader, id, h.buffer);
+      expect(res.result?.isError, JSON.stringify(message)).toBe(true);
+      expect(res.result?.content?.[0]?.text, JSON.stringify(message)).toBe("message is required");
+      id++;
+    }
+  }, 60_000);
+
   test("without a credential the tool refuses instead of hanging, naming the real cause", async () => {
     const h = await boot(false);
     h.send({

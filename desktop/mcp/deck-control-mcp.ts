@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline'
 import { hostname } from 'node:os'
 import { readSessionIdentityFile } from '../../shared/peer-cache.ts'
 import { handleRoadmapDispatch, type CompanionIdentity } from '../../shared/roadmap-dispatch.ts'
-import { resolveToolAllowlist, TOOLS_ENV_VAR } from '../../shared/tool-allowlist.ts'
+import { isToolAllowed, resolveToolAllowlist, TOOLS_ENV_VAR } from '../../shared/tool-allowlist.ts'
 import { brokerHeaders, brokerUrl, loadBrokerConfig } from '../../shared/broker-config.ts'
 import { DECK_CEILING_ENV, DECK_ROLE_ENV, resolveMountCeiling, resolveMountRole } from '../../shared/mount-ceiling.ts'
 import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
@@ -297,7 +297,7 @@ const FILTERED_TOOLS: typeof TOOLS =
   GRANTED === null
     ? []
     : TOOLS.filter((t) => GRANTED.includes(t.name)).filter(
-        (t) => t.name !== 'roadmap_dispatch' || PEERS_ALLOWLIST === null || PEERS_ALLOWLIST.includes(t.name)
+        (t) => t.name !== 'roadmap_dispatch' || isToolAllowed(PEERS_ALLOWLIST, t.name)
       )
 
 const SUPERVISOR_INSTRUCTIONS =
