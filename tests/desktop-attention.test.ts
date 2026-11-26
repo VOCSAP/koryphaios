@@ -665,6 +665,7 @@ beforeAll(async () => {
 const MODAL_ATTENTION_EXEMPTIONS = new Set([
   "channels-warning-conpty-win.json",
   "composer-multiline-2.1.328.json",
+  "composer-slash-picker-2.1.328.json",
   "draft-numbered-2.1.301.json",
   "typing-numbered-2.1.301.json",
   "resize-numbered-draft-2.1.301.json",

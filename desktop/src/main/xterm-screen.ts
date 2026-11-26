@@ -89,7 +89,7 @@ export type XtermScreen = {
 }
 
 export type InjectGuardState = 'clear' | 'modal'
-export type InjectGuardRule = 'empty-grid' | 'picker' | 'dialog' | 'composer-geometry'
+export type InjectGuardRule = 'empty-grid' | 'picker' | 'slash-menu' | 'dialog' | 'composer-geometry'
 export type InjectGuardInspection =
   | { state: 'clear' }
   | { state: 'modal'; rule: InjectGuardRule; line?: number }
@@ -108,6 +108,7 @@ const DEFAULT_GLOBAL_BUDGETS = {
 
 const CHEVRON = String.fromCodePoint(0x276f)
 const NUMBERED_PROMPT = new RegExp(`^\\s*${CHEVRON}\\s+\\d+\\.`)
+const SLASH_MENU_PROMPT = new RegExp(`^\\s{0,512}${CHEVRON}\\s{1,512}\\/\\S{1,512}\\s{2,512}\\S`)
 
 const validPositiveInteger = (value: number): boolean => Number.isSafeInteger(value) && value > 0
 
@@ -405,6 +406,7 @@ export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardIn
   const isPureBorder = (line: string): boolean => isPureBorderRow(line, cols)
   const isTopBorder = (line: string): boolean => isTopBorderRow(line, cols)
   const isPicker = (line: string): boolean => NUMBERED_PROMPT.test(line)
+  const isSlashMenu = (line: string, y: number): boolean => y !== cursor.y && SLASH_MENU_PROMPT.test(line)
   // The echo of a submitted prompt is painted on the message background; a selector's chevron carries only a
   // foreground colour. A visible cursor alone does not tell them apart: a selector can leave it visible.
   const isEchoRow = (y: number): boolean => {
@@ -419,6 +421,9 @@ export function inspectInjectGuard(snapshot: XtermScreenSnapshot): InjectGuardIn
 
   const pickerLine = lines.findIndex((line, y) => isPicker(line) && !isEchoRow(y))
   if (pickerLine >= 0) return { state: 'modal', rule: 'picker', line: pickerLine + 1 }
+
+  const slashMenuLine = lines.findIndex((line, y) => isSlashMenu(line, y) && !isEchoRow(y))
+  if (slashMenuLine >= 0) return { state: 'modal', rule: 'slash-menu', line: slashMenuLine + 1 }
 
   const dialogTopLine = lines.findIndex(isDialogTop)
   if (dialogTopLine >= 0 && lines.some(isDialogBottom)) return { state: 'modal', rule: 'dialog', line: dialogTopLine + 1 }

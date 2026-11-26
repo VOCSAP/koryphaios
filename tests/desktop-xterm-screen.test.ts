@@ -697,6 +697,13 @@ describe('xterm main-process screen adapter', () => {
   test('classifies the selector of a captured dialog on the picker rule', async () => {
     expect(inspectInjectGuard(await fixtureSnapshot('dialog-open-with-esc.json'))).toMatchObject({ state: 'modal', rule: 'picker' })
   })
+
+  // mutation: remove the slash-command picker rule
+  test('classifies the captured slash-command menu on its dedicated rule', async () => {
+    const snapshot = await fixtureSnapshot('composer-slash-picker-2.1.328.json')
+    expect(snapshot.lines.some((line) => /^\s*❯\s+\/add-dir\b/.test(line))).toBe(true)
+    expect(inspectInjectGuard(snapshot)).toMatchObject({ state: 'modal', rule: 'slash-menu' })
+  })
 })
 
 describe('xterm injection guard rules', () => {
@@ -712,11 +719,29 @@ describe('xterm injection guard rules', () => {
     expect(classifyInjectGuard(await screenSnapshot(`${esc}[6;1H${chevron}${esc}[11;1H`, 120, 40))).toBe('modal')
   })
 
+  test('accepts a one-column snapshot without compiling an invalid regex', async () => {
+    const snapshot = await screenSnapshot('', 1, 3)
+    expect(() => inspectInjectGuard(snapshot)).not.toThrow()
+  })
+
   const composerWithTop = async (top: string, bottom = horizontal.repeat(100), cursor = `${esc}[9;3H`) =>
     screenSnapshot(`${esc}[8;1H${top}${esc}[9;1H${chevron}${esc}[10;1H${bottom}${cursor}`, 100, 30)
 
   test('recognizes a complete labelled composer geometry', async () => {
     expect(classifyInjectGuard(await composerWithTop(`${horizontal.repeat(40)} explorer ${horizontal.repeat(50)}`))).toBe('clear')
+  })
+
+  // Mutation: let the slash-picker rule inspect the cursor's composer row.
+  test.each([
+    ['a slash command', '/clear'],
+    ['a slash command followed by two spaces and draft text', '/clear  note']
+  ])('does not mistake %s typed in the composer for a picker', async (_shape, typed) => {
+    const snapshot = await screenSnapshot(
+      `${esc}[8;1H${horizontal.repeat(100)}${esc}[9;1H${chevron} ${typed}${esc}[10;1H${horizontal.repeat(100)}${esc}[9;${typed.length + 4}H`,
+      100,
+      30
+    )
+    expect(inspectInjectGuard(snapshot)).toEqual({ state: 'clear' })
   })
 
   test.each([
@@ -793,6 +818,13 @@ describe('xterm injection guard rules', () => {
   const withoutNumberedRows = (snapshot: Awaited<ReturnType<typeof fixtureSnapshot>>) => ({
     ...snapshot,
     lines: snapshot.lines.map((line) => (/^\s*❯\s+\d+\./.test(line) ? '' : line))
+  })
+
+  // Mutation: lower the slash-menu description separator from two spaces to one.
+  test('keeps a one-space slash command echo outside the cursor row clear', async () => {
+    const snapshot = await aboveComposer(`${esc}[6;1H${chevron} /model opus${reset}`)
+    expect(snapshot.cursor.y).toBe(14)
+    expect(inspectInjectGuard(snapshot)).toEqual({ state: 'clear' })
   })
 
   // mutation: delete the `!isEchoRow(y)` term of the picker search
