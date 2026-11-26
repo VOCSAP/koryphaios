@@ -393,14 +393,23 @@ describe("candidate ports", () => {
     ["-1", 600],
     ["abc", 600],
     ["1.5", 600],
+    ["86400", 86400],
+    ["86401", 600],
+    ["99999999999", 600],
   ])("the idle delay %p is %p seconds", (raw, seconds) => {
     expect(idleSeconds({ CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: raw }, log)).toBe(seconds);
   });
 
-  test("an invalid idle delay leaves a log line", () => {
+  test.each(["soon", "86401"])("the unusable idle delay %p leaves a log line", (raw) => {
     const recorded = recordingLog();
-    idleSeconds({ CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: "soon" }, recorded.log);
+    idleSeconds({ CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: raw }, recorded.log);
     expect(recorded.lines.some((l) => l.includes("CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC"))).toBe(true);
+  });
+
+  test.each([undefined, "", "0", "86400"])("the usable idle delay %p logs nothing", (raw) => {
+    const recorded = recordingLog();
+    idleSeconds({ CLAUDE_PEERS_MCP_DAEMON_IDLE_SEC: raw }, recorded.log);
+    expect(recorded.lines).toEqual([]);
   });
 });
 

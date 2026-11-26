@@ -26,6 +26,8 @@ const PORT_BASE = 47000;
 const PORT_SPAN = 1000;
 const CANDIDATE_COUNT = 10;
 const DEFAULT_IDLE_SEC = 600;
+// A timer delay above 2^31-1 ms overflows and fires at once, ending an idle daemon immediately.
+const MAX_IDLE_SEC = 86_400;
 const HANDSHAKE_WAIT_MS = 9000;
 // Must exceed HEALTH_TIMEOUT_MS: the broker spawn follows one /health probe and has to happen inside this wait.
 export const BROKER_FIRST_WAIT_MS = 3000;
@@ -137,8 +139,8 @@ export function idleSeconds(env: Env, log: Logger): number {
   const raw = env[IDLE_ENV];
   if (raw === undefined || raw === "") return DEFAULT_IDLE_SEC;
   const seconds = Number(raw);
-  if (Number.isInteger(seconds) && seconds >= 0) return seconds;
-  log.warn(`ignoring ${IDLE_ENV}=${raw}: not a whole number of seconds, using ${DEFAULT_IDLE_SEC}`);
+  if (Number.isInteger(seconds) && seconds >= 0 && seconds <= MAX_IDLE_SEC) return seconds;
+  log.warn(`ignoring ${IDLE_ENV}=${raw}: not a whole number of seconds from 0 to ${MAX_IDLE_SEC}, using ${DEFAULT_IDLE_SEC}`);
   return DEFAULT_IDLE_SEC;
 }
 
