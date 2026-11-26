@@ -34,6 +34,7 @@ export interface DispatchStateColumns {
   id: string;
   project_key: string;
   queue: number | null;
+  lot_id: string | null;
   locked: number | boolean;
   locked_by: string | null;
   locked_group: string | null;
@@ -55,11 +56,12 @@ export interface DispatchStateColumns {
  */
 export function dispatchStateTag(row: DispatchStateColumns, brokerId: string): string {
   const canonical = JSON.stringify([
-    "dispatch-state-v1",
+    "dispatch-state-v2",
     brokerId,
     row.id,
     row.project_key,
     row.queue ?? null,
+    row.lot_id ?? null,
     row.locked ? 1 : 0,
     row.locked_by ?? null,
     row.locked_group ?? null,

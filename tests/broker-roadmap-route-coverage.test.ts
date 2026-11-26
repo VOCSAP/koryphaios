@@ -10,7 +10,16 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, discoverRoadmapRoutes, type TestBroker } from "./_helper.ts";
+import {
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  discoverRoadmapRoutes,
+  deckAuthored,
+  openBrokerDb,
+  type TestBroker,
+} from "./_helper.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -41,6 +50,7 @@ const READ_ROUTES = new Set([
   "/roadmap/context-document/get",
   "/roadmap/context-document/list",
   "/roadmap/context-document/sync/pull",
+  "/roadmap/lot/list",
   "/roadmap/sync/pull",
   "/roadmap/sync/status",
   "/roadmap/sync/conflicts",
@@ -111,6 +121,8 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   // The author is resolved before the replica-only check, so this probe reaches
   // the identity guard on any broker, replica or not.
   "/roadmap/sync/resolve": (c) => ({ id: c.itemId, by: c.victimPeerId, choice: "local" }),
+  "/roadmap/lot/create": (c) => ({ project_key: PK, by: c.victimPeerId, name: "x" }),
+  "/roadmap/lot/move": (c) => ({ project_key: PK, by: c.victimPeerId, ids: [c.itemId], from: null, to: "default" }),
 };
 
 /**
@@ -170,6 +182,9 @@ const EXPECTED_ROUTES = [
   "/roadmap/list",
   "/roadmap/lock-park",
   "/roadmap/lock-release",
+  "/roadmap/lot/create",
+  "/roadmap/lot/list",
+  "/roadmap/lot/move",
   "/roadmap/reorder",
   "/roadmap/sync/conflicts",
   "/roadmap/sync/lock",
@@ -460,6 +475,9 @@ const EXEMPT_INACTIVE_HANDLERS = new Set([
   "releaseStaleLocks",
 ]);
 
+/** Card writers shown by a request in this file to claim nothing. */
+const PROVEN_NON_CLAIMING_HANDLERS = new Set(["handleRoadmapLotMove"]);
+
 const DELEGATING_INACTIVE_HANDLERS: Record<string, string> = {
   handleRoadmapDispatchAtomic: "atomicDispatchDeps",
 };
@@ -479,6 +497,9 @@ const READ_ONLY_INACTIVE_HANDLERS = new Set([
   "handleRoadmapContextDocumentList",
   "handleRoadmapContextDocumentSyncPull",
   "handleRoadmapExport",
+  // Create writes the lot table, never a card.
+  "handleRoadmapLotCreate",
+  "handleRoadmapLotList",
   "handleRoadmapSyncPull",
   "handleRoadmapSyncStatus",
   "handleRoadmapSyncConflicts",
@@ -489,6 +510,7 @@ function unclassifiedInactiveHandlers(handlers: string[]): string[] {
     (h) =>
       !GUARDED_INACTIVE_HANDLERS.has(h) &&
       !EXEMPT_INACTIVE_HANDLERS.has(h) &&
+      !PROVEN_NON_CLAIMING_HANDLERS.has(h) &&
       !(h in DELEGATING_INACTIVE_HANDLERS) &&
       !READ_ONLY_INACTIVE_HANDLERS.has(h) &&
       !REPLICATION_INACTIVE_HANDLERS.has(h)
@@ -509,6 +531,9 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapList",
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
+  "handleRoadmapLotCreate",
+  "handleRoadmapLotList",
+  "handleRoadmapLotMove",
   "handleRoadmapQueueDelta",
   "handleRoadmapReorder",
   "handleRoadmapSyncConflicts",
@@ -601,6 +626,39 @@ test("every DELEGATING handler writes no card itself and reaches handleRoadmapUp
   }
 });
 
+test("a lot move leaves an inactive card unclaimed: status, lock and flag unchanged", async () => {
+  const create = await post<{ item: RoadmapItem }>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "inactive card moved to a lot", status: "planned", inactive: true })
+  );
+  expect(create.status, JSON.stringify(create.body)).toBe(200);
+  const id = create.body.item.id;
+  const lot = await post<{ lot: { id: string } }>(
+    `${broker.url}/roadmap/lot/create`,
+    deckAuthored({ project_key: PK, name: "holds an inactive card" })
+  );
+  const claimColumns = () => {
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      return db
+        .query("SELECT status, locked, locked_by, locked_at, inactive FROM roadmap_items WHERE id = ?")
+        .get(id);
+    } finally {
+      db.close();
+    }
+  };
+  const before = claimColumns();
+
+  const moved = await post(
+    `${broker.url}/roadmap/lot/move`,
+    deckAuthored({ project_key: PK, ids: [id], from: null, to: lot.body.lot.id })
+  );
+
+  expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+  expect(claimColumns()).toEqual(before);
+  expect(before).toMatchObject({ status: "planned", locked: 0, inactive: 1 });
+});
+
 test("every READ-ONLY handler's body writes neither UPDATE nor INSERT on roadmap_items", () => {
   const source = readFileSync(BROKER_SRC, "utf8");
   for (const name of READ_ONLY_INACTIVE_HANDLERS) {
@@ -635,4 +693,50 @@ test("every EXEMPT handler carries a one-line justification citing this card", (
     const before = source.slice(Math.max(0, idx - 500), idx);
     expect([name, before.includes("c33a5968")]).toEqual([name, true]);
   }
+});
+
+/** The SQL literal of every db.run/query/prepare call that names both the card table and the rank column. */
+function discoverRankStatements(source: string): string[] {
+  const found: string[] = [];
+  for (const m of source.matchAll(/\bdb\s*\.\s*(?:run|query|prepare)\(\s*(["`])((?:\\.|(?!\1)[\s\S])*)\1/g)) {
+    const sql = m[2]!.replace(/\s+/g, " ").trim();
+    if (sql.includes("roadmap_items") && /\bqueue\b/.test(sql)) found.push(sql);
+  }
+  return found;
+}
+
+/** Statements allowed to name the rank without naming the lot, keyed by how they start. */
+const RANK_STATEMENTS_WITHOUT_LOT: Record<string, string> = {
+  "CREATE TABLE IF NOT EXISTS roadmap_items (": "the pre-lot schema, the column is added by a migration",
+  "ALTER TABLE roadmap_items ADD COLUMN queue INTEGER": "migration of the rank column alone",
+  "CREATE TRIGGER roadmap_queue_dirty_au": "marks a rank for the content push, which carries no lot",
+  "UPDATE roadmap_items SET status = 'archived', queue = NULL": "clears the rank, membership stays",
+  "UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = CASE": "compares the rank a push sent, writes none",
+};
+
+// A dropped extraction would hide a statement from the rule below.
+const EXPECTED_RANK_STATEMENTS = 30;
+
+test("the rank statement extractor bites: it finds both quote styles and skips other tables", () => {
+  const fixture = `
+    db.run("UPDATE roadmap_items SET queue = ?", [1]);
+    db.query(\`SELECT id FROM roadmap_items
+      WHERE queue IS NOT NULL\`).all();
+    db.run("UPDATE roadmap_queue_state SET rev = 1");
+  `;
+  expect(discoverRankStatements(fixture)).toEqual([
+    "UPDATE roadmap_items SET queue = ?",
+    "SELECT id FROM roadmap_items WHERE queue IS NOT NULL",
+  ]);
+});
+
+test("every SQL statement naming the rank names the lot too, or says why it does not", () => {
+  const statements = discoverRankStatements(readFileSync(BROKER_SRC, "utf8"));
+  expect(statements, "extraction changed: classify the statement, then update the count").toHaveLength(
+    EXPECTED_RANK_STATEMENTS
+  );
+  const unscoped = statements.filter((sql) => !/\blot_id\b/.test(sql));
+  const exemptions = Object.keys(RANK_STATEMENTS_WITHOUT_LOT);
+  expect(unscoped.filter((sql) => !exemptions.some((start) => sql.startsWith(start)))).toEqual([]);
+  expect(exemptions.filter((start) => !unscoped.some((sql) => sql.startsWith(start)))).toEqual([]);
 });

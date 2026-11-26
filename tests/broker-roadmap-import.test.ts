@@ -723,3 +723,81 @@ test("import: a terminal item never holds a rank, whether the file carries one o
   db.close();
   expect(archived, "a stored rank does not survive the move to archived").toEqual({ status: "archived", queue: null });
 });
+
+test("an import never takes a lot from the file: a stored card keeps its lot", async () => {
+  const kept = crypto.randomUUID();
+  await importRaw([{ id: kept, kind: "feature", title: "member of a named lot" }]);
+  const db = openBrokerDb(broker.dbPath);
+  db.run("UPDATE roadmap_items SET lot_id = 'lot-stored' WHERE id = ?", [kept]);
+
+  const stored = [];
+  for (const file of [{ lot_id: "lot-from-file", queue: 4 }, { queue: 5 }, { lot_id: "default", queue: 6 }]) {
+    await importRaw([{ id: kept, kind: "feature", title: "member of a named lot", ...file }]);
+    stored.push(db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(kept));
+  }
+  db.close();
+
+  expect(stored).toEqual(Array(3).fill({ lot_id: "lot-stored", queue: null }));
+});
+
+test("a new card the file ranks in a named lot arrives unranked, never in the default queue", async () => {
+  const [named, namedUnranked, plain, byDefault] = [1, 2, 3, 4].map(() => crypto.randomUUID()) as [
+    string,
+    string,
+    string,
+    string,
+  ];
+
+  await importRaw([
+    { id: named, kind: "feature", title: "born ranked in a named lot", lot_id: "lot-from-file", queue: 2 },
+    { id: namedUnranked, kind: "feature", title: "born unranked in a named lot", lot_id: "lot-from-file" },
+    { id: plain, kind: "feature", title: "born ranked outside lots", queue: 3 },
+    { id: byDefault, kind: "feature", title: "born ranked in the default lot", lot_id: "default", queue: 4 },
+  ]);
+  const db = openBrokerDb(broker.dbPath);
+  const stored = [named, namedUnranked, plain, byDefault].map((id) =>
+    db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id)
+  );
+  db.close();
+
+  expect(stored).toEqual([
+    { lot_id: null, queue: null },
+    { lot_id: null, queue: null },
+    { lot_id: "default", queue: 3 },
+    { lot_id: "default", queue: 4 },
+  ]);
+});
+
+test.each([[42], [true], [{}], [[]]])("a new card with a malformed lot_id of %j arrives unranked", async (lotId) => {
+  const id = crypto.randomUUID();
+
+  await importRaw([{ id, kind: "feature", title: "malformed lot", lot_id: lotId, queue: 7 }]);
+  const db = openBrokerDb(broker.dbPath);
+  const stored = db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id);
+  db.close();
+
+  expect(stored).toEqual({ lot_id: null, queue: null });
+});
+
+test("a new card whose file lot_id is null keeps its rank in the default lot", async () => {
+  const id = crypto.randomUUID();
+
+  await importRaw([{ id, kind: "feature", title: "null lot", lot_id: null, queue: 7 }]);
+  const db = openBrokerDb(broker.dbPath);
+  const stored = db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id);
+  db.close();
+
+  expect(stored).toEqual({ lot_id: "default", queue: 7 });
+});
+
+test("a stored default-lot card keeps its place when the file ranks it in a named lot", async () => {
+  const id = crypto.randomUUID();
+  await importRaw([{ id, kind: "feature", title: "back in the default lot", queue: 1 }]);
+
+  await importRaw([{ id, kind: "feature", title: "back in the default lot", lot_id: "lot-from-file", queue: 9 }]);
+  const db = openBrokerDb(broker.dbPath);
+  const stored = db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id);
+  db.close();
+
+  expect(stored).toEqual({ lot_id: "default", queue: 1 });
+});

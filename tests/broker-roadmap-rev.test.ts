@@ -10,8 +10,11 @@
 //   - a content write performed BY the replication itself does not mark the
 //     card dirty, or the pull would immediately push what it just pulled.
 
-import { test, expect } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startBroker, stopBroker, post, type TestBroker, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
@@ -296,3 +299,144 @@ test("the content date is outside the content versioning: a date-only write bump
     await stopBroker(b);
   }
 }, 20_000);
+
+describe("lot revisions", () => {
+  let b: TestBroker;
+  let db: Database;
+  beforeAll(async () => {
+    b = await startBroker();
+    db = openDb(b);
+  });
+  afterAll(async () => {
+    db.close();
+    await stopBroker(b);
+  });
+
+  const writeCard = (verb: string, id: string, project: string, lot: string | null, queue: number | null) =>
+    db.run(
+      `${verb} INTO roadmap_items (id, project_key, kind, title, created_at, updated_at, lot_id, queue)
+       VALUES (?, ?, 'feature', 'lot fixture', 'x', 'x', ?, ?)`,
+      [id, project, lot, queue]
+    );
+  const lotRevs = (project: string): Record<string, number> =>
+    Object.fromEntries(
+      (db.query("SELECT lot_id, rev FROM roadmap_queue_state WHERE project_key = ?").all(project) as {
+        lot_id: string;
+        rev: number;
+      }[]).map((row) => [row.lot_id, row.rev])
+    );
+
+  test("a transfer at the same rank advances both lots and the card, never its content", () => {
+    writeCard("INSERT", "lot-transfer", "p/transfer", "lot-a", 1);
+    const before = readRow(db, "lot-transfer");
+    expect(lotRevs("p/transfer")).toEqual({ "lot-a": 1 });
+
+    db.run("UPDATE roadmap_items SET lot_id = 'lot-b' WHERE id = 'lot-transfer'");
+
+    expect(lotRevs("p/transfer")).toEqual({ "lot-a": 2, "lot-b": 1 });
+    const after = readRow(db, "lot-transfer");
+    expect([after.rev > before.rev, after.content_rev], "the pull cursor sees the transfer").toEqual([
+      true,
+      before.content_rev,
+    ]);
+    db.run("UPDATE roadmap_items SET queue = 2 WHERE id = 'lot-transfer'");
+    expect(lotRevs("p/transfer"), "a rank move inside a lot counts once").toEqual({ "lot-a": 2, "lot-b": 2 });
+  });
+
+  test("an unranked card changing lot, leaving every lot or being deleted advances the lots it touches", () => {
+    writeCard("INSERT", "lot-unranked", "p/unranked", "lot-a", null);
+    db.run("UPDATE roadmap_items SET lot_id = 'lot-b' WHERE id = 'lot-unranked'");
+    expect(lotRevs("p/unranked")).toEqual({ "lot-a": 2, "lot-b": 1 });
+    db.run("UPDATE roadmap_items SET lot_id = NULL WHERE id = 'lot-unranked'");
+    expect(lotRevs("p/unranked")).toEqual({ "lot-a": 2, "lot-b": 2 });
+    db.run("UPDATE roadmap_items SET lot_id = 'lot-a' WHERE id = 'lot-unranked'");
+    db.run("DELETE FROM roadmap_items WHERE id = 'lot-unranked'");
+    expect(lotRevs("p/unranked")).toEqual({ "lot-a": 4, "lot-b": 2 });
+  });
+
+  test("replacing an unranked member advances the lot it leaves", () => {
+    writeCard("INSERT", "lot-replaced", "p/replace", "lot-a", null);
+    writeCard("INSERT OR REPLACE", "lot-replaced", "p/replace", "lot-b", null);
+    expect(lotRevs("p/replace")).toEqual({ "lot-a": 2, "lot-b": 1 });
+  });
+
+  test("a transfer to another project at the same rank advances the old project and the new one", () => {
+    writeCard("INSERT", "lot-moved-project", "p/from", "lot-a", 1);
+    writeCard("INSERT OR REPLACE", "lot-moved-project", "p/to", "lot-a", 1);
+    expect([lotRevs("p/from"), lotRevs("p/to")]).toEqual([{ "lot-a": 2 }, { "lot-a": 1 }]);
+  });
+
+  test("the database refuses a ranked card outside every lot, whichever statement writes it", () => {
+    const refusal = "a queued roadmap card must belong to a lot";
+    writeCard("INSERT", "lot-guard-held", "p/guard", "lot-a", 1);
+    writeCard("INSERT", "lot-guard-free", "p/guard", null, null);
+
+    expect(() => writeCard("INSERT", "lot-guard-born", "p/guard", null, 1)).toThrow(refusal);
+    expect(() => writeCard("INSERT OR REPLACE", "lot-guard-held", "p/guard", null, 2)).toThrow(refusal);
+    expect(() => db.run("UPDATE roadmap_items SET lot_id = NULL WHERE id = 'lot-guard-held'")).toThrow(refusal);
+    expect(() => db.run("UPDATE roadmap_items SET queue = 3 WHERE id = 'lot-guard-free'")).toThrow(refusal);
+    expect(
+      db.query("SELECT id, lot_id, queue FROM roadmap_items WHERE project_key = 'p/guard' ORDER BY id").all()
+    ).toEqual([
+      { id: "lot-guard-free", lot_id: null, queue: null },
+      { id: "lot-guard-held", lot_id: "lot-a", queue: 1 },
+    ]);
+  });
+});
+
+test("a database written before lots restarts with its queue in the default lot, ranks and revisions untouched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-prelot-"));
+  const dbPath = join(dir, "peers.db");
+  const boot = () => startBroker({ CLAUDE_PEERS_DB: dbPath });
+  const untouched = "SELECT title, queue, rev, content_rev, sync_dirty FROM roadmap_items ORDER BY title";
+  const snapshot = () => {
+    const db = openBrokerDb(dbPath);
+    try {
+      return {
+        cards: db.query(untouched).all(),
+        lots: db.query("SELECT title, lot_id FROM roadmap_items ORDER BY title").all(),
+        state: db.query("SELECT * FROM roadmap_queue_state").all(),
+      };
+    } finally {
+      db.close();
+    }
+  };
+  try {
+    const first = await boot();
+    for (const [title, queue] of [["a queued", 1], ["b unqueued", null]] as const) {
+      const created = await post(`${first.url}/roadmap/upsert`, { project_key: PK, by: "agent-old", title, queue });
+      expect(created.status).toBe(200);
+    }
+    await stopBroker(first);
+
+    const db = openBrokerDb(dbPath);
+    for (const { name } of db
+      .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'roadmap_items'")
+      .all() as { name: string }[]) {
+      db.run(`DROP TRIGGER ${name}`);
+    }
+    db.run("DROP INDEX idx_roadmap_items_lot");
+    db.run("ALTER TABLE roadmap_items DROP COLUMN lot_id");
+    db.run("DROP TABLE roadmap_lots");
+    db.run("DROP TABLE roadmap_queue_state");
+    db.run("CREATE TABLE roadmap_queue_state (project_key TEXT PRIMARY KEY, rev INTEGER NOT NULL)");
+    db.run("INSERT INTO roadmap_queue_state (project_key, rev) VALUES (?, 41)", [PK]);
+    const before = db.query(untouched).all();
+    db.close();
+
+    const migrated = {
+      cards: before,
+      lots: [
+        { title: "a queued", lot_id: "default" },
+        { title: "b unqueued", lot_id: null },
+      ],
+      state: [{ project_key: PK, lot_id: "default", rev: 41 }],
+    };
+    for (const run of ["first restart", "second restart"]) {
+      await stopBroker(await boot());
+      expect(snapshot(), run).toEqual(migrated);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 90_000);

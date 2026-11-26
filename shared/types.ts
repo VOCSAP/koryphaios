@@ -580,6 +580,12 @@ export interface RoadmapItem {
    */
   queue: number | null;
   /**
+   * Lot the card belongs to, null when none; absent from a broker that predates
+   * lots. A queued card always names one. Not content, like `queue`: it never
+   * versions content_rev nor decides a conflict.
+   */
+  lot_id?: string | null;
+  /**
    * Agent work-lock (PLAN K2): true while an agent is ACTIVELY working on the
    * item, distinguishing "really in progress" from "in_progress but waiting".
    * Set automatically by the broker when a non-'deck' author moves the item to
@@ -1099,6 +1105,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "updated_at",
   "deleted_at",
   "queue",
+  "lot_id",
   "directive",
   "target_peer_ids",
   "locked",

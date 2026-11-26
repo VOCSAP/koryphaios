@@ -37,6 +37,7 @@ const STATE: DispatchStateColumns = {
   id: "aaaaaaaa-0000-0000-0000-000000000001",
   project_key: PROJECT,
   queue: 3,
+  lot_id: "default",
   locked: 1,
   locked_by: "worker-1",
   locked_group: GROUP,
@@ -67,6 +68,7 @@ describe("dispatchStateTag", () => {
   const moves: [string, Partial<DispatchStateColumns>][] = [
     ["queue", { queue: 4 }],
     ["queue cleared", { queue: null }],
+    ["lot", { lot_id: "bbbbbbbb-0000-0000-0000-000000000001" }],
     ["lock held", { locked: 0 }],
     ["lock owner", { locked_by: "worker-2" }],
     ["lock group", { locked_group: "group-two" }],

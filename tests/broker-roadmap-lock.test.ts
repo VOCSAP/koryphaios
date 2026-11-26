@@ -1769,6 +1769,8 @@ const ROUTES_WITHOUT_CARD: Record<string, string> = {
   "/roadmap/import": "returns the imported count and the skipped ids",
   "/roadmap/lock-park": "returns peer ids",
   "/roadmap/lock-release": "returns peer ids",
+  "/roadmap/lot/create": "returns the lot record, no card",
+  "/roadmap/lot/list": "returns lot records, no card",
   "/roadmap/sync/status": "returns counters",
 };
 
@@ -1814,6 +1816,7 @@ test("a lock holder's instance_token value appears in no roadmap response, and e
   await call("/roadmap/append-context", { id: queued.item.id, ...proof(stranger), text: "appended by a stranger" }, queued.item.id);
   await call("/roadmap/context-document/deport", { id: documented.item.id, project_key: LEAK_PK, ...proof(holder), targets: ["body"] }, documented.item.id);
   await call("/roadmap/reorder", { project_key: LEAK_PK, ...proof(teammate), ids: [queued.item.id], waves: [[queued.item.id]] }, queued.item.id);
+  await call("/roadmap/lot/move", { project_key: LEAK_PK, ...proof(teammate), ids: [queued.item.id], from: "default", to: null }, queued.item.id);
   await call("/roadmap/archive", { id: queued.item.id, ...proof(stranger) }, queued.item.id);
   await call("/roadmap/archive", { id: spare.item.id, ...proof(holder) }, spare.item.id);
 

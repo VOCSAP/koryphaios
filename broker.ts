@@ -132,6 +132,20 @@ import {
   type QueueDeltaOp,
   wavesToRanks,
 } from "./shared/roadmap-queue-delta.ts";
+import {
+  DEFAULT_ROADMAP_LOT_ID,
+  allocateLotColor,
+  isNamedRoadmapLot,
+  lotForRank,
+  moveLotMembers,
+  type RoadmapLot,
+  type RoadmapLotCreateRequest,
+  type RoadmapLotCreateResponse,
+  type RoadmapLotListRequest,
+  type RoadmapLotListResponse,
+  type RoadmapLotMoveRequest,
+  type RoadmapLotMoveResponse,
+} from "./shared/roadmap-lot.ts";
 import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
   adoptedContentDate,
@@ -1188,6 +1202,29 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
+// Membership of a named lot. It must exist before the revision triggers read
+// the live column list.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN lot_id TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+db.run("CREATE INDEX IF NOT EXISTS idx_roadmap_items_lot ON roadmap_items(project_key, lot_id, queue)");
+// The default lot has no row: it exists in every project.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_lots (
+    project_key TEXT NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    color INTEGER,
+    PRIMARY KEY (project_key, id)
+  )
+`);
+
 // Replication columns (DESIGN-OFFLINE-REPLICA §3.1). `rev` is the pull cursor
 // (bumped by ANY tracked write), `content_rev` versions the fifteen content
 // columns alone, and the sync_* group is the replica's reconciliation state
@@ -1386,16 +1423,6 @@ const BUMP_CONTEXT_DOCUMENT_REV_SEQ =
 const IS_APPLYING = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'applying'), '0') = '1'";
 const IS_REPLICA = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'mode'), '') = 'replica'";
 
-// The queue of a project is versioned as a whole: a delta names the revision it
-// was written against. A revision has no row of its own for a project that never
-// had a queued card, which reads as 0.
-db.run(`
-  CREATE TABLE IF NOT EXISTS roadmap_queue_state (
-    project_key TEXT PRIMARY KEY,
-    rev INTEGER NOT NULL
-  )
-`);
-
 // One receipt per queue mutation, kept for good: a replica that was offline for
 // longer than any retention window must still get the answer to its retry
 // instead of applying the mutation twice.
@@ -1437,9 +1464,10 @@ db.run(`
   )
 `);
 
-const BUMP_QUEUE_REV = (projectKey: string): string =>
-  `INSERT INTO roadmap_queue_state (project_key, rev) VALUES (${projectKey}, 1)
-     ON CONFLICT(project_key) DO UPDATE SET rev = rev + 1;`;
+const BUMP_QUEUE_REV = (projectKey: string, lotId: string, when = "1"): string =>
+  `INSERT INTO roadmap_queue_state (project_key, lot_id, rev)
+     SELECT ${projectKey}, ${lotId}, 1 WHERE ${lotId} IS NOT NULL AND ${when}
+     ON CONFLICT(project_key, lot_id) DO UPDATE SET rev = rev + 1;`;
 
 // Dropped and recreated on every startup rather than CREATE IF NOT EXISTS: the
 // generated column lists change with the schema, and an "if not exists" would
@@ -1453,6 +1481,8 @@ for (const name of [
   "roadmap_queue_rev_bi",
   "roadmap_queue_rev_au",
   "roadmap_queue_rev_ad",
+  "roadmap_lot_guard_bi",
+  "roadmap_lot_guard_bu",
   "roadmap_lock_scope_ai",
   "roadmap_lock_scope_au",
   "roadmap_lock_release_au",
@@ -1464,6 +1494,34 @@ for (const name of [
 ]) {
   db.run(`DROP TRIGGER IF EXISTS ${name}`);
 }
+
+// Both rewrites run while no trigger exists: the existing queue moves to the
+// default lot without a new card revision, queue revision or dirty mark.
+const queueStateColumns = db.query("PRAGMA table_info(roadmap_queue_state)").all() as { name: string }[];
+const queueStateHasNoLot = queueStateColumns.length > 0 && !queueStateColumns.some((c) => c.name === "lot_id");
+db.transaction(() => {
+  if (queueStateHasNoLot) db.run("ALTER TABLE roadmap_queue_state RENAME TO roadmap_queue_state_by_project");
+  // Each lot of a project is versioned as a whole: a delta names the revision
+  // it was written against. A lot that never held a card has no row, which
+  // reads as 0.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS roadmap_queue_state (
+      project_key TEXT NOT NULL,
+      lot_id TEXT NOT NULL,
+      rev INTEGER NOT NULL,
+      PRIMARY KEY (project_key, lot_id)
+    )
+  `);
+  if (queueStateHasNoLot) {
+    db.run(
+      `INSERT INTO roadmap_queue_state (project_key, lot_id, rev)
+       SELECT project_key, ?, rev FROM roadmap_queue_state_by_project`,
+      [DEFAULT_ROADMAP_LOT_ID]
+    );
+    db.run("DROP TABLE roadmap_queue_state_by_project");
+  }
+  db.run("UPDATE roadmap_items SET lot_id = ? WHERE queue IS NOT NULL AND lot_id IS NULL", [DEFAULT_ROADMAP_LOT_ID]);
+})();
 
 db.run(`
   CREATE TRIGGER roadmap_rev_ai AFTER INSERT ON roadmap_items BEGIN
@@ -1506,40 +1564,54 @@ db.run(`
   END
 `);
 
-// Every write of a queued rank moves the project's queue revision, in triggers
-// for the reason the revision stamps above are: a handler-side call fails open
-// the day a new writer forgets it. The BEFORE INSERT one is for INSERT OR
-// REPLACE, which drops the old row without firing a delete trigger while
-// recursive triggers are off; it reads the row about to be replaced, so a
-// replacement that moves a card across projects invalidates the old queue too.
+// Every change of a rank or of a membership moves the revision of each lot it
+// touches, in triggers for the reason the revision stamps above are: a
+// handler-side call fails open the day a new writer forgets it. The BEFORE
+// INSERT one is for INSERT OR REPLACE, which drops the old row without firing a
+// delete trigger while recursive triggers are off; it reads the row about to be
+// replaced, so a replacement that moves a card across projects or lots
+// invalidates the old queue too.
 db.run(`
-  CREATE TRIGGER roadmap_queue_rev_au AFTER UPDATE OF queue ON roadmap_items
-  WHEN old.queue IS NOT new.queue
+  CREATE TRIGGER roadmap_queue_rev_au AFTER UPDATE OF queue, lot_id ON roadmap_items
+  WHEN old.queue IS NOT new.queue OR old.lot_id IS NOT new.lot_id
   BEGIN
-    ${BUMP_QUEUE_REV("new.project_key")}
+    ${BUMP_QUEUE_REV("new.project_key", "old.lot_id")}
+    ${BUMP_QUEUE_REV("new.project_key", "new.lot_id", "old.lot_id IS NOT new.lot_id")}
   END
 `);
 db.run(`
   CREATE TRIGGER roadmap_queue_rev_ai AFTER INSERT ON roadmap_items
-  WHEN new.queue IS NOT NULL
+  WHEN new.lot_id IS NOT NULL
   BEGIN
-    ${BUMP_QUEUE_REV("new.project_key")}
+    ${BUMP_QUEUE_REV("new.project_key", "new.lot_id")}
   END
 `);
 db.run(`
   CREATE TRIGGER roadmap_queue_rev_bi BEFORE INSERT ON roadmap_items
-  WHEN EXISTS (SELECT 1 FROM roadmap_items WHERE id = new.id AND queue IS NOT NULL)
+  WHEN EXISTS (SELECT 1 FROM roadmap_items WHERE id = new.id AND lot_id IS NOT NULL)
   BEGIN
-    ${BUMP_QUEUE_REV("(SELECT project_key FROM roadmap_items WHERE id = new.id)")}
+    ${BUMP_QUEUE_REV(
+      "(SELECT project_key FROM roadmap_items WHERE id = new.id)",
+      "(SELECT lot_id FROM roadmap_items WHERE id = new.id)"
+    )}
   END
 `);
 db.run(`
   CREATE TRIGGER roadmap_queue_rev_ad AFTER DELETE ON roadmap_items
-  WHEN old.queue IS NOT NULL
+  WHEN old.lot_id IS NOT NULL
   BEGIN
-    ${BUMP_QUEUE_REV("old.project_key")}
+    ${BUMP_QUEUE_REV("old.project_key", "old.lot_id")}
   END
 `);
+
+// The database refuses a ranked card outside every lot, whichever writer forgot it.
+const REFUSE_RANK_WITHOUT_LOT = `
+  WHEN new.queue IS NOT NULL AND new.lot_id IS NULL
+  BEGIN
+    SELECT RAISE(ABORT, 'a queued roadmap card must belong to a lot');
+  END`;
+db.run(`CREATE TRIGGER roadmap_lot_guard_bi BEFORE INSERT ON roadmap_items ${REFUSE_RANK_WITHOUT_LOT}`);
+db.run(`CREATE TRIGGER roadmap_lot_guard_bu BEFORE UPDATE OF queue, lot_id ON roadmap_items ${REFUSE_RANK_WITHOUT_LOT}`);
 
 // Lock scope is replica-only state, so all three lock triggers are gated on
 // the mode AND on the applying flag: a scope the replication pass itself wrote
@@ -5144,10 +5216,10 @@ function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
       const rows = db
         .query(
           `SELECT id, queue FROM roadmap_items
-            WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')
+            WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')
             ORDER BY queue, id`
         )
-        .all(projectKey) as { id: string; queue: number }[];
+        .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as { id: string; queue: number }[];
       const head = rows[0]?.queue;
       return rows.filter((r) => r.queue === head).map((r) => r.id);
     },
@@ -5311,7 +5383,9 @@ type RoadmapRow = Omit<
   | "lock_scope"
   | "lock_contested_by"
   | "triage"
+  | "lot_id"
 > & {
+  lot_id: string | null;
   triage: string | null;
   tags: string;
   depends_on: string;
@@ -5408,6 +5482,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     dispatch_state_tag: dispatchStateTag(row, BROKER_ID),
     deleted_at: row.deleted_at,
     queue: row.queue,
+    lot_id: row.lot_id,
     directive: row.directive ?? null,
     // Legacy rows created before the migration have NULL here; default to [].
     target_peer_ids: row.target_peer_ids ? parseList(row.target_peer_ids) : [],
@@ -5527,9 +5602,22 @@ function badEnum<T extends string>(value: unknown, allowed: readonly T[]): boole
   return value !== undefined && !allowed.includes(value as T);
 }
 
+/**
+ * Every client reads one queue, so the responses it reads serve a named lot's
+ * rank as null. Not the backup export, and not a write path: both need the
+ * stored rank.
+ */
+function maskNamedLotRank<T extends { lot_id?: string | null; queue: number | null }>(card: T): T {
+  return isNamedRoadmapLot(card.lot_id) ? { ...card, queue: null } : card;
+}
+
+function publicRoadmapItem(row: RoadmapRow): RoadmapItem {
+  return maskNamedLotRank(rowToRoadmapItem(row));
+}
+
 function getRoadmapItem(id: string): RoadmapItem | null {
   const row = getRoadmapRow(id);
-  return row ? rowToRoadmapItem(row) : null;
+  return row ? publicRoadmapItem(row) : null;
 }
 
 /**
@@ -5547,7 +5635,7 @@ function getRoadmapRow(id: string): RoadmapRow | null {
 function upsertResponse(id: string, author: RoadmapAuthor): RoadmapUpsertResponse {
   const row = getRoadmapRow(id)!;
   return {
-    item: rowToRoadmapItem(row),
+    item: publicRoadmapItem(row),
     held_by_you: author.instance_token !== undefined && row.locked_by_token === author.instance_token,
   };
 }
@@ -5740,7 +5828,7 @@ function getRoadmapContextDocumentSyncRow(documentId: string): RoadmapContextDoc
 
 function getRoadmapItemForProject(id: string, projectKey: string): RoadmapItem | null {
   const row = getRoadmapRow(id);
-  return row?.project_key === projectKey ? rowToRoadmapItem(row) : null;
+  return row?.project_key === projectKey ? publicRoadmapItem(row) : null;
 }
 
 /**
@@ -6211,7 +6299,7 @@ function handleRoadmapList(
   // subquery, so it falls back to the same stable order as the no-query case.
   sql += matchExpr && !idPrefix ? " ORDER BY bm25(roadmap_fts)" : " ORDER BY t.created_at, t.id";
 
-  const items = (db.query(sql).all(...params) as RoadmapRow[]).map(rowToRoadmapItem);
+  const items = (db.query(sql).all(...params) as RoadmapRow[]).map(publicRoadmapItem);
 
   const response: RoadmapListResponse = { items };
   if (body.with_facets) {
@@ -6557,6 +6645,10 @@ function handleRoadmapUpsert(
       inactive: nextInactive,
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
+    if (isNamedRoadmapLot(existing.lot_id) && next.queue !== null && next.queue !== existing.queue) {
+      return { error: namedLotRankRefusal(body.id), status: 400 };
+    }
+    const nextLotId = lotForRank(existing.lot_id, next.queue);
     if (refusesTriageContradiction(next.triage, next.priority)) {
       return {
         error: "triage 'wontfix' contradicts priority -- set priority to 'wont' or pick another triage",
@@ -6609,7 +6701,7 @@ function handleRoadmapUpsert(
     const runUpdate = () => db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
-         value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, queue = ?,
+         value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, queue = ?, lot_id = ?,
          directive = ?, target_peer_ids = ?,
          locked = ?, locked_by = ?, locked_group = ?, locked_by_token = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
@@ -6637,6 +6729,7 @@ function handleRoadmapUpsert(
         JSON.stringify(next.tags),
         JSON.stringify(next.depends_on),
         next.queue,
+        nextLotId,
         next.directive,
         JSON.stringify(next.target_peer_ids),
         resolvedLock.locked ? 1 : 0,
@@ -6794,9 +6887,9 @@ function handleRoadmapUpsert(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, triage, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_group,
+        created_at, updated_at, deleted_at, queue, lot_id, directive, target_peer_ids, locked, locked_by, locked_group,
         locked_by_token, locked_at, operator_id, inactive, lock_parked_at, lock_parked_by, content_updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?, ?,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?, ?, ?,
              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL, ?)`,
     [
       id,
@@ -6816,6 +6909,7 @@ function handleRoadmapUpsert(
       by,
       by,
       queueForStatus(createStatus, body.queue ?? null),
+      lotForRank(null, queueForStatus(createStatus, body.queue ?? null)),
       createDirective,
       JSON.stringify(createTargets),
       createLocked ? 1 : 0,
@@ -7256,6 +7350,7 @@ function handleRoadmapReorder(
     if (item.status === "done" || item.status === "archived") {
       return { error: `item '${id}' is ${item.status} and cannot be queued`, status: 400 };
     }
+    if (isNamedRoadmapLot(item.lot_id)) return { error: namedLotRankRefusal(id), status: 400 };
     // 403, not the 400 used for done/archived above: this is a 'clear the flag
     // first' permission gate, not a terminal-state validation.
     // Whole-batch refusal, not a partial skip -- the response has no field to
@@ -7277,8 +7372,8 @@ function handleRoadmapReorder(
   }
 
   // D2 (card f12e34f1 lot 1): the transaction below unqueues the WHOLE
-  // project before restamping `ids`, so an incomplete `ids` desenfiles the
-  // difference without a trace. `ids` must cover every row this project
+  // default lot before restamping `ids`, so an incomplete `ids` desenfiles the
+  // difference without a trace. `ids` must cover every row that lot
   // currently has queued -- except when it is empty: the Deck's own
   // Clear-queue gesture sends ids: [] on purpose (RoadmapReorderRequest.ids:
   // "Empty clears the queue"), and that shape is indistinguishable from a
@@ -7286,9 +7381,9 @@ function handleRoadmapReorder(
   // partial list is refused below.
   const currentlyQueued = db
     .query(
-      "SELECT id, locked, locked_group FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
+      "SELECT id, locked, locked_group FROM roadmap_items WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
     )
-    .all(projectKey) as { id: string; locked: number; locked_group: string | null }[];
+    .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as { id: string; locked: number; locked_group: string | null }[];
   if (ids.length > 0) {
     const provided = new Set(ids);
     const missing = currentlyQueued.map((r) => r.id).filter((qid) => !provided.has(qid));
@@ -7383,8 +7478,8 @@ function handleRoadmapReorder(
     // Unqueue everything first: the per-id UPDATE below re-stamps the kept ones.
     db.run(
       `UPDATE roadmap_items SET queue = NULL, updated_by = ?, updated_at = datetime('now')
-       WHERE project_key = ? AND queue IS NOT NULL`,
-      [by, projectKey]
+       WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL`,
+      [by, projectKey, DEFAULT_ROADMAP_LOT_ID]
     );
     // Every id in wave i shares queue = i+1 (a tie): the lane column
     // becomes the wave, depends_on stays a VALIDATION concern, not a
@@ -7392,9 +7487,9 @@ function handleRoadmapReorder(
     waves.forEach((wave, i) => {
       for (const id of wave) {
         db.run(
-          `UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now')
+          `UPDATE roadmap_items SET queue = ?, lot_id = ?, updated_by = ?, updated_at = datetime('now')
            WHERE id = ?`,
-          [i + 1, by, id]
+          [i + 1, DEFAULT_ROADMAP_LOT_ID, by, id]
         );
       }
     });
@@ -7410,10 +7505,135 @@ function handleRoadmapReorder(
 
   const rows = db
     .query(
-      "SELECT * FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL ORDER BY queue, id"
+      "SELECT * FROM roadmap_items WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL ORDER BY queue, id"
     )
-    .all(projectKey) as RoadmapRow[];
+    .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as RoadmapRow[];
   return { items: rows.map(rowToRoadmapItem) };
+}
+
+/** No route writes a rank into a named lot yet: the queue every client reads is the default lot's. */
+function namedLotRankRefusal(id: string): string {
+  return `item '${id}' belongs to a named lot -- a rank cannot be written there`;
+}
+
+const ROADMAP_LOT_NAME_MAX = 120;
+
+function listRoadmapLots(projectKey: string): RoadmapLot[] {
+  return db
+    .query("SELECT * FROM roadmap_lots WHERE project_key = ? ORDER BY created_at, id")
+    .all(projectKey) as RoadmapLot[];
+}
+
+function resolveLotWrite(
+  body: { by?: unknown; instance_token?: unknown; project_key?: unknown },
+  route: string
+): { by: string; groupId: string | null; projectKey: string } | { error: string; status: number } {
+  const author = resolveRoadmapAuthor(body, route);
+  if ("error" in author) return author;
+  // Lots do not replicate yet: one written here would exist on this broker only.
+  if (BROKER_MODE === "replica") {
+    return { error: `${route} is refused on a replica broker`, status: 403 };
+  }
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const check = validateProjectKey(projectKey);
+  if (!check.ok) return { error: `project_key is invalid (${check.reason})`, status: 400 };
+  const caseRefusal = projectKeyCaseRefusal(projectKey);
+  if (caseRefusal) return { error: caseRefusal, status: 400 };
+  return { by: author.by, groupId: author.group_id ?? null, projectKey };
+}
+
+function handleRoadmapLotCreate(
+  body: RoadmapLotCreateRequest
+): RoadmapLotCreateResponse | { error: string; status: number } {
+  const write = resolveLotWrite(body, "/roadmap/lot/create");
+  if ("error" in write) return write;
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name || name.length > ROADMAP_LOT_NAME_MAX) {
+    return { error: `name must be 1 to ${ROADMAP_LOT_NAME_MAX} characters`, status: 400 };
+  }
+  // The colour is picked from every open lot, read in the transaction that
+  // inserts: a list from the caller or a stale one gives two lots one colour.
+  const create = db.transaction((): RoadmapLot => {
+    const open = db
+      .query("SELECT color FROM roadmap_lots WHERE project_key = ? AND closed_at IS NULL")
+      .all(write.projectKey) as { color: number | null }[];
+    const lot: RoadmapLot = {
+      id: randomUUID(),
+      project_key: write.projectKey,
+      name,
+      created_by: write.by,
+      created_at: new Date().toISOString(),
+      closed_at: null,
+      color: allocateLotColor(open),
+    };
+    db.run(
+      "INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+      [lot.project_key, lot.id, lot.name, lot.created_by, lot.created_at, lot.color]
+    );
+    return lot;
+  });
+  return { lot: create() };
+}
+
+function handleRoadmapLotList(
+  body: RoadmapLotListRequest
+): RoadmapLotListResponse | { error: string; status: number } {
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  return { lots: listRoadmapLots(projectKey) };
+}
+
+function handleRoadmapLotMove(
+  body: RoadmapLotMoveRequest
+): RoadmapLotMoveResponse | { error: string; status: number } {
+  const write = resolveLotWrite(body, "/roadmap/lot/move");
+  if ("error" in write) return write;
+  const ids = cleanList(body.ids);
+  if (ids === null || ids.length === 0) return { error: "ids must be a non-empty array of item ids", status: 400 };
+  if (ids.length > ROADMAP_REORDER_MAX) {
+    return { error: `ids exceeds the ${ROADMAP_REORDER_MAX}-item cap`, status: 400 };
+  }
+  const { from, to } = body;
+  for (const [field, value] of [["from", from], ["to", to]] as const) {
+    if (value !== null && (typeof value !== "string" || !value)) {
+      return { error: `${field} must be a lot id or null`, status: 400 };
+    }
+  }
+  const move = db.transaction((): RoadmapLotMoveResponse | { error: string; status: number } => {
+    if (to !== null && to !== DEFAULT_ROADMAP_LOT_ID) {
+      const lot = db
+        .query("SELECT closed_at FROM roadmap_lots WHERE project_key = ? AND id = ?")
+        .get(write.projectKey, to) as { closed_at: string | null } | null;
+      if (!lot) return { error: `unknown lot '${to}' in this project`, status: 404 };
+      if (lot.closed_at !== null) return { error: `lot '${to}' is closed`, status: 409 };
+    }
+    const rows: RoadmapRow[] = [];
+    for (const id of ids) {
+      const row = getRoadmapRow(id);
+      if (!row || row.project_key !== write.projectKey) {
+        return { error: `unknown roadmap item '${id}' in this project`, status: 404 };
+      }
+      // A move drops the card's rank, so it meets the reorder's guard on a card another group holds.
+      if (write.by !== "deck" && refusesForeignGroupReorder(row.locked === 1, row.locked_group, write.groupId)) {
+        return { error: `item '${id}' is locked by group '${row.locked_group}'`, status: 409 };
+      }
+      rows.push(row);
+    }
+    const moved = moveLotMembers(rows, { ids, from, to });
+    if (!moved.ok) {
+      if (moved.code === "same_lot") return { error: "from and to name the same lot", status: 400 };
+      return { error: `item '${moved.card_id}' is not in the source lot`, status: 409 };
+    }
+    for (const card of moved.cards) {
+      db.run(
+        "UPDATE roadmap_items SET lot_id = ?, queue = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?",
+        [card.lot_id, card.queue, write.by, card.id]
+      );
+    }
+    return { items: ids.map((id) => getRoadmapItem(id)!) };
+  });
+  return move();
 }
 
 /** Full export of a project's roadmap (archived included) for backup/migration. */
@@ -7428,6 +7648,7 @@ function handleRoadmapExport(projectKey: string): {
   return {
     project_key: projectKey,
     exported_at: new Date().toISOString(),
+    // A backup carries the stored rank, a named lot's included.
     items: rows.map(rowToRoadmapItem),
   };
 }
@@ -7664,6 +7885,20 @@ function handleRoadmapImport(body: {
         skipped.push(id);
         continue;
       }
+      // Membership is never read from the file. A rank belongs to its lot, so
+      // the file's is ignored when the file or the stored row names a lot: it
+      // would otherwise join the default queue, or overwrite a named one.
+      // The file is untrusted: a lot_id of any other shape may stand for a named lot.
+      const fileNamesLot = it.lot_id !== undefined && it.lot_id !== null && it.lot_id !== DEFAULT_ROADMAP_LOT_ID;
+      const namesLot = fileNamesLot || isNamedRoadmapLot(existingRow?.lot_id);
+      const importedQueue = queueForStatus(
+        nextStatusVal,
+        !namesLot && BROKER_MODE !== "replica" && it.queue !== undefined
+          ? typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
+            ? it.queue
+            : null
+          : (existing?.queue ?? null)
+      );
       // A key present in the file wins, including an explicit null (a genuine
       // clear in a self-export); a key truly absent falls back to the existing
       // row; only a brand-new row falls back to the table default.
@@ -7719,14 +7954,8 @@ function handleRoadmapImport(body: {
               ? it.deleted_at
               : null
             : (existing?.deleted_at ?? null),
-        queue: queueForStatus(
-          nextStatusVal,
-          BROKER_MODE !== "replica" && it.queue !== undefined
-            ? typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
-              ? it.queue
-              : null
-            : (existing?.queue ?? null)
-        ),
+        queue: importedQueue,
+        lot_id: lotForRank(existingRow?.lot_id, importedQueue),
         directive: importDirective,
         target_peer_ids: JSON.stringify(
           importDirective
@@ -8294,7 +8523,7 @@ async function handleFederationSend(
  * makes an omission a compile error and an addition a conscious line.
  */
 function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
-  const item = rowToRoadmapItem(row);
+  const item = publicRoadmapItem(row);
   return {
     id: item.id,
     project_key: item.project_key,
@@ -8317,6 +8546,7 @@ function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
     content_updated_at: item.content_updated_at,
     deleted_at: item.deleted_at,
     queue: item.queue,
+    lot_id: item.lot_id,
     directive: item.directive,
     target_peer_ids: item.target_peer_ids,
     locked: item.locked,
@@ -8356,10 +8586,9 @@ function handleRoadmapSyncPull(
     limit = Math.min(asked, SYNC_PULL_LIMIT_MAX);
   }
   const queue_revs: Record<string, number> = {};
-  for (const state of db.query("SELECT project_key, rev FROM roadmap_queue_state").all() as {
-    project_key: string;
-    rev: number;
-  }[]) {
+  for (const state of db
+    .query("SELECT project_key, rev FROM roadmap_queue_state WHERE lot_id = ?")
+    .all(DEFAULT_ROADMAP_LOT_ID) as { project_key: string; rev: number }[]) {
     queue_revs[state.project_key] = state.rev;
   }
   const rows = db
@@ -8867,15 +9096,20 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
       };
     }
     // An omitted `queue` key leaves the upstream rank alone (older replicas never
-    // send it), except on a terminal status, which always clears it. Lock columns
-    // (their own protocol) and `operator_id` (a local signature proof) stay out
-    // of this SET on purpose.
+    // send it), except on a terminal status, which always clears it. A rank sent
+    // for a card this broker holds in a named lot is dropped and the content still
+    // lands. Lock columns (their own protocol) and `operator_id` (a local
+    // signature proof) stay out of this SET on purpose.
+    const rankDropped = isNamedRoadmapLot(existing.lot_id) && typeof item.queue === "number";
+    if (rankDropped) log.warn(`/roadmap/sync/push: ${namedLotRankRefusal(item.id)}, rank ignored`);
+    const writesRank = (item.queue !== undefined && !rankDropped) || isTerminalStatus(item.status);
+    const pushedRank = writesRank ? queueForStatus(item.status, item.queue ?? null) : existing.queue;
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, deleted_at = ?,
          directive = ?, target_peer_ids = ?, inactive = ?,
-         queue = CASE WHEN ? = 1 THEN ? ELSE queue END,
+         queue = CASE WHEN ? = 1 THEN ? ELSE queue END, lot_id = ?,
          content_updated_at = ?,
          updated_by = ?, updated_at = ?
        WHERE id = ?`,
@@ -8884,8 +9118,9 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         item.value, item.effort, item.status, item.triage, JSON.stringify(item.tags),
         JSON.stringify(item.depends_on), item.deleted_at, item.directive,
         JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
-        item.queue !== undefined || isTerminalStatus(item.status) ? 1 : 0,
-        queueForStatus(item.status, item.queue ?? null),
+        writesRank ? 1 : 0,
+        pushedRank,
+        lotForRank(existing.lot_id, pushedRank),
         adoptedContentDate(
           item.content_updated_at ?? null,
           contentEquals(pickSyncContent(rowToRoadmapItem(existing)), pickSyncContent(item)),
@@ -8904,8 +9139,8 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
           effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
-          deleted_at, queue, directive, target_peer_ids, locked, inactive, content_updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          deleted_at, queue, lot_id, directive, target_peer_ids, locked, inactive, content_updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       [
         item.id, item.project_key, item.kind, item.title, item.description, item.rationale,
         item.context, item.priority, item.value, item.effort, item.status, item.triage,
@@ -8915,6 +9150,7 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         // and an explicit null are the same NULL here -- unlike the SET
         // above, presence does not need to be distinguished on the INSERT.
         queueForStatus(item.status, item.queue ?? null),
+        lotForRank(null, queueForStatus(item.status, item.queue ?? null)),
         item.directive, JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
         item.content_updated_at ?? null,
       ]
@@ -8960,10 +9196,11 @@ function queueDeltaResponse(receipt: QueueDeltaReceipt, replayed: boolean): Road
   };
 }
 
+/** Revision of the default lot, the one queue the delta protocol carries. */
 function queueRev(projectKey: string): number {
-  const row = db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ?").get(projectKey) as
-    | { rev: number }
-    | null;
+  const row = db
+    .query("SELECT rev FROM roadmap_queue_state WHERE project_key = ? AND lot_id = ?")
+    .get(projectKey, DEFAULT_ROADMAP_LOT_ID) as { rev: number } | null;
   return row?.rev ?? 0;
 }
 
@@ -9035,6 +9272,9 @@ function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResu
       if (!row || row.project_key !== projectKey) {
         return { error: `unknown roadmap item '${id}' in this project`, status: 404, item_id: id };
       }
+      if (isNamedRoadmapLot(row.lot_id)) {
+        return { error: namedLotRankRefusal(id), status: 400, item_id: id };
+      }
       cards.set(id, row);
     }
     for (const op of ops) {
@@ -9058,9 +9298,9 @@ function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResu
     // that kept a rank is not in it, so it is never renumbered or rewritten here.
     const queued = db
       .query(
-        "SELECT id, queue, kind FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
+        "SELECT id, queue, kind FROM roadmap_items WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')"
       )
-      .all(projectKey) as { id: string; queue: number; kind: string }[];
+      .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as { id: string; queue: number; kind: string }[];
     const applied = applyQueueDelta(queueToWaves(queued), ops);
     if (!applied.ok) {
       return { error: applied.error, status: 400, op_index: applied.op_index, ...(applied.item_id ? { item_id: applied.item_id } : {}) };
@@ -9097,11 +9337,10 @@ function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResu
 
     const by = relayedAuthor("deck", replicaId);
     for (const id of changed) {
-      db.run("UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?", [
-        ranks.get(id) ?? null,
-        by,
-        id,
-      ]);
+      db.run(
+        "UPDATE roadmap_items SET queue = ?, lot_id = COALESCE(lot_id, ?), updated_by = ?, updated_at = datetime('now') WHERE id = ?",
+        [ranks.get(id) ?? null, DEFAULT_ROADMAP_LOT_ID, by, id]
+      );
     }
     const after = queueRev(projectKey);
     const stored: QueueDeltaReceipt = {
@@ -9331,7 +9570,7 @@ function handleRoadmapSyncConflicts(
     if (!remote) continue;
     items.push({
       local: rowToSyncRow(row),
-      remote,
+      remote: maskNamedLotRank(remote),
       base: readSyncBase(row.id, row.sync_base),
     });
   }
@@ -9410,6 +9649,7 @@ function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null 
     content_updated_at: readContentDate(record.content_updated_at),
     deleted_at: content.deleted_at,
     queue: storedInteger(record.queue),
+    lot_id: storedNullableText(record.lot_id),
     directive: content.directive,
     target_peer_ids: content.target_peer_ids,
     locked: record.locked === true,
@@ -9799,6 +10039,8 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   // own: it rides the statements that already write `queue`, so mirroring it
   // costs no extra row version.
   const contestedJson = JSON.stringify(foreignContested(remote.lock_contested_by));
+  // Absent from an upstream that predates lots, which then says nothing about them.
+  const remoteLot = remote.lot_id === undefined ? local?.lot_id ?? null : storedNullableText(remote.lot_id);
   if (!local) {
     // Only this INSERT stores the upstream's project_key; skipping the card
     // lets its page neighbours apply and the cursor advance past it.
@@ -9813,21 +10055,22 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     const lockedRemotely = remote.locked && remote.locked_by !== null;
     const insertFrozen = queueFrozenProjects.has(remote.project_key);
     if (insertFrozen) withholdPulledRank(remote.project_key, remote.id, remote.queue);
+    const insertRank = insertFrozen ? null : remote.queue;
     db.run(
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
           effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
-          deleted_at, queue, directive, target_peer_ids, inactive,
+          deleted_at, queue, lot_id, directive, target_peer_ids, inactive,
           locked, locked_by, locked_group, locked_at, lock_scope, lock_contested_by,
           sync_base_rev, sync_base, sync_dirty, sync_state, content_updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                ?, ?, ?, ?, ?, ?, ?, ?, 0, 'clean', ?)`,
       [
         remote.id, remote.project_key, content.kind, content.title, content.description,
         content.rationale, content.context, content.priority, content.value, content.effort,
         content.status, content.triage, JSON.stringify(content.tags), JSON.stringify(content.depends_on),
         createdBy, updatedBy, remote.created_at, remote.updated_at,
-        content.deleted_at, insertFrozen ? null : remote.queue, content.directive,
+        content.deleted_at, insertRank, lotForRank(remoteLot, insertRank), content.directive,
         JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
         lockedRemotely ? 1 : 0, lockedRemotely ? remote.locked_by : null,
         lockedRemotely ? remote.locked_group : null, lockedRemotely ? remote.locked_at : null,
@@ -9849,7 +10092,11 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     echoedQueue !== undefined && echoedQueue === remote.queue && local.sync_base_rev === remote.content_rev;
   const queueFrozen = queueFrozenProjects.has(local.project_key);
   if (queueFrozen) withholdPulledRank(local.project_key, remote.id, remote.queue);
-  const pulledQueue = queuePending || queueFrozen ? local.queue : remote.queue;
+  // A named lot's ranks never travel by this replica's queue mutations, so the
+  // upstream's wins there even while the default queue is frozen.
+  const pulledQueue =
+    (queuePending || queueFrozen) && !isNamedRoadmapLot(remoteLot) ? local.queue : remote.queue;
+  const pulledLot = lotForRank(remoteLot, pulledQueue);
   // Hoisted: the clean branch below needs it too. heldLocally is a SCOPE
   // predicate (locked/lock_scope on this row), never a liveness check: a
   // dead holder's lock is released only by this replica's OWN stale-lock
@@ -9932,27 +10179,29 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   if (heldLocally) {
     // A card held HERE still shows who else wants it upstream: the local holder
     // is the one who most needs to know the lock is disputed across machines.
-    db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
+    db.run("UPDATE roadmap_items SET queue = ?, lot_id = ?, lock_contested_by = ? WHERE id = ?", [
       pulledQueue,
+      pulledLot,
       contestedJson,
       remote.id,
     ]);
   } else if (remote.locked && remote.locked_by !== null) {
     db.run(
-      `UPDATE roadmap_items SET queue = ?, locked = 1, locked_by = ?, locked_group = ?,
+      `UPDATE roadmap_items SET queue = ?, lot_id = ?, locked = 1, locked_by = ?, locked_group = ?,
          locked_by_token = NULL, locked_at = ?, lock_scope = 'remote',
          lock_contested_by = ? WHERE id = ?`,
-      [pulledQueue, remote.locked_by, remote.locked_group, remote.locked_at, contestedJson, remote.id]
+      [pulledQueue, pulledLot, remote.locked_by, remote.locked_group, remote.locked_at, contestedJson, remote.id]
     );
   } else if (localScope === "remote") {
     db.run(
-      `UPDATE roadmap_items SET queue = ?, ${CLEAR_LOCK_SET}, lock_scope = NULL,
+      `UPDATE roadmap_items SET queue = ?, lot_id = ?, ${CLEAR_LOCK_SET}, lock_scope = NULL,
          lock_contested_by = ? WHERE id = ?`,
-      [pulledQueue, contestedJson, remote.id]
+      [pulledQueue, pulledLot, contestedJson, remote.id]
     );
   } else {
-    db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
+    db.run("UPDATE roadmap_items SET queue = ?, lot_id = ?, lock_contested_by = ? WHERE id = ?", [
       pulledQueue,
+      pulledLot,
       contestedJson,
       remote.id,
     ]);
@@ -10351,9 +10600,9 @@ function directiveWaveRefusal(projectKey: string, id: string, kind: string, rank
   if (rank === null) return null;
   const mates = db
     .query(
-      "SELECT id, kind FROM roadmap_items WHERE project_key = ? AND queue = ? AND id != ? AND status NOT IN ('done', 'archived')"
+      "SELECT id, kind FROM roadmap_items WHERE project_key = ? AND lot_id = ? AND queue = ? AND id != ? AND status NOT IN ('done', 'archived')"
     )
-    .all(projectKey, rank, id) as { id: string; kind: string }[];
+    .all(projectKey, DEFAULT_ROADMAP_LOT_ID, rank, id) as { id: string; kind: string }[];
   if (mates.length === 0) return null;
   const directive = kind === "directive" ? id : mates.find((mate) => mate.kind === "directive")?.id;
   return directive === undefined ? null : `directive item '${directive}' must be in a singleton wave`;
@@ -10380,11 +10629,13 @@ function terminalForQueue(row: Pick<QueueStateRow, "id" | "status" | "sync_state
   return remote !== null && isTerminalStatus(remote.status);
 }
 
-/** The queued rows of a project as they stand, to be read before a write that moves one rank. */
+/** The queued rows of a project's default lot as they stand, to be read before a write that moves one rank. */
 function queueRowsOf(projectKey: string): QueueStateRow[] {
   return db
-    .query("SELECT id, queue, status, sync_state, sync_remote FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL")
-    .all(projectKey) as QueueStateRow[];
+    .query(
+      "SELECT id, queue, status, sync_state, sync_remote FROM roadmap_items WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL"
+    )
+    .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as QueueStateRow[];
 }
 
 /** Journals the rank one card was just written with, against the queue `queueBefore` as it stood before the write. */
@@ -10424,7 +10675,7 @@ function restoreRanks(ranks: WithheldRanks, skip: ReadonlySet<string>): number {
     if (skip.has(id)) continue;
     const row = getRoadmapRow(id);
     if (!row || row.queue === rank) continue;
-    db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [rank, id]);
+    db.run("UPDATE roadmap_items SET queue = ?, lot_id = ? WHERE id = ?", [rank, lotForRank(row.lot_id, rank), id]);
     changed += 1;
   }
   return changed;
@@ -10449,7 +10700,9 @@ function applyQueueDeltaAck(entry: QueueOutboxRow, response: RoadmapQueueDeltaRe
       if (!row || row.project_key !== entry.project_key) continue;
       moved.add(item.id);
       upstreamAfter[item.id] = rank;
-      if (row.queue !== rank) db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [rank, item.id]);
+      if (row.queue !== rank) {
+        db.run("UPDATE roadmap_items SET queue = ?, lot_id = ? WHERE id = ?", [rank, lotForRank(row.lot_id, rank), item.id]);
+      }
     }
     restoreRanks(parseWithheld(entry.withheld), moved);
     db.run("DELETE FROM roadmap_queue_outbox WHERE seq = ?", [entry.seq]);
@@ -15505,6 +15758,27 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/reorder": {
           const result = handleRoadmapReorder(body as RoadmapReorderRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/create": {
+          const result = handleRoadmapLotCreate(body as RoadmapLotCreateRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/list": {
+          const result = handleRoadmapLotList(body as RoadmapLotListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/move": {
+          const result = handleRoadmapLotMove(body as RoadmapLotMoveRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

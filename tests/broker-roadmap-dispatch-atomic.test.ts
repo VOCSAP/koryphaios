@@ -624,3 +624,15 @@ test("the result survives a broker restart on the same database, and another dat
     await stopBroker(first);
   }
 }, 40_000);
+
+test("a ranked card of a named lot is not part of the head wave", async () => {
+  const s = await scenario();
+  const items = await queuedWave(s);
+  const named = await card(s, { status: "planned" });
+  writeDb(`UPDATE roadmap_items SET lot_id = 'lot-named', queue = 1 WHERE id = '${named.id}'`);
+
+  const res = await dispatch(s, "execute", intentFor(s, items));
+
+  expect(res.body.delivery, JSON.stringify(res.body)).toBe("sent");
+  expect(readDb("SELECT queue FROM roadmap_items WHERE id = ?", named.id)).toEqual([{ queue: 1 }]);
+});

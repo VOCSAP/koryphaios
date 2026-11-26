@@ -376,6 +376,7 @@ poste client. Les deux ne protegent pas de la meme chose: la sauvegarde vit
 sur la LXC, a cote de ce qu'elle protege; l'export vit ailleurs et survit a la
 perte de la machine. Et `roadmap-import` conserve les ids, donc c'est une
 vraie restauration, pas une archive.
+Avant le lot L8, cette restauration par `roadmap-import` ne rend ni les lots (table `roadmap_lots` non exportee) ni le rang d'une carte d'un lot nomme.
 
 ```bash
 bun cli.ts roadmap-export <project_key> > /chemin/roadmap-<date>-<projet>.json

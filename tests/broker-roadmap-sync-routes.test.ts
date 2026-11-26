@@ -2630,7 +2630,7 @@ test("queue-delta: a queue of 520 cards is rearranged in one transaction, with n
     db.transaction(() => {
       ids.forEach((id, i) => {
         db.run(
-          "INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at, queue) VALUES (?, ?, 'feature', 'big', 'x', 'x', ?)",
+          "INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at, queue, lot_id) VALUES (?, ?, 'feature', 'big', 'x', 'x', ?, 'default')",
           [id, project, i + 1]
         );
       });
@@ -2836,6 +2836,8 @@ test("queue revision: every writer of the rank moves the project's revision and 
         }),
     ],
     ["a direct UPDATE of the column", (_p, id) => sql((db) => db.run("UPDATE roadmap_items SET queue = 5 WHERE id = ?", [id]))()],
+    // The revision a pull serves is the default lot's: leaving it is a change of that queue.
+    ["a direct move to another lot", (_p, id) => sql((db) => db.run("UPDATE roadmap_items SET lot_id = 'qd-other-lot' WHERE id = ?", [id]))()],
     ["a direct UPDATE to NULL", (_p, id) => sql((db) => db.run("UPDATE roadmap_items SET queue = NULL WHERE id = ?", [id]))()],
     [
       "an INSERT OR REPLACE dropping a queued card's rank",
@@ -2929,4 +2931,119 @@ test("queue-delta: the route is gated like the other replication routes, and mal
     expect([name, res.status]).toEqual([name, 400]);
   }
   expect(receiptCount(shared, project)).toBe(0);
+}, 30_000);
+
+function lotSql(b: TestBroker, statement: string, ...params: (string | number | null)[]): void {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run(statement, params);
+  } finally {
+    db.close();
+  }
+}
+
+function placeIn(b: TestBroker, id: string) {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return db.query("SELECT title, lot_id, queue FROM roadmap_items WHERE id = ?").get(id);
+  } finally {
+    db.close();
+  }
+}
+
+test("queue-delta and pull see the default lot alone: a named lot's card is refused, kept by a clear, and its revision is not served", async () => {
+  const b = shared;
+  const project = queueProject("named");
+  const [plain, first, last, lotless] = ["qd-named-default", "qd-named-first", "qd-named-last", "qd-named-lotless"];
+  await seedQueue(b, project, [[plain, 1], [first, null], [last, null], [lotless, null]]);
+  // One lot id sorts before 'default' and one after, each at its own revision:
+  // an unfiltered revision read picks one of them.
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'aa-lot', queue = 1 WHERE id = ?", first);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'zz-lot', queue = 1 WHERE id = ?", last);
+  for (const rank of [2, 3, 4]) {
+    lotSql(b, "UPDATE roadmap_items SET queue = ? WHERE id = ?", rank, first);
+    lotSql(b, "UPDATE roadmap_items SET queue = ? WHERE id = ?", rank, last);
+  }
+  lotSql(b, "UPDATE roadmap_items SET queue = 5 WHERE id = ?", last);
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  const defaultRev = (
+    db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ? AND lot_id = 'default'").get(project) as {
+      rev: number;
+    }
+  ).rev;
+  db.close();
+  expect(await queueRevOf(b, project)).toBe(defaultRev);
+
+  const named = await sendDelta(b, project, defaultRev, [{ op: "place", ids: [first], at: "end" }]);
+  expect([named.status, named.body.item_id]).toEqual([400, first]);
+  const cleared = await sendDelta(b, project, defaultRev, [{ op: "clear" }]);
+
+  expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
+  expect([plain, first, last].map((id) => placeIn(b, id))).toMatchObject([
+    { lot_id: "default", queue: null },
+    { lot_id: "aa-lot", queue: 4 },
+    { lot_id: "zz-lot", queue: 5 },
+  ]);
+  const placed = await sendDelta(b, project, await queueRevOf(b, project), [{ op: "place", ids: [lotless], at: "end" }]);
+  expect(placed.status, JSON.stringify(placed.body)).toBe(200);
+  expect(placeIn(b, lotless)).toMatchObject({ lot_id: "default", queue: 1 });
+}, 30_000);
+
+test("a push carrying a rank for a card of a named lot lands the content and not the rank", async () => {
+  const b = shared;
+  const project = queueProject("named-push");
+  const id = "qd-named-push";
+  await seedQueue(b, project, [[id, null]]);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'lot-p' WHERE id = ?", id);
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  const { content_rev } = db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number };
+  db.close();
+
+  const pushed = await post(`${b.url}/roadmap/sync/push`, {
+    replica_id: R1,
+    item: pushItem({ id, project_key: project, title: "edited on the replica", queue: 3 }),
+    expected_content_rev: content_rev,
+  });
+
+  expect(pushed.status, JSON.stringify(pushed.body)).toBe(200);
+  expect(placeIn(b, id)).toEqual({ title: "edited on the replica", lot_id: "lot-p", queue: null });
+}, 30_000);
+
+test("pull, push replies and a replayed delta serve a named lot's card without its rank", async () => {
+  const b = shared;
+  const project = queueProject("masked");
+  const [id, mate] = ["qd-masked-a", "qd-masked-b"];
+  await seedQueue(b, project, [[id, 1], [mate, 2]]);
+  const mutation = crypto.randomUUID();
+  const expected = await queueRevOf(b, project);
+  const ops = [{ op: "place", ids: [mate], before: id }];
+  expect((await sendDelta(b, project, expected, ops, { mutation_id: mutation })).status).toBe(200);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'lot-m', queue = 7 WHERE id = ?", id);
+
+  const pulled = (await pull(b, 0, 500)).body;
+  let cursor = pulled.next_rev;
+  let seen = pulled.items.find((item) => item.id === id);
+  while (seen === undefined) {
+    const page = (await pull(b, cursor, 500)).body;
+    expect(page.items.length, "the card is on some page").toBeGreaterThan(0);
+    cursor = page.next_rev;
+    seen = page.items.find((item) => item.id === id);
+  }
+  expect([seen.lot_id, seen.queue]).toEqual(["lot-m", null]);
+
+  const push = (expected_content_rev: number | null, title: string) =>
+    post<{ item: { queue: number | null } }>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, project_key: project, title, queue: undefined }),
+      expected_content_rev,
+    });
+  const refused = await push(null, "stale base");
+  const accepted = await push(seen.content_rev, "accepted");
+  expect([refused.status, refused.body.item.queue]).toEqual([409, null]);
+  expect([accepted.status, accepted.body.item.queue]).toEqual([200, null]);
+
+  const replayed = await sendDelta(b, project, expected, ops, { mutation_id: mutation });
+  expect(replayed.body.replayed).toBe(true);
+  expect(replayed.body.items?.find((item) => item.id === id)?.queue).toBeNull();
+  expect(placeIn(b, id)).toMatchObject({ lot_id: "lot-m", queue: 7 });
 }, 30_000);

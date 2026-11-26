@@ -3,6 +3,9 @@
 import { test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
+import type { RoadmapLot } from "../shared/roadmap-lot.ts";
+import { queuedItems } from "../desktop/src/shared/workflow.ts";
+import type { RoadmapItem as DeckRoadmapItem } from "../desktop/src/shared/types.ts";
 
 let broker: TestBroker;
 const KEY = "github.com/test/reorder-repo";
@@ -494,7 +497,7 @@ test("a legacy done card with a rank does not block a reorder of the active set,
   const active = await create("wf legacy active", { queue: 1 });
   const legacy = await create("wf legacy done");
   const db = openBrokerDb(broker.dbPath);
-  db.run("UPDATE roadmap_items SET status = 'done', queue = 7 WHERE id = ?", [legacy.id]);
+  db.run("UPDATE roadmap_items SET status = 'done', queue = 7, lot_id = 'default' WHERE id = ?", [legacy.id]);
   const seeded = db.query("SELECT status, queue FROM roadmap_items WHERE id = ?").get(legacy.id);
   expect(seeded, "non-vacuity: the legacy row is done and ranked").toEqual({ status: "done", queue: 7 });
 
@@ -528,4 +531,220 @@ test("archiving a ranked card drops its rank, so the active set reorders without
 
   const reordered = await reorder({ ids: [kept.id], waves: [[kept.id]] });
   expect(reordered.status, JSON.stringify(reordered.body)).toBe(200);
+});
+
+const lotPost = <T = { error: string }>(path: string, body: Record<string, unknown>) =>
+  post<T>(`${broker.url}${path}`, deckAuthored(body));
+
+async function createLot(project: string, name = "lot"): Promise<RoadmapLot> {
+  const res = await lotPost<{ lot: RoadmapLot }>("/roadmap/lot/create", { project_key: project, name });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return res.body.lot;
+}
+
+const moveLot = (project: string, ids: string[], from: string | null, to: string | null) =>
+  lotPost<{ items: RoadmapItem[]; error?: string }>("/roadmap/lot/move", { project_key: project, ids, from, to });
+
+function sqlOnBroker(statement: string, ...params: (string | number | null)[]): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run(statement, params);
+  } finally {
+    db.close();
+  }
+}
+
+function storedPlace(id: string): [string | null, number | null] {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    const row = db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id) as {
+      lot_id: string | null;
+      queue: number | null;
+    };
+    return [row.lot_id, row.queue];
+  } finally {
+    db.close();
+  }
+}
+
+async function placeOf(project: string, id: string): Promise<[string | null | undefined, number | null | undefined]> {
+  const res = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, { project_key: project });
+  const item = res.body.items.find((i) => i.id === id);
+  return [item?.lot_id, item?.queue];
+}
+
+test("a lot is born open, dated in ISO 8601 UTC, with the lowest colour no open lot holds", async () => {
+  const project = "github.com/test/lot-colour";
+  const born = [await createLot(project, "one"), await createLot(project, "two"), await createLot(project, "three")];
+  expect(born.map((lot) => [lot.name, lot.color, lot.closed_at, lot.created_by])).toEqual([
+    ["one", 0, null, "deck"],
+    ["two", 1, null, "deck"],
+    ["three", 2, null, "deck"],
+  ]);
+  expect(born[0]!.created_at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+
+  sqlOnBroker("UPDATE roadmap_lots SET closed_at = ? WHERE id = ?", "2026-01-01T00:00:00.000Z", born[1]!.id);
+  expect([(await createLot(project)).color, (await createLot(project)).color]).toEqual([1, 3]);
+  expect((await createLot("github.com/test/lot-colour-other")).color).toBe(0);
+
+  const listed = await post<{ lots: RoadmapLot[] }>(`${broker.url}/roadmap/lot/list`, { project_key: project });
+  expect(listed.body.lots).toHaveLength(5);
+  expect(listed.body.lots.map((lot) => lot.id)).toEqual(expect.arrayContaining(born.map((lot) => lot.id)));
+});
+
+test("ranking an existing card outside every lot by upsert puts it in the default lot", async () => {
+  const card = await create("lot queued later");
+  expect(card.lot_id).toBeNull();
+
+  expect((await upsert({ id: card.id, queue: 1 })).status).toBe(200);
+
+  expect(await placeOf(KEY, card.id)).toEqual(["default", 1]);
+});
+
+test("a lot name must hold 1 to 120 characters", async () => {
+  for (const name of ["", "   ", "x".repeat(121)]) {
+    const res = await lotPost("/roadmap/lot/create", { project_key: "github.com/test/lot-name", name });
+    expect([name.length, res.status]).toEqual([name.length, 400]);
+  }
+});
+
+test("a move into an unknown, foreign or closed lot is refused and the card keeps its place", async () => {
+  const card = await create("lot refused destination", { queue: 1 });
+  const closed = await createLot(KEY, "closed");
+  sqlOnBroker("UPDATE roadmap_lots SET closed_at = ? WHERE id = ?", "2026-01-01T00:00:00.000Z", closed.id);
+  const foreign = await createLot("github.com/test/lot-foreign");
+
+  const statuses = [];
+  for (const to of ["no-such-lot", foreign.id, closed.id]) {
+    statuses.push((await moveLot(KEY, [card.id], "default", to)).status);
+  }
+
+  expect(statuses).toEqual([404, 404, 409]);
+  expect(await placeOf(KEY, card.id)).toEqual(["default", 1]);
+});
+
+test("a move names its source: it drops the rank and keeps membership, and a wrong source changes nothing", async () => {
+  const card = await create("lot transfer", { queue: 1 });
+  const lot = await createLot(KEY);
+
+  expect((await moveLot(KEY, [card.id], null, lot.id)).status).toBe(409);
+  expect((await moveLot(KEY, [card.id], "default", "default")).status).toBe(400);
+  expect(await placeOf(KEY, card.id)).toEqual(["default", 1]);
+
+  const moved = await moveLot(KEY, [card.id], "default", lot.id);
+  expect(moved.body.items.map((i) => [i.id, i.lot_id, i.queue])).toEqual([[card.id, lot.id, null]]);
+  expect((await moveLot(KEY, [card.id], "default", null)).status).toBe(409);
+  expect((await moveLot(KEY, [card.id], lot.id, null)).status).toBe(200);
+  expect(await placeOf(KEY, card.id)).toEqual([null, null]);
+});
+
+test("a move holding an unknown card, or one of another project, moves nothing", async () => {
+  const card = await create("lot all or nothing", { queue: 1 });
+  const elsewhere = await create("lot other project", { project_key: "github.com/test/lot-elsewhere", queue: 1 });
+
+  expect((await moveLot(KEY, [card.id, "missing-card"], "default", null)).status).toBe(404);
+  expect((await moveLot(KEY, [card.id, elsewhere.id], "default", null)).status).toBe(404);
+  expect(await placeOf(KEY, card.id)).toEqual(["default", 1]);
+});
+
+test("a card another group holds does not change lot, except by the operator", async () => {
+  const card = await create("lot foreign lock", { queue: 1 });
+  sqlOnBroker("UPDATE roadmap_items SET locked = 1, locked_by = 'holder', locked_group = 'other' WHERE id = ?", card.id);
+
+  const agent = await post(`${broker.url}/roadmap/lot/move`, {
+    project_key: KEY,
+    by: "unregistered-lot-agent",
+    ids: [card.id],
+    from: "default",
+    to: null,
+  });
+
+  expect(agent.status).toBe(409);
+  expect(await placeOf(KEY, card.id)).toEqual(["default", 1]);
+  expect((await moveLot(KEY, [card.id], "default", null)).status).toBe(200);
+});
+
+test("no queue write reaches a named lot, and clearing the default queue leaves its ranks alone", async () => {
+  const lot = await createLot(KEY);
+  const named = await create("lot named member", { queue: 1 });
+  expect((await moveLot(KEY, [named.id], "default", lot.id)).status).toBe(200);
+  expect((await upsert({ id: named.id, queue: 5 })).status).toBe(400);
+  sqlOnBroker("UPDATE roadmap_items SET queue = 1 WHERE id = ?", named.id);
+  const plain = await create("lot default member", { queue: 1 });
+  expect(plain.lot_id).toBe("default");
+
+  const reordered = await reorder({ ids: [plain.id], waves: [[plain.id]] });
+  expect(reordered.status, JSON.stringify(reordered.body)).toBe(200);
+  expect((reordered.body as { items: RoadmapItem[] }).items.map((i) => i.id)).toEqual([plain.id]);
+  expect((await reorder({ ids: [plain.id, named.id], waves: [[plain.id], [named.id]] })).status).toBe(400);
+  expect((await reorder({ ids: [], waves: [] })).status).toBe(200);
+  expect(storedPlace(named.id)).toEqual([lot.id, 1]);
+  expect(await placeOf(KEY, named.id)).toEqual([lot.id, null]);
+  expect(await placeOf(KEY, plain.id), "a dequeued card stays in its lot").toEqual(["default", null]);
+
+  expect((await upsert({ id: named.id, description: "edited" })).status).toBe(200);
+  expect(storedPlace(named.id)).toEqual([lot.id, 1]);
+  expect((await upsert({ id: named.id, status: "done" })).status).toBe(200);
+  expect(storedPlace(named.id)).toEqual([lot.id, null]);
+});
+
+/** A named lot's card holding a rank, a state no route writes: the row a newer broker would leave. */
+async function rankedNamedCard(title: string): Promise<{ card: RoadmapItem; lot: RoadmapLot }> {
+  const lot = await createLot(KEY);
+  const card = await create(title, { context: "a context worth deporting" });
+  expect((await moveLot(KEY, [card.id], null, lot.id)).status).toBe(200);
+  sqlOnBroker("UPDATE roadmap_items SET queue = 1 WHERE id = ?", card.id);
+  return { card, lot };
+}
+
+test("the card list serves a named lot's card without its rank, while the default lot keeps its own", async () => {
+  const { card, lot } = await rankedNamedCard("lot rank hidden from the list");
+  const plain = await create("lot rank shown in the default lot", { queue: 2 });
+
+  expect(await placeOf(KEY, card.id)).toEqual([lot.id, null]);
+  expect(await placeOf(KEY, plain.id)).toEqual(["default", 2]);
+  expect(storedPlace(card.id), "the stored rank survives the read").toEqual([lot.id, 1]);
+});
+
+test("the Deck's queue read over the card list holds the default lot alone", async () => {
+  const { card } = await rankedNamedCard("lot rank hidden from the Deck queue");
+  const first = await create("lot default queue first", { queue: 1 });
+  const second = await create("lot default queue second", { queue: 2 });
+
+  const listed = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, { project_key: KEY });
+  const queued = queuedItems(listed.body.items as unknown as DeckRoadmapItem[]).map((i) => i.id);
+
+  expect(queued).toEqual([first.id, second.id]);
+  expect(listed.body.items.some((i) => i.id === card.id), "non-vacuity: the named card is listed").toBe(true);
+});
+
+test("the export, a backup, carries the stored rank of a named lot's card", async () => {
+  const { card, lot } = await rankedNamedCard("lot rank kept by the export");
+  const res = await fetch(`${broker.url}/roadmap/export?project_key=${encodeURIComponent(KEY)}`);
+  const exported = (await res.json()) as { items: RoadmapItem[] };
+  const saved = exported.items.find((i) => i.id === card.id);
+
+  expect([saved?.lot_id, saved?.queue]).toEqual([lot.id, 1]);
+});
+
+test("an upsert answers a named lot's card without its rank and leaves the stored one", async () => {
+  const { card } = await rankedNamedCard("lot rank hidden from the upsert reply");
+  const res = await upsert({ id: card.id, description: "edited" });
+
+  expect((res.body as { item: RoadmapItem }).item.queue).toBeNull();
+  expect(storedPlace(card.id)[1]).toBe(1);
+});
+
+test("a context append and a context deportation answer a named lot's card without its rank", async () => {
+  const { card } = await rankedNamedCard("lot rank hidden from the context replies");
+  const appended = await lotPost<{ item: RoadmapItem }>("/roadmap/append-context", { id: card.id, text: "a note" });
+  const deported = await lotPost<{ item: RoadmapItem }>("/roadmap/context-document/deport", {
+    id: card.id,
+    project_key: KEY,
+    targets: ["body"],
+  });
+
+  expect([appended.status, deported.status], JSON.stringify([appended.body, deported.body])).toEqual([200, 200]);
+  expect([appended.body.item.queue, deported.body.item.queue]).toEqual([null, null]);
+  expect(storedPlace(card.id)[1]).toBe(1);
 });

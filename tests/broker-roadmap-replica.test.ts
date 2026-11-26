@@ -113,6 +113,8 @@ let pullDropRows = false;
 /** Replaces `queue_revs` in every pull answer, as a broken upstream could; `servedOverrides` counts them. */
 let pullQueueRevsOverride: unknown = undefined;
 let servedOverrides = 0;
+/** Serves every pulled card without `lot_id`, as an upstream that predates lots would. */
+let pullStripLot = false;
 
 beforeAll(async () => {
   // The upstream takes the ROLE explicitly (serve_replicas) on top of the token:
@@ -229,6 +231,14 @@ beforeAll(async () => {
           pullPadRev = null;
           pullBlockedCalls = 0;
         }
+        return new Response(JSON.stringify(payload), {
+          status: response.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (pullStripLot && url.pathname === "/roadmap/sync/pull" && req.method === "POST") {
+        const payload = (await response.json()) as { items: Record<string, unknown>[] };
+        for (const item of payload.items) delete item.lot_id;
         return new Response(JSON.stringify(payload), {
           status: response.status,
           headers: { "content-type": "application/json" },
@@ -3208,7 +3218,7 @@ function upstreamQueueRev(): number {
   const db = openBrokerDb(upstream.dbPath, { readonly: true });
   try {
     return (
-      (db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ?").get(PK) as { rev: number } | null)?.rev ?? 0
+      (db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ? AND lot_id = 'default'").get(PK) as { rev: number } | null)?.rev ?? 0
     );
   } finally {
     db.close();
@@ -4516,7 +4526,7 @@ test("a reorder leaves a terminal card that still holds a rank out of its operat
   const stale = await createOn(replica, { by: "agent-local", title: "done with a leftover rank" });
   await createOn(replica, { id: stale.id, by: "agent-local", status: "done" });
   const db = openBrokerDb(replica.dbPath);
-  db.run("UPDATE roadmap_items SET queue = 3 WHERE id = ?", [stale.id]);
+  db.run("UPDATE roadmap_items SET queue = 3, lot_id = 'default' WHERE id = ?", [stale.id]);
   db.close();
   holdQueueDelivery();
   try {
@@ -4984,3 +4994,226 @@ test("an import on a replica does not carry the rank of the file", async () => {
   expect(res.status).toBe(200);
   expect((await itemOn(replica, id))?.queue).toBeNull();
 }, 30_000);
+
+async function upstreamLot(): Promise<string> {
+  const res = await post<{ lot: { id: string } }>(
+    `${upstream.url}/roadmap/lot/create`,
+    deckAuthored({ project_key: PK, name: "upstream lot" })
+  );
+  expect(res.status).toBe(200);
+  return res.body.lot.id;
+}
+
+async function moveUpstream(ids: string[], to: string): Promise<void> {
+  const res = await post(
+    `${upstream.url}/roadmap/lot/move`,
+    deckAuthored({ project_key: PK, ids, from: "default", to })
+  );
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+}
+
+function sqlOn(broker: TestBroker, statement: string, ...params: (string | number | null)[]): void {
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run(statement, params);
+  } finally {
+    db.close();
+  }
+}
+
+const placeOn = async (broker: TestBroker, id: string): Promise<[string | null | undefined, number | null | undefined]> => {
+  const item = await itemOn(broker, id);
+  return [item?.lot_id, item?.queue];
+};
+
+const waitLot = (id: string, lot: string, label = "the replica adopts the lot") =>
+  waitForItem(label, replica, id, (item) => item.lot_id === lot);
+
+test("a lot change made upstream reaches the replica whatever the lock state of its copy, and on a card it never held", async () => {
+  const lot = await upstreamLot();
+  const [free, heldUpstream, released, heldHere] = (await queueCards("lot-pull", 4)) as [
+    RoadmapItem,
+    RoadmapItem,
+    RoadmapItem,
+    RoadmapItem,
+  ];
+  for (const card of [heldUpstream, released]) {
+    await createOn(upstream, { id: card.id, by: "agent-upstream", status: "in_progress", queue: card === released ? 3 : 2 });
+    await waitForItem("the upstream lock is mirrored", replica, card.id, (item) => item.locked);
+  }
+  await createOn(replica, { id: heldHere.id, by: "agent-local", status: "in_progress" });
+  await waitForItem("the replica's lock reaches the upstream", upstream, heldHere.id, (item) => item.locked);
+  await waitPasses(2);
+
+  await goOffline();
+  await post(`${upstream.url}/roadmap/upsert`, deckAuthored({ id: released.id, status: "planned" }));
+  await moveUpstream([free.id, heldUpstream.id, released.id, heldHere.id], lot);
+  const unseen = await createOn(upstream, { by: "agent-upstream", title: "born in a lot while the replica is away", queue: 1 });
+  await moveUpstream([unseen.id], lot);
+  await goOnline();
+
+  for (const card of [free, heldUpstream, released, heldHere, unseen]) {
+    await waitLot(card.id, lot, `the replica adopts the lot of ${card.title}`);
+  }
+
+  const other = await upstreamLot();
+  sqlOn(upstream, "UPDATE roadmap_items SET lot_id = ? WHERE id = ?", other, free.id);
+  await waitLot(free.id, other, "a change of lot alone moves the pull cursor");
+}, 90_000);
+
+test("an upstream that predates lots leaves the replica's lots alone and its queued cards fall in the default lot", async () => {
+  const card = await createOn(upstream, { by: "agent-upstream", title: "card of an older upstream" });
+  await waitForItem("the card arrives", replica, card.id, () => true);
+  sqlOn(replica, "UPDATE roadmap_items SET lot_id = 'lot-local' WHERE id = ?", card.id);
+
+  pullStripLot = true;
+  try {
+    await createOn(upstream, { id: card.id, by: "agent-upstream", title: "renamed by an older upstream" });
+    const born = await createOn(upstream, { by: "agent-upstream", title: "queued by an older upstream", queue: 1 });
+    await waitForItem("the rename arrives", replica, card.id, (item) => item.title === "renamed by an older upstream");
+    await waitForItem("the queued card arrives", replica, born.id, (item) => item.queue === 1);
+    expect([(await itemOn(replica, card.id))?.lot_id, (await itemOn(replica, born.id))?.lot_id]).toEqual([
+      "lot-local",
+      "default",
+    ]);
+  } finally {
+    pullStripLot = false;
+  }
+}, 60_000);
+
+test("while a mutation is pending, a card moved upstream to a named lot takes the upstream's place", async () => {
+  const { a, b } = await queuePair("lot-frozen");
+  const lot = await upstreamLot();
+  queueDeltaSuppressed = true;
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    await moveUpstream([a.id], lot);
+    await waitLot(a.id, lot);
+    expect(await placeOn(replica, a.id)).toEqual([lot, null]);
+  } finally {
+    queueDeltaSuppressed = false;
+  }
+  await journalEmpties();
+  expect(await placeOn(replica, a.id)).toEqual([lot, null]);
+}, 90_000);
+
+test("lot writes are refused on a replica", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "stays out of a replica lot", queue: 1 });
+  const created = await post<{ error: string }>(`${replica.url}/roadmap/lot/create`, {
+    project_key: PK,
+    by: "agent-local",
+    name: "local only",
+  });
+  const moved = await post<{ error: string }>(`${replica.url}/roadmap/lot/move`, {
+    project_key: PK,
+    by: "agent-local",
+    ids: [card.id],
+    from: "default",
+    to: null,
+  });
+
+  expect([created.status, moved.status]).toEqual([403, 403]);
+  expect(created.body.error).toContain("replica");
+  expect((await itemOn(replica, card.id))?.lot_id).toBe("default");
+}, 30_000);
+
+test("a named lot's ranks stay out of the replica's queue journal and of its directive check", async () => {
+  const { a, b } = await queuePair("lot-journal");
+  const directive = await createOn(replica, { by: "agent-local", title: "directive of a named lot", kind: "directive", directive: "clear" });
+  sqlOn(replica, "UPDATE roadmap_items SET lot_id = 'lot-local', queue = 7 WHERE id = ?", directive.id);
+  let plain: RoadmapItem | undefined;
+  holdQueueDelivery();
+  try {
+    plain = await createOn(replica, { by: "agent-local", title: "same rank, other lot", queue: 7 });
+    expect((await post(`${replica.url}/roadmap/reorder`, {
+      project_key: PK,
+      by: "agent-local",
+      ids: [b.id, a.id, plain.id],
+      waves: [[b.id], [a.id], [plain.id]],
+    })).status).toBe(200);
+    expect(journaledOps().flatMap((op) => op.ids ?? [])).not.toContain(directive.id);
+  } finally {
+    sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", directive.id);
+    pullSuppressed = false;
+  }
+  await journalEmpties();
+}, 90_000);
+
+function storedPlaceOn(broker: TestBroker, id: string): [string | null, number | null] {
+  const db = openBrokerDb(broker.dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT lot_id, queue FROM roadmap_items WHERE id = ?").get(id) as {
+      lot_id: string | null;
+      queue: number | null;
+    };
+    return [row.lot_id, row.queue];
+  } finally {
+    db.close();
+  }
+}
+
+test("a named lot's card reaches the replica unranked, keeps its lot, and neither side has a rank rewritten", async () => {
+  const [named, a, b] = (await queueCards("lot-masked", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const lot = await upstreamLot();
+  await moveUpstream([named.id], lot);
+  sqlOn(upstream, "UPDATE roadmap_items SET queue = 1 WHERE id = ?", named.id);
+  await waitLot(named.id, lot);
+  await waitPasses(2);
+  expect(storedPlaceOn(replica, named.id)).toEqual([lot, null]);
+
+  expect((await swapOnReplica(a, b)).status).toBe(200);
+  await journalEmpties();
+  await createOn(replica, { id: named.id, by: "agent-local", description: "edited on the replica" });
+  await waitForItem("the edit reaches the upstream", upstream, named.id, (item) => item.description === "edited on the replica");
+  await waitPasses(2);
+
+  expect(storedPlaceOn(replica, named.id)).toEqual([lot, null]);
+  expect(storedPlaceOn(upstream, named.id)).toEqual([lot, 1]);
+}, 90_000);
+
+test("a replica that predates lots is never handed a named lot's rank", async () => {
+  const [named, a] = (await queueCards("lot-old-replica", 2)) as [RoadmapItem, RoadmapItem];
+  const lot = await upstreamLot();
+  pullStripLot = true;
+  try {
+    await moveUpstream([named.id], lot);
+    sqlOn(upstream, "UPDATE roadmap_items SET queue = 1 WHERE id = ?", named.id);
+    // A later edit of the same card, so the page carrying the stored rank has been applied once it shows.
+    await createOn(upstream, { id: named.id, by: "agent-upstream", title: "ranked in a lot upstream" });
+    await waitForItem("the upstream row arrives", replica, named.id, (item) => item.title === "ranked in a lot upstream");
+    expect([storedPlaceOn(replica, named.id)[1], storedPlaceOn(replica, a.id)[1]]).toEqual([null, 2]);
+  } finally {
+    pullStripLot = false;
+  }
+}, 60_000);
+
+test("a replica serves a named lot's card without a rank, in a conflict too", async () => {
+  const card = await createOn(upstream, { by: "agent-upstream", title: "ranked by a newer broker" });
+  await waitForItem("the card arrives", replica, card.id, () => true);
+  const db = openBrokerDb(replica.dbPath);
+  const stored = db.query("SELECT * FROM roadmap_items WHERE id = ?").get(card.id) as Record<string, unknown>;
+  const remote = {
+    ...stored,
+    tags: [],
+    depends_on: [],
+    target_peer_ids: [],
+    lock_contested_by: [],
+    inactive: false,
+    locked: false,
+    lot_id: "lot-newer",
+    queue: 4,
+  };
+  db.run("UPDATE roadmap_items SET lot_id = 'lot-newer', queue = 3, sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
+    JSON.stringify(remote),
+    card.id,
+  ]);
+  db.close();
+  try {
+    const conflicts = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, { project_key: PK });
+    const conflict = conflicts.body.items.find((item) => item.local.id === card.id);
+    expect([conflict?.local.queue, conflict?.remote.queue]).toEqual([null, null]);
+    expect((await itemOn(replica, card.id))?.queue).toBeNull();
+  } finally {
+    sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", card.id);
+  }
+}, 60_000);

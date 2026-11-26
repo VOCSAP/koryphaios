@@ -18,14 +18,7 @@ import {
   openForMode
 } from "../scripts/migrate-project-key-case.ts";
 
-/**
- * Replays broker.ts's own schema-defining statements (CREATE TABLE / ALTER
- * TABLE, in source order) against an in-memory database, so this fixture stays
- * in sync as tables are added, removed, or renamed.
- * Does not mirror the FTS5 virtual table, its sync triggers, or index
- * definitions -- none of them carry or gate on project_key, so their absence
- * doesn't change what this file asserts.
- */
+/** Builds the final schema from CREATE TABLE and ADD COLUMN statements; conditional RENAME migrations are intentionally excluded. */
 function loadRealSchemaFromBroker(db: Database): void {
   const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf-8");
 
@@ -70,7 +63,7 @@ function loadRealSchemaFromBroker(db: Database): void {
   // Swallows duplicate-column errors, mirroring broker.ts's own
   // idempotent-migration handling rather than special-casing which ALTERs are
   // now redundant.
-  const alterTableRe = /db\.run\("(ALTER TABLE [^"]*)"\)/g;
+  const alterTableRe = /db\.run\("(ALTER TABLE \S+ ADD COLUMN [^"]*)"\)/g;
   while ((m = alterTableRe.exec(src))) {
     try {
       db.run(m[1]!);
@@ -105,6 +98,7 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "pending_approvals",
   "roadmap_context_documents",
   "roadmap_items",
+  "roadmap_lots",
   "roadmap_queue_outbox",
   "roadmap_queue_receipts",
   "roadmap_queue_state",
@@ -150,7 +144,7 @@ function insertPendingApproval(db: Database, id: string, projectKey: string): vo
 }
 
 function insertQueueState(db: Database, projectKey: string, rev: number): void {
-  db.run("INSERT INTO roadmap_queue_state (project_key, rev) VALUES (?, ?)", [projectKey, rev]);
+  db.run("INSERT INTO roadmap_queue_state (project_key, lot_id, rev) VALUES (?, 'default', ?)", [projectKey, rev]);
 }
 
 function insertQueueReceipt(db: Database, replicaId: string, projectKey: string, mutationId: string): void {
