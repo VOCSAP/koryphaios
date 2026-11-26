@@ -81,6 +81,19 @@ describe('judgeTileClaude', () => {
     expect(judgeTileClaude(rows, 112, SHELL)).toEqual({ ok: false, reason: 'foreign-claude' })
   })
 
+  test('a PTY process that is claude.exe itself disqualifies every claude.exe under it, direct child or not', () => {
+    const rows = [
+      row(SHELL, 1, 'claude.exe', 2000),
+      row(130, SHELL, 'claude.exe', 3000),
+      row(131, SHELL, 'bash.exe', 3000),
+      row(132, 131, 'claude.exe', 4000)
+    ]
+    for (const pid of [130, 132]) {
+      expect(judgeTileClaude(rows, pid, SHELL), String(pid)).toEqual({ ok: false, reason: 'foreign-claude' })
+    }
+    expect(judgeTileClaude(rows, SHELL, SHELL), 'the PTY claude.exe itself is still accepted').toEqual({ ok: true })
+  })
+
   test('a link created before its parent is a reused pid and is refused, an equal date is not', () => {
     const olderThanShell = [row(SHELL, 1, 'powershell.exe', 2000), row(120, SHELL, 'claude.exe', 1999)]
     expect(judgeTileClaude(olderThanShell, 120, SHELL)).toEqual({ ok: false, reason: 'created-before-parent' })

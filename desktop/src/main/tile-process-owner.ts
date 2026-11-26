@@ -38,12 +38,13 @@ const isClaude = (row: ProcessRow): boolean => row.name.toLowerCase() === CLAUDE
 
 /**
  * Whether process `claudePid` is the claude.exe of the tile whose PTY shell is
- * `shellPid`: named claude.exe, its parents reach the shell, no other claude.exe
- * stands between, and no link is older than its parent (a parent pid is only a
- * number the OS may have reused). A claude.exe that is the PTY process itself
- * is accepted. With `acceptedAt` (epoch ms of the connection the pid was read
- * from), a process created after that moment cannot be the one that opened it:
- * the pid was reused between the netstat read and this listing.
+ * `shellPid`: named claude.exe, its parents reach the shell, none of those
+ * parents, the shell included, is a claude.exe, and no link is older than its
+ * parent (a parent pid is only a number the OS may have reused). A claude.exe
+ * that is the PTY process itself is accepted. With `acceptedAt` (epoch ms of
+ * the connection the pid was read from), a process created after that moment
+ * cannot be the one that opened it: the pid was reused between the netstat read
+ * and this listing.
  */
 export function judgeTileClaude(
   processes: readonly ProcessRow[],
@@ -67,8 +68,8 @@ export function judgeTileClaude(
     const parent = byPid.get(child.ppid)
     if (!parent || seen.has(parent.pid)) return { ok: false, reason: 'no-parent-chain' }
     if (child.createdAt < parent.createdAt) return { ok: false, reason: 'created-before-parent' }
-    if (parent.pid === shellPid) return { ok: true }
     if (isClaude(parent)) return { ok: false, reason: 'foreign-claude' }
+    if (parent.pid === shellPid) return { ok: true }
     seen.add(parent.pid)
     child = parent
   }
