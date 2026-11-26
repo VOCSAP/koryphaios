@@ -331,6 +331,25 @@ describe("the resume credential", () => {
     expect(navigationUrl(selectedHost(loadHosts(store))!)).toBe("https://10.0.0.20:8443/");
   });
 
+  test("an approval id rides in the fragment beside the token, and alone on a resume", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://10.0.0.20:8443"))!, T0);
+    rememberCredential(store, "https://10.0.0.20:8443", "cred-1", T0);
+    const host = selectedHost(loadHosts(store))!;
+    const id = "0bc8cbab-3a77-440d-b5ea-d1bc649e2907";
+    expect(navigationUrl(host, "fresh", id)).toBe(`https://10.0.0.20:8443/#t=fresh&a=${id}`);
+    expect(navigationUrl(host, "", id)).toBe(`https://10.0.0.20:8443/#a=${id}`);
+  });
+
+  test("an approval id the Deck would refuse is dropped, the host still opens", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://10.0.0.20:8443"))!, T0);
+    rememberCredential(store, "https://10.0.0.20:8443", "cred-1", T0);
+    const host = selectedHost(loadHosts(store))!;
+    expect(navigationUrl(host, "", "a&t=forged")).toBe("https://10.0.0.20:8443/");
+    expect(navigationUrl(host, "fresh", "x".repeat(65))).toBe("https://10.0.0.20:8443/#t=fresh");
+  });
+
   test("the seeding script targets the key the web app actually reads", () => {
     const store = new MemoryStore();
     addHost(store, parseCompanionQr(qr("https://10.0.0.20:8443"))!, T0);

@@ -13,6 +13,7 @@ import {
   COMPANION_CLIENT_TIMEOUT_MS,
   COMPANION_CRED_STORAGE_KEY,
   COMPANION_MANIFEST,
+  parseDeepLinkApproval,
   REMOTE_BLOCKED_CHANNELS,
   type CompanionServerFrame
 } from '@shared/companion'
@@ -75,9 +76,28 @@ function emitRefresh(): void {
   for (const cb of refreshListeners) cb()
 }
 
-function pairingTokenFromUrl(): string | null {
-  const m = /[#&]t=([A-Za-z0-9_-]+)/.exec(window.location.hash)
-  return m?.[1] ?? null
+let deepLinkApproval: string | null = null
+
+/**
+ * Takes the pairing token and the `#a=` approval out of the address bar and
+ * returns the token. Cleared before any connection attempt, so a failed one
+ * leaves neither in the address bar nor in the browser history.
+ */
+export function captureUrlFragment(): string | null {
+  const hash = window.location.hash
+  const token = /[#&]t=([A-Za-z0-9_-]+)/.exec(hash)?.[1] ?? null
+  deepLinkApproval = parseDeepLinkApproval(hash)
+  if (token || /[#&]a=/.test(hash)) {
+    history.replaceState(null, '', window.location.pathname + window.location.search)
+  }
+  return token
+}
+
+/** The `#a=` approval this page was opened on, handed out once. */
+export function takeDeepLinkApproval(): string | null {
+  const id = deepLinkApproval
+  deepLinkApproval = null
+  return id
 }
 
 function openSocket(auth: { token?: string; cred?: string }): Promise<void> {
@@ -104,11 +124,6 @@ function openSocket(auth: { token?: string; cred?: string }): Promise<void> {
       switch (frame.t) {
         case 'welcome':
           if (frame.cred) sessionStorage.setItem(CRED_KEY, frame.cred)
-          // The one-shot pairing token must not linger in the address bar
-          // (nor in the browser history).
-          if (pairingTokenFromUrl()) {
-            history.replaceState(null, '', window.location.pathname)
-          }
           settled = true
           setState('connected')
           resolve()
@@ -246,7 +261,7 @@ function buildApi(): DeckApi {
  * no pairing token nor stored credential can open the bridge.
  */
 export async function connectRemoteApi(): Promise<void> {
-  const token = pairingTokenFromUrl()
+  const token = captureUrlFragment()
   const cred = sessionStorage.getItem(CRED_KEY)
   if (!token && !cred) throw new Error('no-pairing-token')
   try {

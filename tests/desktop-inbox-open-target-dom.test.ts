@@ -42,6 +42,7 @@ interface FakeDeckState {
   dict: Record<string, string>;
   remote: boolean;
   inboxSeed: string | null;
+  inboxOpen: boolean;
   clearInboxSeed: () => void;
   openInbox: () => void;
   openGraphDraft: () => void;
@@ -68,6 +69,7 @@ function initialFakeState(): FakeDeckState {
     dict: {},
     remote: false,
     inboxSeed: null,
+    inboxOpen: false,
     clearInboxSeed: () => fakeUseDeck.setState({ inboxSeed: null }),
     openInbox: () => {},
     openGraphDraft: () => {},
@@ -94,6 +96,13 @@ mock.module("@shared/types", () => ({
 }));
 
 const { InboxPanel } = await import("../desktop/src/renderer/src/components/InboxPanel.tsx");
+const { hydratePendingApprovals } = await import("../desktop/src/renderer/src/pending-hydration.ts");
+
+// The App mounts the panel only once the Courrier is open, as a fresh load does.
+function OpenCourrier(): React.ReactElement | null {
+  const open = fakeUseDeck((s) => s.inboxOpen);
+  return open ? React.createElement(InboxPanel) : null;
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -168,4 +177,48 @@ test("a seed naming a question already settled opens the panel without a modal",
 test("without a seed, no modal opens", () => {
   mount(null);
   expect(modalText()).toBeNull();
+});
+
+function deepLinkedLoad(list: () => Promise<FakeApproval[]>, reports: string[]): Promise<void> {
+  // One-shot, like takeDeepLinkApproval: a second read gets nothing.
+  let deepLink: string | null = "apr-old";
+  return hydratePendingApprovals<FakeApproval>({
+    list,
+    apply: (approvals) => fakeUseDeck.setState({ pendingApprovals: approvals }),
+    takeDeepLink: () => {
+      const id = deepLink;
+      deepLink = null;
+      return id;
+    },
+    open: (approvalId) => fakeUseDeck.setState({ inboxOpen: true, inboxSeed: approvalId }),
+    report: (text) => reports.push(text)
+  });
+}
+
+test("a fresh load opened on #a= selects that request once the read list arrives", async () => {
+  let resolveList: (list: FakeApproval[]) => void = () => {};
+  const reports: string[] = [];
+  let done: Promise<void> = Promise.resolve();
+  await act(async () => {
+    root.render(React.createElement(OpenCourrier));
+    done = deepLinkedLoad(() => new Promise((r) => (resolveList = r)), reports);
+    await Promise.resolve();
+  });
+  await act(async () => {
+    resolveList([NEWEST, OLDEST]);
+    await done;
+  });
+  expect(modalText(), "the seed must wait for the list it names").toBe("oldest question");
+  expect(reports).toEqual([]);
+});
+
+test("a deep link whose list cannot be read opens the Courrier without a modal, and says why", async () => {
+  const reports: string[] = [];
+  await act(async () => {
+    root.render(React.createElement(OpenCourrier));
+    await deepLinkedLoad(() => Promise.reject(new Error("broker down")), reports);
+  });
+  expect(container.querySelector(".inbox-panel"), "the Courrier is open").not.toBeNull();
+  expect(modalText()).toBeNull();
+  expect(reports).toHaveLength(1);
 });

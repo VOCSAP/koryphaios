@@ -30,6 +30,9 @@ mock.module("@shared/workspace-restore-outcome", () => sharedWorkspaceRestore);
 
 const listeners = new Map<string, () => void>();
 let restoreOutcome: unknown = undefined;
+const DEEP_LINKED = { id: "apr-deep", status: "pending" };
+// The store state at the moment init() first set the inbox seed.
+let atSeed: { open: boolean; pendingIds: string[] } | null = null;
 
 // Every `on*` subscription is recorded by name and returns its unsubscribe; any
 // other method resolves to an inert value, enough for init() to run to its end.
@@ -47,6 +50,7 @@ const api = new Proxy(
         return () => Promise.resolve([]);
       }
       if (name === "restoreWorkspace") return () => Promise.resolve(restoreOutcome);
+      if (name === "approvalPendingList") return () => Promise.resolve([DEEP_LINKED]);
       if (name === "getConfig") return () => Promise.resolve({});
       if (name === "getI18n") return () => Promise.resolve({ dict: {}, available: [] });
       return () => Promise.resolve(undefined);
@@ -62,7 +66,24 @@ beforeAll(async () => {
   (window as unknown as { api: unknown }).api = api;
   // The query gives a module record that the other files' mock.module of store.ts does not reach, and no teardown could undo.
   ({ useDeck, inboxAwaitsAction, inboxBadgeCount } = await import("../desktop/src/renderer/src/store.ts?real"));
+  // The page was opened on #a=: the same module record store.ts reads it from.
+  const { captureUrlFragment } = await import("../desktop/src/renderer/src/remote-api.ts");
+  window.location.hash = "#a=apr-deep";
+  captureUrlFragment();
+  const stop = useDeck.subscribe((s) => {
+    if (atSeed === null && s.inboxSeed === "apr-deep") {
+      atSeed = { open: s.inboxOpen, pendingIds: s.pendingApprovals.map((a) => a.id) };
+    }
+  });
   await useDeck.getState().init();
+  await new Promise((r) => setTimeout(r, 0));
+  stop();
+});
+
+// Mutants: init() skips the pending-list read, or seeds before applying it.
+test("a page opened on #a= reads the pending list at init, then opens the Courrier on that request", () => {
+  expect(atSeed, "init() never seeded the deep-linked request").not.toBeNull();
+  expect(atSeed).toEqual({ open: true, pendingIds: ["apr-deep"] });
 });
 
 // Mutant: inboxAwaitsAction counting every pending approval again.

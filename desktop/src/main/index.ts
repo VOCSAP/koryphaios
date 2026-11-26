@@ -3785,6 +3785,9 @@ app.whenReady().then(async () => {
   // The bot token is handed to the BROKER, which seals it and runs the single
   // gateway (Telegram allows one getUpdates consumer per token). It never comes
   // back: only a 4-character hint does.
+  // 'approvals:pending' is pushed only when the list changes: a window loaded
+  // after the last push reads it here.
+  regHandle('approvals:pending-list', () => lastPendingApprovals)
   regHandle('approvals:channels', async () => {
     const deps = approvals.deps()
     if (!deps) return []

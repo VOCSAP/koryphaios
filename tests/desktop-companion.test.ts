@@ -14,9 +14,11 @@ import {
   COMPANION_MANIFEST,
   COMPANION_MAX_PAYLOAD_BYTES,
   CompanionAuth,
+  DEEP_LINK_APPROVAL_ID_MAX,
   isPrivateAddress,
   LIGHT_MODE_BLOCKED_EVENTS,
   parseClientFrame,
+  parseDeepLinkApproval,
   REMOTE_BLOCKED_CHANNELS,
   REMOTE_BLOCKED_EVENTS,
   shouldForwardEvent
@@ -180,6 +182,45 @@ test('the approval channels that release a stopped agent stay on the remote-bloc
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:decline')).toBe(true)
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:ack'), 'approvals:ack releases a waiting agent').toBe(true)
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:allow'), 'approvals:allow renders a verdict').toBe(true)
+})
+
+test('a paired phone reads the pending list it is already pushed, and still cannot answer it', () => {
+  expect(CHANNEL_TIERS['approvals:pending-list']).toBe(0)
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:pending-list'), 'a deep-linked phone must read the list').toBe(false)
+  expect(shouldForwardEvent('approvals:pending', 'full'), 'the read returns nothing the push withholds').toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:allow')).toBe(true)
+})
+
+const UUID = '0bc8cbab-3a77-440d-b5ea-d1bc649e2907'
+
+test('parseDeepLinkApproval reads a=<id> alone or after the pairing token', () => {
+  expect(parseDeepLinkApproval(`#a=${UUID}`)).toBe(UUID)
+  expect(parseDeepLinkApproval(`#t=tok_1&a=${UUID}`)).toBe(UUID)
+  expect(parseDeepLinkApproval('#a=' + 'x'.repeat(DEEP_LINK_APPROVAL_ID_MAX))).toBe('x'.repeat(DEEP_LINK_APPROVAL_ID_MAX))
+})
+
+test('parseDeepLinkApproval: no a= key, or an empty one, opens nothing', () => {
+  expect(parseDeepLinkApproval('')).toBeNull()
+  expect(parseDeepLinkApproval('#t=tok')).toBeNull()
+  expect(parseDeepLinkApproval('#a=')).toBeNull()
+})
+
+test('parseDeepLinkApproval refuses an id longer than the bound', () => {
+  expect(parseDeepLinkApproval('#a=' + 'x'.repeat(DEEP_LINK_APPROVAL_ID_MAX + 1))).toBeNull()
+})
+
+test('parseDeepLinkApproval refuses any character outside the closed set, encoded or not', () => {
+  for (const id of ['%3Cimg%3E', '<img>', 'a.b', 'a b', '../x', 'a;b']) {
+    expect(parseDeepLinkApproval(`#a=${id}`), id).toBeNull()
+  }
+})
+
+test('parseDeepLinkApproval refuses two a= keys instead of picking one', () => {
+  expect(parseDeepLinkApproval(`#a=${UUID}&a=other`)).toBeNull()
+})
+
+test('parseDeepLinkApproval matches the a key only, not a key ending in a', () => {
+  expect(parseDeepLinkApproval(`#xa=${UUID}`)).toBeNull()
 })
 
 // peersConfig:get is a READ (tier 0) and is blocked anyway: it describes the

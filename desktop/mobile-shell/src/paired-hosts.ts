@@ -10,7 +10,7 @@
 // fresh scan is needed.
 
 import { isPrivateHost } from "../../../shared/net.ts";
-import { COMPANION_CRED_STORAGE_KEY } from "../../src/shared/companion.ts";
+import { COMPANION_CRED_STORAGE_KEY, isDeepLinkApprovalId } from "../../src/shared/companion.ts";
 import { readJson, writeJson, type KeyValueStore } from "./storage.ts";
 
 /** Companion hosts live under their own key — see the split above. */
@@ -298,10 +298,13 @@ export function selectedHost(state: HostsState): PairedHost | null {
  * seeded into sessionStorage instead (see `companionResumeScript`).
  *
  * With neither, there is nothing to try and the caller must ask for a scan.
+ * An `approvalId` adds `a=<id>`, which opens the Courrier on that request; an
+ * id the Deck would refuse is dropped here rather than sent.
  */
-export function navigationUrl(host: PairedHost, token = ""): string | null {
-  if (token) return `${host.url}/#t=${encodeURIComponent(token)}`;
-  if (host.credential) return `${host.url}/`;
+export function navigationUrl(host: PairedHost, token = "", approvalId = ""): string | null {
+  const a = isDeepLinkApprovalId(approvalId) ? `a=${approvalId}` : "";
+  if (token) return `${host.url}/#t=${encodeURIComponent(token)}${a ? `&${a}` : ""}`;
+  if (host.credential) return `${host.url}/${a ? `#${a}` : ""}`;
   return null;
 }
 

@@ -30,7 +30,8 @@ import type {
   TemplateSummary,
   WorkspaceSummary
 } from '@shared/types'
-import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
+import { onRemoteRefresh, onRemoteState, remoteInstalled, takeDeepLinkApproval, type RemoteState } from './remote-api'
+import { hydratePendingApprovals } from './pending-hydration'
 import {
   nextQueueReplacedSeen,
   pendingQueueReplaced,
@@ -691,6 +692,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       remote &&
       (window.matchMedia?.('(pointer: coarse)').matches === true || window.innerWidth < 700)
     set({ initError: null, remote, mobile, remoteLink: remote ? 'connected' : null })
+    let hydratePending = (): Promise<void> => Promise.resolve()
     if (remote) {
       onRemoteState((s) => set({ remoteLink: s }))
       // Light→full resume or reconnect (MB5): re-hydrate what push events may
@@ -699,6 +701,7 @@ export const useDeck = create<DeckState>((set, get) => ({
         void window.api.listSessions().then((sessions) => set({ sessions }))
         void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
         void window.api.getOperatorTrustStatus().then((status) => set({ operatorTrustStatus: status }))
+        void hydratePending()
       })
     }
     let sessions: SessionRuntime[]
@@ -830,9 +833,18 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Family 3: the broker's pending blocking questions, pushed as a WHOLE
     // list. Replacing (not merging) is what makes a question answered from
     // the phone disappear here without any local bookkeeping.
-    window.api.onPendingApprovals((approvals) =>
+    const applyPending = (approvals: InboxApproval[]): void =>
       set((s) => ({ pendingApprovals: approvals, approvalDrafts: keepDrafts(s.approvalDrafts, approvals) }))
-    )
+    window.api.onPendingApprovals(applyPending)
+    hydratePending = () =>
+      hydratePendingApprovals({
+        list: () => window.api.approvalPendingList(),
+        apply: applyPending,
+        takeDeepLink: takeDeepLinkApproval,
+        open: (approvalId) => set({ inboxOpen: true, inboxSeed: approvalId }),
+        report: (text, e) => window.api.reportError('inbox', `${text}: ${errorText(e)}`)
+      })
+    void hydratePending()
     // Settled entries of the run: pushed whole on every change, read once so a
     // window opened mid-run starts from the current state.
     window.api.onInboxArchive((inboxArchive) => set({ inboxArchive }))

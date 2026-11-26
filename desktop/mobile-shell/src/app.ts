@@ -39,6 +39,7 @@ import {
   PENDING_CRED_KEY,
   PENDING_PIN_KEY,
   removeHost,
+  selectedHost,
   selectHost,
   type PairedHost,
 } from "./paired-hosts.ts";
@@ -90,9 +91,9 @@ async function scanCompanion(): Promise<void> {
   setNotice("");
 }
 
-async function open(host: PairedHost): Promise<void> {
+async function open(host: PairedHost, approvalId = ""): Promise<void> {
   const token = tokens.get(host.url) ?? "";
-  const url = navigationUrl(host, token);
+  const url = navigationUrl(host, token, approvalId);
   if (!url) {
     setNotice("This Deck needs a fresh QR: scan it again from the Companion dialog.");
     return;
@@ -278,10 +279,17 @@ function renderApprovals(root: HTMLElement): void {
 
   const list = el("ul", "list");
   const now = Date.now();
+  // The phone never answers in the Deck (companion floor): this only shows it there.
+  const host = selectedHost(loadHosts(store));
   for (const approval of pending) {
     const card = el("li", "card");
     card.append(el("strong", "", approval.title));
     card.append(el("pre", "body", approval.body));
+    if (host) {
+      const show = el("button", "", "Open in the Courrier") as HTMLButtonElement;
+      show.onclick = () => void open(host, approval.id);
+      card.append(show);
+    }
 
     if (awaitingBroker(approval, now)) {
       card.append(el("small", "hint", "Answer sent, waiting for the Deck…"));

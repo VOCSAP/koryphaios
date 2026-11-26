@@ -2879,6 +2879,8 @@ export interface DeckApi {
   companionStatus(): Promise<CompanionInfo>
   /** Remote-approval channels (PLAN N3/N4) and their live state. */
   approvalChannels(): Promise<ApprovalChannelStatus[]>
+  /** The pending list last pushed by `onPendingApprovals`, for a window opened after that push. */
+  approvalPendingList(): Promise<Approval[]>
   /**
    * Enrol a channel with the broker; returns what the operator still has to do.
    *

@@ -258,6 +258,7 @@ export const COMPANION_MANIFEST = {
   onBrokerStatus: { kind: 'event', channel: 'broker:status' },
   onOperatorTrustStatus: { kind: 'event', channel: 'operator-trust:status' },
   approvalChannels: { kind: 'invoke', channel: 'approvals:channels' },
+  approvalPendingList: { kind: 'invoke', channel: 'approvals:pending-list' },
   approvalConnect: { kind: 'invoke', channel: 'approvals:connect' },
   approvalDisconnect: { kind: 'invoke', channel: 'approvals:disconnect' },
   approvalEnrolmentExport: { kind: 'invoke', channel: 'approvals:enrolment-export' },
@@ -448,6 +449,8 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   // trust-changing: a bot token grants control of the operator's notification
   // channel, and an enrolment payload IS the operator identity.
   'approvals:channels': 0,
+  // The list 'approvals:pending' already pushes to a paired phone, read once.
+  'approvals:pending-list': 0,
   'approvals:connect': 3,
   'approvals:disconnect': 3,
   'approvals:enrolment-export': 3,
@@ -656,6 +659,31 @@ export function parseClientFrame(raw: unknown): CompanionClientFrame | null {
  * (PLAN N5, multi-host). Two literals in two projects would drift silently.
  */
 export const COMPANION_CRED_STORAGE_KEY = 'companion-cred'
+
+/** Longest approval id a `#a=` deep link may carry; broker ids are 36-char UUIDs. */
+export const DEEP_LINK_APPROVAL_ID_MAX = 64
+
+const DEEP_LINK_APPROVAL_ID = new RegExp(`^[A-Za-z0-9_-]{1,${DEEP_LINK_APPROVAL_ID_MAX}}$`)
+
+export function isDeepLinkApprovalId(value: string): boolean {
+  return DEEP_LINK_APPROVAL_ID.test(value)
+}
+
+/**
+ * The approval id of a `#a=<id>` URL fragment, or null. The fragment comes from
+ * whoever built the link, so the id must match a closed character set (no
+ * percent-decoding), and two `a=` keys are refused rather than picking one.
+ */
+export function parseDeepLinkApproval(hash: string): string | null {
+  const values = hash
+    .replace(/^#/, '')
+    .split('&')
+    .filter((part) => part.startsWith('a='))
+    .map((part) => part.slice(2))
+  if (values.length !== 1) return null
+  const id = values[0]!
+  return isDeepLinkApprovalId(id) ? id : null
+}
 
 // ----- timing constants (EXPLORATION §5.5: heartbeat host-death detection) -----
 
