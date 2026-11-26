@@ -36,6 +36,8 @@ interface Card {
   openInDeck: boolean;
   settledElsewhere: boolean;
   recommended: number | null;
+  textFlags: string[];
+  dangerView?: unknown;
 }
 
 function card(over: Partial<Card> = {}): Card {
@@ -59,6 +61,7 @@ function card(over: Partial<Card> = {}): Card {
     openInDeck: false,
     settledElsewhere: false,
     recommended: null,
+    textFlags: [],
     ...over
   };
 }
@@ -235,6 +238,33 @@ test("a cut card offers Deny and Open in the Deck, never Allow nor a reply", asy
   expect(buttons()).toEqual(["inbox.permissionDeny", "avatarBubble.openInDeck"]);
   expect(container.querySelector(".avb-reply")).toBeNull();
   expect(container.querySelector(".avb-card-line.is-cut")?.textContent).toBe("avatarBubble.cutNote");
+});
+
+// Mutants: dangerView not passed to the request body; text_flags not passed to it.
+test("a permission card shows the hidden-character badge, each risky pattern and the incomplete check", async () => {
+  const entry = { id: "kory/rm-recursive", source: "kory", message: "Recursive delete.", messageFrom: "deck", known: true, confirmed: false };
+  await mount(state([card({ textFlags: ["bidi"], dangerView: { reevaluation: "partial", entries: [entry] } })]));
+  expect(container.querySelector(".approval-text-flags code")?.textContent).toBe("inbox.textFlagBidi");
+  expect(container.querySelector(".approval-text-flags")?.textContent, "the bubble replaces the characters, it does not reveal them").toBe(
+    "avatarBubble.textFlagsReplacedinbox.textFlagBidi"
+  );
+  expect([...container.querySelectorAll(".approval-danger-row code")].map((c) => c.textContent)).toEqual(["kory/rm-recursive"]);
+  expect(container.querySelector(".approval-danger-unconfirmed")?.textContent).toBe("inbox.dangerUnconfirmed");
+  expect(container.querySelector(".approval-danger-recheck")?.textContent).toBe("inbox.dangerRecheckPartial");
+  expect(buttons(), "a signal informs, it never takes a verdict away").toEqual(["inbox.permissionDeny", "inbox.permissionAllow"]);
+});
+
+// Mutant: the badge dropped with the request body a structured question hides.
+test("a structured question keeps the hidden-character badge although its body is not repeated", async () => {
+  const questions = [{ key: "Which?", question: "Which?", header: "", options: [{ value: "a", label: "a", description: "" }], multiSelect: false }];
+  const structured = (textFlags: string[]) => state([card({ kind: "question", questions, gestures: ["deny", "answers"], textFlags })]);
+  await mount(structured(["invisible"]));
+  expect(container.querySelector(".avb-card-text")).toBeNull();
+  expect(container.querySelector(".approval-text-flags")?.textContent).toBe("avatarBubble.textFlagsReplacedinbox.textFlagInvisible");
+  await act(async () => {
+    push(structured([]));
+  });
+  expect(container.querySelector(".approval-signal")).toBeNull();
 });
 
 // Mutant: Open in the Deck wired to act, or the intent built without the state's generation.

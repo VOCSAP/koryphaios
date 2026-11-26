@@ -214,6 +214,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   let scopeEpoch = 0
   let chain = Promise.resolve()
   let inboxGeneration: number | null = null
+  let inboxSignals = false
   let pusher: { socket: AvatarClientSocket; generation: number; relay: InboxPusher } | null = null
   let notifyGeneration: number | null = null
   let binding: NotificationBinding | null = null
@@ -368,6 +369,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
             relay: createInboxPusher({
               identity,
               scopeGeneration: inboxGeneration,
+              signals: inboxSignals,
               sources: () => inbox.sources(),
               send: (text) => current.send(text),
               after,
@@ -477,7 +479,8 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
           ? []
           : options.inbox
             ? AVATAR_CAPABILITIES
-            : AVATAR_CAPABILITIES.filter((c) => c !== 'a3_inbox' && c !== 'a3_notify_replace')
+            : AVATAR_CAPABILITIES.filter((c) => c === 'a3_context')
+      let negotiatedSignals = false
       let negotiatedInbox: number | null = null
       let negotiatedNotify: number | null = null
       const attachResult = await post(rendezvous, '/attach', {
@@ -515,6 +518,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         }
         const negotiated = negotiatedCapabilities(contextResult)
         if (negotiated.includes('a3_inbox')) negotiatedInbox = context.scope_generation
+        negotiatedSignals = negotiated.includes('a3_inbox_signals')
         if (negotiated.includes('a3_inbox') && negotiated.includes('a3_notify_replace')) negotiatedNotify = context.scope_generation
       }
       const avatarChanged = previousAttachment?.avatarRunId !== rendezvous.avatarRunId
@@ -523,6 +527,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       const renegotiatesNotify = (negotiatedNotify !== null || notifyGeneration !== null) && socket !== null
       attached = { avatarRunId: rendezvous.avatarRunId, identity, key, name: deck.deckName, theme: deck.theme }
       inboxGeneration = negotiatedInbox
+      inboxSignals = negotiatedSignals
       notifyGeneration = negotiatedNotify
       lease = null
       lastPushed = null

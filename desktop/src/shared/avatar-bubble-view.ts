@@ -11,7 +11,7 @@ import {
 } from './avatar-inbox-protocol'
 import type { AvatarDeckIdentity } from './avatar-state'
 import { inboxMessageDisposition } from './inbox-pending'
-import type { ApprovalKind, InboxAckStatus, InboxCloseAuthority } from './types'
+import type { ApprovalKind, ApprovalTextFlag, DangerView, InboxAckStatus, InboxCloseAuthority } from './types'
 
 /** How long a card whose gesture lost the race stays visible as settled elsewhere. */
 export const AVATAR_BUBBLE_SETTLED_ELSEWHERE_MS = 2_000
@@ -69,6 +69,10 @@ export interface AvatarBubbleCard {
   tileName: string | null
   createdAt: string
   cut: boolean
+  /** The hidden characters the broker found in the request, which `title` and `question` show as U+FFFD. */
+  textFlags: ApprovalTextFlag[]
+  /** The Deck's reading of the risky patterns; absent on anything but a permission. */
+  dangerView?: DangerView
   /** Empty once the card is settled elsewhere. */
   gestures: InboxActionKind[]
   /** A cut card the operator must read in full in the Deck before approving. */
@@ -187,6 +191,17 @@ export function avatarBubblePendingCourrier(
   ).length
 }
 
+function safeDangerView(view: DangerView): DangerView {
+  return {
+    reevaluation: view.reevaluation,
+    entries: view.entries.map((entry) => ({
+      ...entry,
+      id: safeLine(entry.id),
+      message: entry.message === null ? null : safeLine(entry.message)
+    }))
+  }
+}
+
 function projectCard(identity: AvatarDeckIdentity, deckLabel: string, approval: InboxRelayApproval): AvatarBubbleCard {
   const cut = approval.cut === true
   return {
@@ -216,6 +231,8 @@ function projectCard(identity: AvatarDeckIdentity, deckLabel: string, approval: 
     tileName: approval.tile_name === null ? null : safeLine(approval.tile_name),
     createdAt: approval.created_at,
     cut,
+    textFlags: approval.text_flags ?? [],
+    ...(approval.danger_view ? { dangerView: safeDangerView(approval.danger_view) } : {}),
     gestures: avatarBubbleGestures(approval),
     openInDeck: cut,
     settledElsewhere: false

@@ -818,6 +818,7 @@
   "avatarBubble.summary": "{waiting} en attente · {informations} info",
   "avatarBubble.emptyReclame": "Rien n'attend ta réponse.",
   "avatarBubble.cutNote": "Coupé à 2 000 caractères : « Autoriser » n'est pas proposé sur un texte que tu n'as pas vu en entier. Lis-le dans le Deck.",
+  "avatarBubble.textFlagsReplaced": "Caractères cachés remplacés :",
   "avatarBubble.openInDeck": "Ouvrir dans le Deck",
   "avatarBubble.settledElsewhere": "Réglé ailleurs.",
   "avatarBubble.refused": "Le Deck a refusé cette réponse.",

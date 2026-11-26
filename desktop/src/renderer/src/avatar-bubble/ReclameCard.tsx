@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { AvatarBubbleCard } from '@shared/avatar-bubble-view'
 import type { AvatarInboxAction, InboxActionKind } from '@shared/avatar-inbox-protocol'
-import { ApprovalRequestBody } from '../components/ApprovalRequestBody'
+import { ApprovalRequestBody, TextFlagsBadge } from '../components/ApprovalRequestBody'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from '../components/icons'
 import { RecommendedMark } from '../components/InboxCore'
 import type { TFn } from '../translate'
@@ -24,6 +24,8 @@ export interface ReclameCardProps {
 }
 
 const asText = (text: string): string => text
+/** The bubble shows hidden characters as U+FFFD, so its badge cannot say they are revealed. */
+const TEXT_FLAGS_LABEL = 'avatarBubble.textFlagsReplaced'
 
 /** One request at a time: the verdict is one click, and only the gestures the Deck will carry are drawn. */
 export function ReclameCard(props: ReclameCardProps): React.JSX.Element {
@@ -72,8 +74,21 @@ export function ReclameCard(props: ReclameCardProps): React.JSX.Element {
       </div>
       {card.title && <div className="inbox-modal-subject">{card.title}</div>}
       {/* A structured question says its text again in its own legend. */}
-      {!(questions && may('answers')) && (
-        <ApprovalRequestBody t={t} approval={card} className="inbox-modal-text avb-card-text" renderText={asText} />
+      {!(questions && may('answers')) ? (
+        <ApprovalRequestBody
+          t={t}
+          approval={{ kind: card.kind, question: card.question, text_flags: card.textFlags }}
+          dangerView={card.dangerView}
+          className="inbox-modal-text avb-card-text"
+          renderText={asText}
+          textFlagsLabel={TEXT_FLAGS_LABEL}
+        />
+      ) : (
+        card.textFlags.length > 0 && (
+          <div className="approval-signal">
+            <TextFlagsBadge t={t} flags={card.textFlags} label={TEXT_FLAGS_LABEL} />
+          </div>
+        )
       )}
 
       {card.settledElsewhere && (

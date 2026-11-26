@@ -818,6 +818,7 @@
   "avatarBubble.summary": "{waiting} waiting · {informations} info",
   "avatarBubble.emptyReclame": "Nothing is waiting for your answer.",
   "avatarBubble.cutNote": "Cut at 2,000 characters: Allow is not offered on a text you have not seen in full. Read it in the Deck.",
+  "avatarBubble.textFlagsReplaced": "Hidden characters replaced:",
   "avatarBubble.openInDeck": "Open in the Deck",
   "avatarBubble.settledElsewhere": "Settled elsewhere.",
   "avatarBubble.refused": "The Deck refused this answer.",

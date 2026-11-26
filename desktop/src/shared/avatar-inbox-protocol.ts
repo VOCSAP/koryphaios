@@ -1,5 +1,16 @@
 import type { AvatarDeckIdentity } from './avatar-state'
-import type { Approval, ApprovalKind, ApprovalQuestion, ApprovalReplyRoute, InboxCloseAuthority, InboxEntryState, InboxMessage } from './types'
+import type {
+  Approval,
+  ApprovalKind,
+  ApprovalQuestion,
+  ApprovalReplyRoute,
+  ApprovalTextFlag,
+  DangerView,
+  DangerViewEntry,
+  InboxCloseAuthority,
+  InboxEntryState,
+  InboxMessage
+} from './types'
 
 export const AVATAR_INBOX_PROTOCOL_VERSION = 1
 /** Below the WebSocket maxPayload, so a frame the Deck built is never cut by the transport. */
@@ -19,6 +30,10 @@ export const MAX_INBOX_OPTIONS = 10
 export const MAX_INBOX_OPTION = 200
 export const MAX_INBOX_TIMESTAMP = 64
 export const MAX_INBOX_OUTCOME_REASON = 256
+export const MAX_INBOX_DANGER = 16
+/** Equal to the broker's danger id bound and to the longest rule message the Deck accepts. */
+export const MAX_INBOX_DANGER_ID = 80
+export const MAX_INBOX_DANGER_MESSAGE = 400
 
 /** The broker's own validator of agent-written questions, injected by the main-process caller. */
 export type InboxQuestionsValidator = (raw: unknown) => { ok: true; value: ApprovalQuestion[] } | { ok: false; error: string }
@@ -39,6 +54,10 @@ const REPLY_ROUTES: readonly ApprovalReplyRoute[] = ['channel', 'pty', 'hook']
 const RELAYED_STATUSES = ['pending', 'expired_notif'] as const
 const MESSAGE_STATES = ['open', 'responded', 'closed'] as const
 const CLOSE_AUTHORITIES: readonly InboxCloseAuthority[] = ['author', 'lead', 'supervisor']
+const TEXT_FLAGS: readonly ApprovalTextFlag[] = ['bidi', 'control', 'invisible']
+const DANGER_SOURCES: readonly DangerViewEntry['source'][] = ['kory', 'user', 'repo']
+const DANGER_VOICES: readonly DangerViewEntry['messageFrom'][] = ['deck', 'agent']
+const REEVALUATIONS: readonly DangerView['reevaluation'][] = ['done', 'partial', 'unavailable']
 
 export interface InboxRelayApproval {
   id: string
@@ -58,6 +77,9 @@ export interface InboxRelayApproval {
   from_peer_id: string
   tile_name: string | null
   cut?: true
+  /** Both sent only to an Avatar that negotiated a3_inbox_signals. */
+  text_flags?: ApprovalTextFlag[]
+  danger_view?: DangerView
 }
 
 export interface InboxRelayMessage {
@@ -190,7 +212,8 @@ const APPROVAL_FIELDS = [
   'from_peer_id',
   'tile_name'
 ] as const
-const MESSAGE_FIELDS = ['id', 'from_peer_id', 'text', 'sent_at', 'state', 'closed_at', 'closed_by', 'reason'] as const
+const DANGER_ENTRY_FIELDS = ['id', 'source', 'message', 'messageFrom', 'known', 'confirmed'] as const
+const MESSAGE_FIELDS =['id', 'from_peer_id', 'text', 'sent_at', 'state', 'closed_at', 'closed_by', 'reason'] as const
 const CLOSED_FIELDS = ['id', 'title', 'closed_at', 'closed_by', 'reason'] as const
 const FRAME_FIELDS = [
   'type',
@@ -220,8 +243,36 @@ function parseRecommended(value: unknown, optionCount: number): { recommended?: 
   return { recommended: index }
 }
 
+function parseTextFlags(value: unknown): { text_flags?: ApprovalTextFlag[] } {
+  if (value === undefined) return {}
+  return { text_flags: boundedList(value, TEXT_FLAGS.length, 'approval text_flags', (flag) => oneOf(flag, TEXT_FLAGS, 'approval text flag')) }
+}
+
+function parseDangerEntry(raw: unknown): DangerViewEntry {
+  const input = exactRecord(raw, DANGER_ENTRY_FIELDS, [], 'danger entry')
+  return {
+    id: boundedString(input.id, MAX_INBOX_DANGER_ID, 'danger id', false),
+    source: oneOf(input.source, DANGER_SOURCES, 'danger source'),
+    message: nullableString(input.message, MAX_INBOX_DANGER_MESSAGE, 'danger message'),
+    messageFrom: oneOf(input.messageFrom, DANGER_VOICES, 'danger messageFrom'),
+    known: bool(input.known, 'danger known'),
+    confirmed: bool(input.confirmed, 'danger confirmed')
+  }
+}
+
+function parseDangerView(value: unknown): { danger_view?: DangerView } {
+  if (value === undefined) return {}
+  const input = exactRecord(value, ['reevaluation', 'entries'], [], 'danger_view')
+  return {
+    danger_view: {
+      reevaluation: oneOf(input.reevaluation, REEVALUATIONS, 'danger reevaluation'),
+      entries: boundedList(input.entries, MAX_INBOX_DANGER, 'danger entries', parseDangerEntry)
+    }
+  }
+}
+
 function parseApproval(raw: unknown, validateQuestions: InboxQuestionsValidator): InboxRelayApproval {
-  const input = exactRecord(raw, APPROVAL_FIELDS, ['cut', 'recommended'], 'approval')
+  const input = exactRecord(raw, APPROVAL_FIELDS, ['cut', 'recommended', 'text_flags', 'danger_view'], 'approval')
   if (!isApprovalId(input.id)) invalid('approval id')
   const options = boundedList(input.options, MAX_INBOX_OPTIONS, 'approval options', (raw) =>
     boundedString(raw, MAX_INBOX_OPTION, 'approval option')
@@ -242,7 +293,9 @@ function parseApproval(raw: unknown, validateQuestions: InboxQuestionsValidator)
     created_at: boundedString(input.created_at, MAX_INBOX_TIMESTAMP, 'approval created_at'),
     from_peer_id: boundedString(input.from_peer_id, MAX_INBOX_PEER_ID, 'approval from_peer_id'),
     tile_name: nullableString(input.tile_name, MAX_INBOX_TILE_NAME, 'approval tile_name'),
-    ...cutFlag(input.cut, 'approval cut')
+    ...cutFlag(input.cut, 'approval cut'),
+    ...parseTextFlags(input.text_flags),
+    ...parseDangerView(input.danger_view)
   }
 }
 
@@ -321,12 +374,41 @@ export interface InboxRelaySources {
   closed: readonly Approval[]
   tileName(approval: Approval): string | null
   validateQuestions: InboxQuestionsValidator
+  /** True when this Avatar negotiated a3_inbox_signals; an older one refuses the two signal fields. */
+  signals: boolean
+}
+
+/**
+ * The warning signals of an approval within the relay's bounds. `cut` is true
+ * when any of them could not be carried whole, so the approval is marked and
+ * cannot be allowed from a partial list.
+ */
+function projectSignals(approval: Approval): { cut: boolean; fields: Pick<InboxRelayApproval, 'text_flags' | 'danger_view'> } {
+  const raised: readonly ApprovalTextFlag[] = approval.text_flags ?? []
+  const flags = TEXT_FLAGS.filter((flag) => raised.includes(flag))
+  let lost = raised.some((flag) => !TEXT_FLAGS.includes(flag))
+  const view = approval.danger_view
+  const fitting = (view?.entries ?? []).filter((entry) => codePoints(entry.id) <= MAX_INBOX_DANGER_ID)
+  const entries = fitting.slice(0, MAX_INBOX_DANGER).map((entry) => {
+    const message = entry.message === null ? null : cut(entry.message, MAX_INBOX_DANGER_MESSAGE)
+    if (message?.cut) lost = true
+    return { ...entry, message: message?.value ?? null }
+  })
+  if (entries.length !== (view?.entries.length ?? 0)) lost = true
+  return {
+    cut: lost,
+    fields: {
+      ...(flags.length > 0 ? { text_flags: flags } : {}),
+      ...(view ? { danger_view: { reevaluation: view.reevaluation, entries } } : {})
+    }
+  }
 }
 
 function projectApproval(
   approval: Approval,
   tileName: string | null,
-  validateQuestions: InboxQuestionsValidator
+  validateQuestions: InboxQuestionsValidator,
+  signals: boolean
 ): InboxRelayApproval | null {
   if (approval.status !== 'pending' && approval.status !== 'expired_notif') return null
   const title = cut(approval.title, MAX_INBOX_TITLE)
@@ -341,7 +423,9 @@ function projectApproval(
   const tile = tileName === null ? null : cut(tileName, MAX_INBOX_TILE_NAME)
   const questions = approval.questions === null ? null : validateQuestions(approval.questions)
   const questionsLost = questions !== null && !questions.ok
-  const wasCut = title.cut || question.cut || optionsCut || from.cut || createdAt.cut || (tile?.cut ?? false) || questionsLost
+  const signal = signals ? projectSignals(approval) : null
+  const wasCut =
+    title.cut || question.cut || optionsCut || from.cut || createdAt.cut || (tile?.cut ?? false) || questionsLost || (signal?.cut ?? false)
   return {
     id: approval.id,
     kind: approval.kind,
@@ -358,7 +442,8 @@ function projectApproval(
     created_at: createdAt.value,
     from_peer_id: from.value,
     tile_name: tile?.value ?? null,
-    ...(wasCut ? { cut: true as const } : {})
+    ...(wasCut ? { cut: true as const } : {}),
+    ...signal?.fields
   }
 }
 
@@ -416,7 +501,7 @@ function keepNewest<T>(items: T[], max: number): { kept: T[]; dropped: number } 
 export function projectAvatarInbox(sources: InboxRelaySources, frame: (content: AvatarInboxContent) => string): AvatarInboxContent {
   const approvals = keepNewest(
     newestLast(
-      sources.approvals.flatMap((a) => projectApproval(a, sources.tileName(a), sources.validateQuestions) ?? []),
+      sources.approvals.flatMap((a) => projectApproval(a, sources.tileName(a), sources.validateQuestions, sources.signals) ?? []),
       (a) => a.created_at
     ),
     MAX_INBOX_APPROVALS

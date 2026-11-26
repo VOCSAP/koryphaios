@@ -26,7 +26,7 @@ import type { reportError } from './log'
 /** At most one inbox frame per socket in this window; the latest state wins. */
 export const INBOX_PUSH_INTERVAL_MS = 250
 
-export type InboxRelaySourcesInput = Omit<InboxRelaySources, 'validateQuestions'>
+export type InboxRelaySourcesInput = Omit<InboxRelaySources, 'validateQuestions' | 'signals'>
 
 /** The journal and the batches whose journal write failed, deduplicated by broker id, each with its run state. */
 export function relayInboxMessages(
@@ -47,6 +47,8 @@ export function approvalTileName(approval: Approval, sessions: readonly { id: st
 export interface InboxPusherOptions {
   identity: AvatarDeckIdentity
   scopeGeneration: number
+  /** The Avatar of this socket negotiated a3_inbox_signals. */
+  signals: boolean
   sources(): InboxRelaySourcesInput
   send(text: string): void
   after(ms: number, fire: () => void): () => void
@@ -99,7 +101,7 @@ export function createInboxPusher(options: InboxPusherOptions): InboxPusher {
     cancelTimer = null
     if (stopped) return
     try {
-      const content = projectAvatarInbox({ ...options.sources(), validateQuestions }, (candidate) =>
+      const content = projectAvatarInbox({ ...options.sources(), validateQuestions, signals: options.signals }, (candidate) =>
         frameText(Number.MAX_SAFE_INTEGER, candidate)
       )
       const signature = JSON.stringify(content)

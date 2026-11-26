@@ -129,6 +129,22 @@ describe('projectAvatarBubble', () => {
     })
   })
 
+  test('a card carries the text flags and the danger view, its rule ids and messages neutralised', () => {
+    const entry = { id: `repo/x${RLO}`, source: 'repo', message: `m${ZWSP}\nn`, messageFrom: 'agent', known: true, confirmed: false } as const
+    const unnamed = { ...entry, id: 'kory/unknown', source: 'kory', message: null, messageFrom: 'deck', known: false } as const
+    const cardOf = (patch: Partial<InboxRelayApproval>) =>
+      projectAvatarBubble({ boxes: [box(DECK_A, { approvals: [approval(1, patch)] })], decks, lost: [], now: 0 }).reclame[0]!
+
+    const card = cardOf({ text_flags: ['bidi', 'control'], danger_view: { reevaluation: 'partial', entries: [entry, unnamed] } })
+    expect(card.textFlags).toEqual(['bidi', 'control'])
+    expect(card.dangerView).toEqual({
+      reevaluation: 'partial',
+      entries: [{ ...entry, id: `repo/x${REPLACEMENT}`, message: `m${REPLACEMENT} / n` }, unnamed]
+    })
+    expect(cardOf({})).toMatchObject({ textFlags: [] })
+    expect(cardOf({}).dangerView).toBeUndefined()
+  })
+
   test('a cut card offers deny and open-in-Deck, never allow', () => {
     const [card] = projectAvatarBubble({
       boxes: [box(DECK_A, { approvals: [approval(1, { cut: true })] })],

@@ -12,6 +12,8 @@ interface Props {
   className: string
   /** How a question's agent-written text is shown: the Deck makes its links clickable, another host may not. */
   renderText: (text: string) => ReactNode
+  /** The key wording the hidden-character badge, for a host that replaces those characters instead of revealing them. */
+  textFlagsLabel?: string
 }
 
 const TEXT_FLAG_LABELS = {
@@ -20,11 +22,19 @@ const TEXT_FLAG_LABELS = {
   invisible: 'inbox.textFlagInvisible'
 } as const
 
-function TextFlagsBadge({ t, flags }: { t: TFn; flags: ApprovalTextFlag[] }): React.JSX.Element {
+export function TextFlagsBadge({
+  t,
+  flags,
+  label = 'inbox.textFlagsBadge'
+}: {
+  t: TFn
+  flags: ApprovalTextFlag[]
+  label?: string
+}): React.JSX.Element {
   return (
     <span className="approval-danger-badge approval-text-flags">
       {GLYPH_BADGES.warning}
-      {t('inbox.textFlagsBadge')}
+      {t(label)}
       <code>{flags.map((flag) => t(TEXT_FLAG_LABELS[flag])).join(', ')}</code>
     </span>
   )
@@ -59,7 +69,7 @@ function DangerRow({ t, entry }: { t: TFn; entry: DangerViewEntry }): React.JSX.
   )
 }
 
-export function ApprovalRequestBody({ t, approval, dangerView, className, renderText }: Props): React.JSX.Element {
+export function ApprovalRequestBody({ t, approval, dangerView, className, renderText, textFlagsLabel }: Props): React.JSX.Element {
   const text = displayApprovalText(approval.question)
   const flags = approval.text_flags ?? []
   if (approval.kind !== 'permission') {
@@ -68,7 +78,7 @@ export function ApprovalRequestBody({ t, approval, dangerView, className, render
         <div className={className}>{renderText(text)}</div>
         {flags.length > 0 && (
           <div className="approval-signal">
-            <TextFlagsBadge t={t} flags={flags} />
+            <TextFlagsBadge t={t} flags={flags} label={textFlagsLabel} />
           </div>
         )}
       </>
@@ -83,7 +93,7 @@ export function ApprovalRequestBody({ t, approval, dangerView, className, render
         {rest && <div className="approval-command-rest">{rest}</div>}
       </div>
       <div className="approval-signal">
-        {flags.length > 0 && <TextFlagsBadge t={t} flags={flags} />}
+        {flags.length > 0 && <TextFlagsBadge t={t} flags={flags} label={textFlagsLabel} />}
         {dangerView?.entries.map((entry) => <DangerRow key={entry.id} t={t} entry={entry} />)}
         {dangerView && dangerView.reevaluation !== 'done' && (
           <span className="approval-danger-recheck">

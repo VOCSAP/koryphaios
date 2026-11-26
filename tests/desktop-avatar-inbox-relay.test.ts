@@ -42,7 +42,7 @@ function approval(id: string, title = 'Proceed?'): Approval {
   }
 }
 
-function harness(initial: Approval[] = [approval(ID)]) {
+function harness(initial: Approval[] = [approval(ID)], signals = false) {
   let clock = 1_000
   let current: InboxRelaySourcesInput = { approvals: initial, messages: [], closed: [], tileName: () => null }
   const sent: Array<Record<string, any>> = []
@@ -52,6 +52,7 @@ function harness(initial: Approval[] = [approval(ID)]) {
   const pusher = createInboxPusher({
     identity,
     scopeGeneration: 4,
+    signals,
     sources: () => current,
     send: (text) => {
       if (failSend) throw new Error('socket gone')
@@ -216,6 +217,7 @@ test('a source that throws is traced instead of escaping the push', () => {
     createInboxPusher({
       identity,
       scopeGeneration: 1,
+      signals: false,
       sources: () => {
         throw new Error('journal unreadable')
       },
@@ -319,4 +321,10 @@ test('an approval names the Deck tile it was raised from, or none', () => {
   const sessions = [{ id: 'tile-1', name: 'Builder' }]
   expect(approvalTileName(approval(ID), sessions)).toBe('Builder')
   expect(approvalTileName(approval(ID), [])).toBeNull()
+})
+
+test('a pusher relays the warning signals only when its Avatar negotiated them', () => {
+  const flagged: Approval = { ...approval(ID), text_flags: ['invisible'] }
+  expect(harness([flagged], true).sent[0]!.approvals[0].text_flags).toEqual(['invisible'])
+  expect(harness([flagged], false).sent[0]!.approvals[0].text_flags).toBeUndefined()
 })

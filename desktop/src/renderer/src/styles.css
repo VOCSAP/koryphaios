@@ -5539,7 +5539,10 @@ body:has(.rm-modal) .rm-conflict-modal {
   resize: vertical;
 }
 
+/* The companion serves this modal on a phone: without wrapping, the
+   right-aligned row overflows to the LEFT and the first button is cut. */
 .inbox-modal-actions {
+  flex-wrap: wrap;
   margin-top: 12px;
 }
 
@@ -10327,6 +10330,12 @@ html.avatar-bubble-document #avatar-bubble {
   gap: 8px;
   padding: 10px 12px;
   overflow-y: auto;
+}
+
+/* A scrolling child of a flex column shrinks first: without this the command
+   is squeezed to one line above the verdict buttons. The card scrolls instead. */
+.avb-card-text {
+  flex-shrink: 0;
 }
 
 .avb-card.is-blocking {

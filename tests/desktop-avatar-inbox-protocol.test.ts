@@ -9,9 +9,13 @@ import {
 } from '../shared/approval.ts'
 import {
   buildAvatarInboxSnapshot,
+  inboxActionAllowed,
   inboxFrameBytes,
   MAX_INBOX_ACTION_TEXT,
   MAX_INBOX_APPROVALS,
+  MAX_INBOX_DANGER,
+  MAX_INBOX_DANGER_ID,
+  MAX_INBOX_DANGER_MESSAGE,
   MAX_INBOX_FRAME_BYTES,
   MAX_INBOX_OPTION,
   MAX_INBOX_OPTIONS,
@@ -32,7 +36,7 @@ import {
   parseAvatarServerFrame,
   unsupportedAvatarCommandRequestId
 } from '../desktop/src/shared/avatar-protocol.ts'
-import type { Approval, InboxMessage } from '../desktop/src/shared/types.ts'
+import type { Approval, DangerViewEntry, InboxMessage } from '../desktop/src/shared/types.ts'
 
 const identity = { deckRunId: 'deck-run-1', broker_url: 'http://127.0.0.1:7899' }
 const SECRET_OPERATOR = 'operator-id-that-must-never-leave-the-deck'
@@ -89,6 +93,7 @@ function sources(overrides: Partial<InboxRelaySources> = {}): InboxRelaySources 
     closed: [],
     tileName: () => 'Tile one',
     validateQuestions,
+    signals: false,
     ...overrides
   }
 }
@@ -361,4 +366,85 @@ test('a command result carries an inbox outcome and its reason, within bounds', 
   })
   expect(() => parseAvatarDeckFrame({ type: 'command_result', requestId: 'request-1', ok: true, outcome: 'maybe' })).toThrow()
   expect(() => parseAvatarDeckFrame({ type: 'command_result', requestId: 'request-1', ok: true, reason: 'r'.repeat(257) })).toThrow()
+})
+
+const dangerEntry = (n: number, patch: Partial<DangerViewEntry> = {}): DangerViewEntry => ({
+  id: `kory/rule-${n}`,
+  source: 'kory',
+  message: `message ${n}`,
+  messageFrom: 'deck',
+  known: true,
+  confirmed: true,
+  ...patch
+})
+
+const permission = (entries: DangerViewEntry[], text_flags: Approval['text_flags'] = ['bidi']): Approval =>
+  approval(1, { kind: 'permission', reply_route: 'hook', text_flags, danger_view: { reevaluation: 'partial', entries } })
+
+const parsedFirst = (content: AvatarInboxContent) =>
+  parseAvatarInboxSnapshotFrame(JSON.parse(frameText(content)), validateQuestions).approvals[0]!
+
+test('text flags and the danger view reach only an Avatar that negotiated them', () => {
+  const approvals = [permission([dangerEntry(1)])]
+  const sent = parsedFirst(project(sources({ approvals, signals: true })))
+  expect(sent.text_flags).toEqual(['bidi'])
+  expect(sent.danger_view).toEqual({ reevaluation: 'partial', entries: [dangerEntry(1)] })
+  expect(sent.cut, 'signals within the bounds do not cut the approval').toBeUndefined()
+
+  const older = project(sources({ approvals })).approvals[0]!
+  expect(Object.keys(older).filter((key) => key === 'text_flags' || key === 'danger_view')).toEqual([])
+  expect(older.cut).toBeUndefined()
+})
+
+test('a signal the relay cannot carry whole marks the approval cut, so it is never allowed from a partial list', () => {
+  const relayed = (source: Approval) => parsedFirst(project(sources({ approvals: [source], signals: true })))
+  const bound = Array.from({ length: MAX_INBOX_DANGER }, (_, i) => dangerEntry(i))
+  expect(relayed(permission(bound)).cut).toBeUndefined()
+
+  const many = relayed(permission([...bound, dangerEntry(99)]))
+  expect(many.danger_view!.entries.map((e) => e.id)).toEqual(bound.map((e) => e.id))
+  expect(many.cut).toBe(true)
+  expect(inboxActionAllowed(many, 'allow')).toBe(false)
+
+  const longId = relayed(permission([dangerEntry(1), dangerEntry(2, { id: `repo/${'a'.repeat(MAX_INBOX_DANGER_ID)}`, source: 'repo' })]))
+  expect(longId.danger_view!.entries.map((e) => e.id), 'an id is never shortened into another rule name').toEqual(['kory/rule-1'])
+  expect(longId.cut).toBe(true)
+
+  const longMessage = relayed(permission([dangerEntry(1, { message: 'm'.repeat(MAX_INBOX_DANGER_MESSAGE + 1) })]))
+  expect(longMessage.danger_view!.entries[0]!.message).toHaveLength(MAX_INBOX_DANGER_MESSAGE)
+  expect(longMessage.cut).toBe(true)
+
+  const unknownFlag = relayed(permission([], ['bidi', 'novel' as never]))
+  expect(unknownFlag.text_flags).toEqual(['bidi'])
+  expect(unknownFlag.cut).toBe(true)
+})
+
+test('the Avatar parse refuses a signal outside its bounds or its closed sets', () => {
+  const base = project(sources({ approvals: [permission([dangerEntry(1)])], signals: true }))
+  const parse = (patch: Record<string, unknown>) =>
+    parseAvatarInboxSnapshotFrame(
+      JSON.parse(frameText({ ...base, approvals: [{ ...base.approvals[0]!, ...patch }] })),
+      validateQuestions
+    )
+  const view = (entries: unknown[], extra: Record<string, unknown> = {}) => ({ danger_view: { reevaluation: 'done', entries, ...extra } })
+  expect(() => parse({}), 'the untouched frame is accepted').not.toThrow()
+  expect(() => parse(view([dangerEntry(1, { message: null })]))).not.toThrow()
+
+  const refused: Array<[string, Record<string, unknown>]> = [
+    ['unknown flag', { text_flags: ['novel'] }],
+    ['too many flags', { text_flags: ['bidi', 'bidi', 'bidi', 'bidi'] }],
+    ['flags not a list', { text_flags: 'bidi' }],
+    ['too many entries', view(Array.from({ length: MAX_INBOX_DANGER + 1 }, (_, i) => dangerEntry(i)))],
+    ['long id', view([dangerEntry(1, { id: 'a'.repeat(MAX_INBOX_DANGER_ID + 1) })])],
+    ['empty id', view([dangerEntry(1, { id: '' })])],
+    ['long message', view([dangerEntry(1, { message: 'm'.repeat(MAX_INBOX_DANGER_MESSAGE + 1) })])],
+    ['unknown source', view([dangerEntry(1, { source: 'agent' as never })])],
+    ['unknown voice', view([dangerEntry(1, { messageFrom: 'kory' as never })])],
+    ['known not a boolean', view([dangerEntry(1, { known: 'yes' as never })])],
+    ['confirmed not a boolean', view([dangerEntry(1, { confirmed: 1 as never })])],
+    ['extra entry field', view([{ ...dangerEntry(1), command: 'x' }])],
+    ['extra view field', view([], { raw: [] })],
+    ['unknown reevaluation', { danger_view: { reevaluation: 'safe', entries: [] } }]
+  ]
+  for (const [name, patch] of refused) expect(() => parse(patch), name).toThrow()
 })

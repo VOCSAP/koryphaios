@@ -339,13 +339,29 @@ test('asks for a3_inbox only when it has an inbox to relay, and relays it after 
   const { client, posts, socket } = await inboxHarness(['a3_context', 'a3_inbox'])
   expect(posts[0]).toEqual({
     path: '/attach',
-    body: { protocol_version: 1, ...deck, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace'] }
+    body: { protocol_version: 1, ...deck, capabilities: ['a3_context', 'a3_inbox', 'a3_notify_replace', 'a3_inbox_signals'] }
   })
   const frames = socket.sent.filter((frame) => frame.type === 'inbox_snapshot')
   expect(frames).toHaveLength(1)
   expect(frames[0]).toMatchObject({ seq: 1, scope_generation: 5, ...identity })
   expect((frames[0]!.approvals as Array<{ id: string }>).map((a) => a.id)).toEqual([APPROVAL_ID])
   await client.stop()
+})
+
+test('sends the warning signals only to an Avatar that granted a3_inbox_signals', async () => {
+  const flagged = { ...(inboxApproval() as object), text_flags: ['bidi'] } as never
+  const inbox: AvatarClientOptions['inbox'] = {
+    sources: () => ({ approvals: [flagged], messages: [], closed: [], tileName: () => null }),
+    act: async () => ({ outcome: 'won' })
+  }
+  const relayedFlags = async (granted: readonly string[]) => {
+    const { client, socket } = await inboxHarness(granted, { inbox })
+    const frame = socket.sent.find((sent) => sent.type === 'inbox_snapshot')!
+    await client.stop()
+    return (frame.approvals as Array<{ text_flags?: string[] }>)[0]!.text_flags
+  }
+  expect(await relayedFlags(['a3_context', 'a3_inbox', 'a3_inbox_signals'])).toEqual(['bidi'])
+  expect(await relayedFlags(['a3_context', 'a3_inbox']), 'an older Avatar refuses an unknown field').toBeUndefined()
 })
 
 test('relays nothing and refuses inbox_action as unsupported when the Avatar did not grant a3_inbox', async () => {
