@@ -45,14 +45,17 @@ import {
 } from "./paired-hosts.ts";
 import {
   deviceName,
+  onApprovalTap,
   openHost,
   openStore,
   reloadKey,
   scanQr,
   startApprovalService,
   stopApprovalService,
+  takeApprovalId,
 } from "./platform.ts";
 import type { KeyValueStore } from "./storage.ts";
+import { isDeepLinkApprovalId } from "../../src/shared/companion.ts";
 
 type Mode = "companion" | "approvals";
 
@@ -107,6 +110,19 @@ async function open(host: PairedHost, approvalId = ""): Promise<void> {
     fingerprint: host.fingerprint,
     seedScript: token ? "" : companionResumeScript(host),
   });
+}
+
+async function openTappedApproval(): Promise<void> {
+  try {
+    const approvalId = await takeApprovalId();
+    if (!isDeepLinkApprovalId(approvalId)) return;
+    // The viewer may have left the resume credential after the last collection.
+    await collectFromViewer();
+    const host = selectedHost(loadHosts(store));
+    if (host) await open(host, approvalId);
+  } catch (e) {
+    setNotice(`Could not open the request: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +405,9 @@ export async function boot(): Promise<void> {
       void collectFromViewer().then(render);
     });
   }
+
+  onApprovalTap(() => void openTappedApproval());
+  await openTappedApproval();
 }
 
 if (typeof document !== "undefined") {

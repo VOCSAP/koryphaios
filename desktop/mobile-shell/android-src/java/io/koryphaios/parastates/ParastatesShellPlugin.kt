@@ -4,7 +4,7 @@ package io.koryphaios.parastates
 //
 // Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
-// Four methods, matching the `ParastatesShell` interface declared in
+// The methods match the `ParastatesShell` interface declared in
 // `../src/platform.ts`. Each one is a capability a WebView cannot have; every
 // one of them degrades to a documented no-op when the plugin is absent, which
 // is what keeps the app runnable in a plain browser for development.
@@ -71,6 +71,15 @@ class ParastatesShellPlugin : Plugin() {
         // MODEL rather than a user-set device name: it needs no permission and
         // it is only ever a label in the Deck's paired-devices list.
         call.resolve(JSObject().put("name", "${Build.MANUFACTURER} ${Build.MODEL}".trim()))
+    }
+
+    @PluginMethod
+    fun takeApprovalId(call: PluginCall) {
+        // The activity's lock state and pending id belong to the UI thread.
+        activity.runOnUiThread {
+            val approvalId = (activity as? MainActivity)?.takeApprovalId().orEmpty()
+            call.resolve(JSObject().put("approvalId", approvalId))
+        }
     }
 
     /**

@@ -243,7 +243,7 @@ unresolved references — in `android/app/build.gradle`:
 
 ```gradle
 dependencies {
-    // MainActivity: the biometric gate on resume.
+    // MainActivity: the biometric gate on launch and on resume.
     implementation "androidx.biometric:biometric:1.1.0"
     // CompanionWebView: addDocumentStartJavaScript, the only API that
     // guarantees the resume credential is in place before the page's script.
@@ -262,6 +262,9 @@ Both resolved and compiled under compileSdk 36: `biometric` at the pinned
 `<activity>` go inside the existing `<application>`; the permissions at
 manifest level, before `<application>`. `INTERNET` is already there — do not
 add it twice.
+
+An existing local `android/` needs the `.kt` files copied again AND the
+`ApprovalTapActivity` manifest block merged before its next build.
 
 ### 5.3 Why `android/` is copied into rather than committed
 

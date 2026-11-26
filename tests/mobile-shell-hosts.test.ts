@@ -6,6 +6,7 @@
 // other's state.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   absorbPendingCredential,
   absorbPendingPin,
@@ -30,6 +31,7 @@ import {
 } from "../desktop/mobile-shell/src/paired-hosts.ts";
 import { MemoryStore } from "../desktop/mobile-shell/src/storage.ts";
 import { COMPANION_CRED_STORAGE_KEY } from "../desktop/src/shared/companion.ts";
+import { extractParenBody } from "./_braced-body.ts";
 
 const FP = "a".repeat(64);
 const T0 = 1_700_000_000_000;
@@ -228,6 +230,199 @@ describe("trust on first use actually pins", () => {
       expect(absorbPendingPin(store, T0).hosts[0]!.fingerprint).toBe("");
       expect(store.get(PENDING_PIN_KEY)).toBeNull();
     }
+  });
+});
+
+describe("a tapped notification opens its request on the selected host", () => {
+  const OTHER = "https://10.0.0.20:8443";
+  const SELECTED = "https://10.0.0.21:8443";
+  const ID = "0bc8cbab-3a77-440d-b5ea-d1bc649e2907";
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  function pairedPrefs(credential: string): Record<string, string> {
+    const store = new MemoryStore();
+    for (const url of [OTHER, SELECTED]) addHost(store, parseCompanionQr(qr(url))!, T0);
+    if (credential) rememberCredential(store, SELECTED, credential, T0);
+    return { [HOSTS_KEY]: store.get(HOSTS_KEY)!, [SELECTED_KEY]: store.get(SELECTED_KEY)! };
+  }
+
+  /** Boots the real shell against a fake device, the native plugin handing each pending id over once. */
+  async function onDevice(
+    prefs: Record<string, string>,
+    pending: string,
+    run: (device: { opened: string[]; tap: (id: string) => Promise<void>; shown: () => string }) => void | Promise<void>,
+    failure?: Error
+  ): Promise<void> {
+    const { boot } = await import("../desktop/mobile-shell/src/app.ts");
+    const node = () => ({
+      className: "",
+      textContent: "",
+      children: [] as { className: string; textContent: string }[],
+      append(...added: { className: string; textContent: string }[]) {
+        this.children.push(...added);
+      },
+      replaceChildren() {
+        this.children = [];
+      },
+    });
+    const nodes: Record<string, ReturnType<typeof node>> = { tabs: node(), view: node() };
+    const listeners: Record<string, () => void> = {};
+    const opened: string[] = [];
+    const g = globalThis as { window?: unknown; document?: unknown };
+    const saved = { window: g.window, document: g.document };
+    g.document = {
+      hidden: false,
+      getElementById: (id: string) => nodes[id],
+      createElement: node,
+      addEventListener: () => {},
+    };
+    g.window = {
+      addEventListener: (name: string, listener: () => void) => {
+        listeners[name] = listener;
+      },
+      Capacitor: {
+        Plugins: {
+          Preferences: {
+            get: async ({ key }: { key: string }) => ({ value: prefs[key] ?? null }),
+            set: async ({ key, value }: { key: string; value: string }) => void (prefs[key] = value),
+            remove: async ({ key }: { key: string }) => void delete prefs[key],
+          },
+          ParastatesShell: {
+            deviceName: async () => ({ name: "phone" }),
+            openHost: async ({ url }: { url: string }) => void opened.push(url),
+            takeApprovalId: async () => {
+              if (failure) throw failure;
+              const approvalId = pending;
+              pending = "";
+              return { approvalId };
+            },
+          },
+        },
+      },
+    };
+    try {
+      await boot();
+      await settle();
+      await run({
+        opened,
+        tap: async (id) => {
+          pending = id;
+          listeners["parastatesApproval"]!();
+          await settle();
+        },
+        shown: () =>
+          nodes.view!.children
+            .filter((c) => c.className === "notice")
+            .map((c) => c.textContent)
+            .join(),
+      });
+    } finally {
+      g.window = saved.window;
+      g.document = saved.document;
+    }
+  }
+
+  test("at launch, then again while the app is already open", async () => {
+    await onDevice(pairedPrefs("cred-1"), ID, async ({ opened, tap }) => {
+      expect(opened).toEqual([`${SELECTED}/#a=${ID}`]);
+      await tap("second-request");
+      expect(opened).toEqual([`${SELECTED}/#a=${ID}`, `${SELECTED}/#a=second-request`]);
+    });
+  });
+
+  test("a credential the viewer harvested since launch is used", async () => {
+    const prefs = pairedPrefs("");
+    await onDevice(prefs, "", async ({ opened, tap }) => {
+      prefs[PENDING_CRED_KEY] = JSON.stringify({ url: SELECTED, credential: "cred-2" });
+      await tap(ID);
+      expect(opened).toEqual([`${SELECTED}/#a=${ID}`]);
+    });
+  });
+
+  test("an id from an Intent that the Deck would refuse opens nothing", async () => {
+    await onDevice(pairedPrefs("cred-1"), "a&t=forged", async ({ opened, tap, shown }) => {
+      await tap("x".repeat(65));
+      expect(opened).toEqual([]);
+      expect(shown()).toBe("");
+    });
+  });
+
+  test("with no paired host nothing opens and nothing is reported", async () => {
+    await onDevice({}, ID, ({ opened, shown }) => {
+      expect(opened).toEqual([]);
+      expect(shown()).toBe("");
+    });
+  });
+
+  test("a native failure is shown in the shell", async () => {
+    await onDevice(
+      pairedPrefs("cred-1"),
+      ID,
+      ({ shown }) => {
+        expect(shown()).toContain("bridge down");
+      },
+      new Error("bridge down")
+    );
+  });
+});
+
+// A source scan: bun cannot import the Kotlin and the test run does not compile
+// it, so a rename on one side would otherwise be silent.
+describe("the Android side, read as text", () => {
+  const read = (path: string) => readFileSync(new URL(`../desktop/mobile-shell/${path}`, import.meta.url), "utf8");
+  const kotlin = (name: string) => read(`android-src/java/io/koryphaios/parastates/${name}.kt`);
+  const plugin = kotlin("ParastatesShellPlugin");
+  const platform = read("src/platform.ts");
+
+  function only(source: string, anchor: RegExp): string {
+    const found = [...source.matchAll(anchor)];
+    expect(found).toHaveLength(1);
+    return found[0]![1]!;
+  }
+
+  test("the plugin method the shell calls exists", () => {
+    const methods = [...plugin.matchAll(/@PluginMethod\s+fun (\w+)\(/g)].map((m) => m[1]);
+    expect(methods).toContain(only(platform, /const res = await plugins\(\)\.ParastatesShell\?\.(\w+)\(\);/g));
+  });
+
+  test("the key the plugin resolves is the one the shell reads", () => {
+    expect(only(plugin, /JSObject\(\)\.put\("(\w+)", approvalId\)/g)).toBe(
+      only(platform, /return res\?\.(\w+) \?\? "";/g)
+    );
+  });
+
+  test("the event the activity fires is the one the shell listens for", () => {
+    expect(only(kotlin("MainActivity"), /triggerWindowJSEvent\("(\w+)"\)/g)).toBe(
+      only(platform, /window\.addEventListener\("(\w+)", listener\)/g)
+    );
+  });
+
+  test("the activity a notification tap lands on is not exported", () => {
+    const manifest = read("android-src/AndroidManifest-additions.xml");
+    const block = only(manifest, /(<activity\s+android:name="\.ApprovalTapActivity"[^>]*>)/g);
+    expect(block, "any app could hand the shell an approval id through an exported ApprovalTapActivity").toContain(
+      'android:exported="false"'
+    );
+  });
+
+  test("the notification targets that activity with an immutable PendingIntent", () => {
+    const service = kotlin("ApprovalService");
+    const opening = "PendingIntent.getActivity(";
+    expect(service.split(opening), "one PendingIntent opens the app from a notification").toHaveLength(2);
+    const args = extractParenBody(service, service.indexOf(opening) + opening.length - 1, true);
+    expect(args, "the approval id must enter through the non-exported activity").toContain(
+      "Intent(this, ApprovalTapActivity::class.java)"
+    );
+    expect(args, "a mutable PendingIntent lets its holder rewrite the approval id").toContain(
+      "PendingIntent.FLAG_IMMUTABLE"
+    );
+  });
+
+  test("the exported activity reads nothing from its Intent", () => {
+    expect(
+      kotlin("MainActivity"),
+      "MainActivity is exported: an approval id read from its Intent can come from any app"
+    ).not.toMatch(/\bget\w*Extras?\b|\bextras\b/);
   });
 });
 

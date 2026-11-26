@@ -50,6 +50,16 @@
       </intent-filter>
     </receiver>
 
+    <!-- Where a notification tap lands. NOT exported: it is the only way an
+         approval id reaches the app. It draws nothing and has its own throwaway
+         task, since all it does is forward to MainActivity. -->
+    <activity
+      android:name=".ApprovalTapActivity"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:taskAffinity=""
+      android:theme="@android:style/Theme.NoDisplay" />
+
     <!-- Companion mode's viewer. Its own task so backing out returns to the
          host picker rather than leaving the app. -->
     <activity

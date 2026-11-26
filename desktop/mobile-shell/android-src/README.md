@@ -30,7 +30,8 @@ here are copied into it and the manifest blocks merged.
 
 | File | Covers |
 |---|---|
-| `java/io/koryphaios/parastates/MainActivity.kt` | `FLAG_SECURE`, biometric gate on resume |
+| `java/io/koryphaios/parastates/MainActivity.kt` | `FLAG_SECURE`, biometric gate on launch and on resume |
+| `java/io/koryphaios/parastates/ApprovalTapActivity.kt` | the non-exported activity a notification tap lands on; hands the approval id to `MainActivity` |
 | `java/io/koryphaios/parastates/ParastatesShellPlugin.kt` | the `ParastatesShell` bridge `platform.ts` calls |
 | `java/io/koryphaios/parastates/ApprovalService.kt` | the foreground service that keeps listening in Doze |
 | `java/io/koryphaios/parastates/CompanionWebView.kt` | the paired-Deck viewer: certificate pinning, credential round trip |

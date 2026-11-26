@@ -170,9 +170,9 @@ class ApprovalService : android.app.Service() {
         val open = PendingIntent.getActivity(
             this,
             approvalId.hashCode(),
-            Intent(this, MainActivity::class.java)
+            Intent(this, ApprovalTapActivity::class.java)
                 .putExtra("approvalId", approvalId)
-                .setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

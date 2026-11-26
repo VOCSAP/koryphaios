@@ -33,6 +33,7 @@ interface CapacitorPlugins {
     stopApprovalService(): Promise<void>;
     openHost(o: { url: string; fingerprint: string; seedScript: string }): Promise<void>;
     deviceName(): Promise<{ name: string }>;
+    takeApprovalId(): Promise<{ approvalId: string }>;
   };
 }
 
@@ -200,6 +201,22 @@ export async function deviceName(): Promise<string> {
     /* fall through */
   }
   return "phone";
+}
+
+/**
+ * The approval a notification tap asked for, "" when there is none.
+ *
+ * The native side hands it over once, and only while the app is unlocked. The
+ * value comes from an Intent any app can send, so the caller validates it.
+ */
+export async function takeApprovalId(): Promise<string> {
+  const res = await plugins().ParastatesShell?.takeApprovalId();
+  return res?.approvalId ?? "";
+}
+
+/** Called when the native side has an approval to hand over to a running shell. */
+export function onApprovalTap(listener: () => void): void {
+  window.addEventListener("parastatesApproval", listener);
 }
 
 /**
