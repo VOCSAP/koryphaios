@@ -2497,8 +2497,8 @@ export function createPeersSession(input: PeersSessionInput, deps: PeersSessionD
     }
     const missed = outages ?? 0;
     const base = identityKept
-      ? "claude-peers reconnected after a daemon restart; calls made during the outage failed; run check_messages"
-      : `claude-peers reconnected after a daemon restart; you are now peer \`${myPeerId}\``;
+      ? "claude-peers reconnected after a daemon restart; calls made during the outage failed; run /mcp and reconnect this server to refresh its tools, then run check_messages"
+      : `claude-peers reconnected after a daemon restart; you are now peer \`${myPeerId}\`; run /mcp and reconnect this server to refresh its tools`;
     const text = missed > 0 ? `${base} (${missed} outage(s) since the previous notice)` : base;
     noticeAt = t;
     outages = 0;

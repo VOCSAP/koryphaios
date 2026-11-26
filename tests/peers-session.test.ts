@@ -1056,7 +1056,8 @@ describe("closing a session that still has work in flight", () => {
 });
 
 const TICKET_GENERATION = canonicalWriterGeneration(GENERATION);
-const KEPT_NOTICE = "claude-peers reconnected after a daemon restart; calls made during the outage failed; run check_messages";
+const KEPT_NOTICE =
+  "claude-peers reconnected after a daemon restart; calls made during the outage failed; run /mcp and reconnect this server to refresh its tools, then run check_messages";
 
 function ticket(over: Partial<TicketClaims> = {}): ResumeOutcome {
   return {
@@ -1184,7 +1185,9 @@ describe("resuming after a daemon restart", () => {
     expect(body.resume_instance_token).toBeUndefined();
     expect(body.pid_generation).toBeUndefined();
     await until(() => channelTexts(h).length === 1, "the reconnection notice");
-    expect(channelTexts(h)[0]).toContain("you are now peer `peer-1`");
+    expect(channelTexts(h)).toEqual([
+      "claude-peers reconnected after a daemon restart; you are now peer `peer-1`; run /mcp and reconnect this server to refresh its tools",
+    ]);
   });
 
   test("a broker that refuses the token gives a new identity: the ticket is never taken as the proof", async () => {
