@@ -3772,7 +3772,7 @@ test("a failure to deliver, or a refusal that concerns the route and not a card,
   for (const [status, body] of failures) {
     const { a, b } = await queuePair(`route-${status}`);
     const seen = queueDeltaSeen.length;
-    const reported = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+    const refusedBefore = await refusedMutationIds();
     const logStart = readFileSync(logPath, "utf-8").length;
 
     queueDeltaOverride = { status, body };
@@ -3789,7 +3789,7 @@ test("a failure to deliver, or a refusal that concerns the route and not a card,
       expect([status, "last_error is not the delivery's", state.last_error ?? ""].join(" ")).not.toContain("queue-delta");
       expect([status, outboxCount(), "the mutation stays"]).toEqual([status, 1, "the mutation stays"]);
       expect([status, ...(await ranksOf(replica, [a, b]))]).toEqual([status, 2, 1]);
-      expect(state.queue_outbox?.refused.length, `${status} is not a refusal of the mutation`).toBe(reported);
+      expect(await newRefusals(refusedBefore), `${status} is not a refusal of the mutation`).toEqual([]);
       const sent = queueDeltaSeen.slice(seen);
       expect(sent.length).toBeGreaterThanOrEqual(2);
       expect(new Set(sent.map((s) => s.mutation_id)).size, "every retry carries the same mutation id").toBe(1);
@@ -3903,7 +3903,7 @@ test("a second mutation refused after the first was acknowledged gives back the 
 
 test("a card the mutation covers that turns terminal before the tick does not make the mutation refused", async () => {
   const [a, b, c] = (await queueCards("covered-terminal", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
-  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  const refusedBefore = await refusedMutationIds();
 
   await goOffline();
   expect(
@@ -3919,10 +3919,7 @@ test("a card the mutation covers that turns terminal before the tick does not ma
 
   await waitRanks("the swap reaches the upstream", upstream, a, b, 2, 1);
   await journalEmpties();
-  expect(["the swap was not refused", (await syncStatus()).queue_outbox?.refused.length]).toEqual([
-    "the swap was not refused",
-    refusals,
-  ]);
+  expect(await newRefusals(refusedBefore), "the swap was not refused").toEqual([]);
   expect(["the swap and the cleared rank", ...(await ranksOf(upstream, [b, a, c]))]).toEqual([
     "the swap and the cleared rank",
     1,
@@ -3933,7 +3930,7 @@ test("a card the mutation covers that turns terminal before the tick does not ma
 
 test("a covered card that turns terminal waits while the mutation that covers it is sent and unanswered", async () => {
   const [a, b, c] = (await queueCards("sent-terminal", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
-  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  const refusedBefore = await refusedMutationIds();
   const seen = queueDeltaSeen.length;
   const pushed = pushSeen.length;
 
@@ -3963,7 +3960,7 @@ test("a covered card that turns terminal waits while the mutation that covers it
   await waitRanks("the kept mutation applies", upstream, a, b, 2, 1);
   await waitForItem("the card turns terminal upstream once the mutation settled", upstream, c.id, (i) => i.status === "done");
   await journalEmpties();
-  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  expect(await newRefusals(refusedBefore), "no mutation was refused").toEqual([]);
   expect(await ranksOf(upstream, [b, a, c])).toEqual([1, 2, null]);
 }, 90_000);
 
@@ -4064,7 +4061,7 @@ test("a gesture journaled while another project's mutation is in flight is sent 
 /** A gesture that names `b` is waiting; `b` turns terminal by `turnTerminal`, and the rest of the gesture must still reach the upstream. */
 async function terminalCardLeavesTheEntry(tag: string, turnTerminal: (b: RoadmapItem) => Promise<void>): Promise<void> {
   const [a, b, c, d] = (await queueCards(tag, 4)) as [RoadmapItem, RoadmapItem, RoadmapItem, RoadmapItem];
-  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  const refusedBefore = await refusedMutationIds();
   holdQueueDelivery();
   try {
     expect(
@@ -4083,7 +4080,7 @@ async function terminalCardLeavesTheEntry(tag: string, turnTerminal: (b: Roadmap
     pullSuppressed = false;
   }
   await journalEmpties();
-  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  expect(await newRefusals(refusedBefore), "no mutation was refused").toEqual([]);
   const order = await ranksOf(upstream, [a, d, c]);
   expect(["the rest of the gesture applied", order[0]! < order[1]!, order[1]! < order[2]!]).toEqual([
     "the rest of the gesture applied",
@@ -4305,7 +4302,7 @@ test("a rank below the whole queue, after its head went done, puts the card firs
 
 test("a card the upstream turns done while an unsent entry names it leaves the entry, which is not refused", async () => {
   const [a, b, c, d] = (await queueCards("pulled-terminal", 4)) as [RoadmapItem, RoadmapItem, RoadmapItem, RoadmapItem];
-  const refusals = (await syncStatus()).queue_outbox?.refused.length ?? 0;
+  const refusedBefore = await refusedMutationIds();
   holdQueueDelivery();
   try {
     expect(
@@ -4327,7 +4324,7 @@ test("a card the upstream turns done while an unsent entry names it leaves the e
     pullQueueRevsOverride = undefined;
   }
   await journalEmpties();
-  expect(["no refusal", (await syncStatus()).queue_outbox?.refused.length]).toEqual(["no refusal", refusals]);
+  expect(await newRefusals(refusedBefore), "no mutation was refused").toEqual([]);
   const order = await ranksOf(upstream, [a, d, c]);
   expect(["the rest of the gesture applied", order[0]! < order[1]!, order[1]! < order[2]!]).toEqual([
     "the rest of the gesture applied",
@@ -4339,6 +4336,11 @@ test("a card the upstream turns done while an unsent entry names it leaves the e
 /** The status keeps the last 20 refusals only, so a count cannot tell a new one from a shifted one. */
 async function refusedMutationIds(): Promise<string[]> {
   return ((await syncStatus()).queue_outbox?.refused ?? []).map((r) => r.mutation_id);
+}
+
+/** The refusals recorded since `before`, a reading of `refusedMutationIds`. */
+async function newRefusals(before: string[]): Promise<string[]> {
+  return (await refusedMutationIds()).filter((id) => !before.includes(id));
 }
 
 /**
@@ -5027,6 +5029,10 @@ test("an entry of more than 500 operations is refused in the open and the upstre
       JSON.stringify(Array.from({ length: 501 }, () => ({ op: "place", ids: [a.id], at: "end" }))),
       JSON.stringify({ [a.id]: 1, [b.id]: 2, [c.id]: 3 }),
     ]);
+    // Away from the withheld ranks, so that only the refusal path can bring those back.
+    for (const [card, rank] of [[a, 3], [b, 1], [c, 2]] as const) {
+      db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [rank, card.id]);
+    }
     db.close();
   } finally {
     pullSuppressed = false;
