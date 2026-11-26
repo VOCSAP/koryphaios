@@ -745,7 +745,7 @@ export const DECK_ONLY_TOOLS = [
         },
         recommended: {
           type: "integer" as const,
-          description: "0-based index in options of your pick.",
+          description: "When you prefer an option, set its 0-based index.",
         },
         blocking: {
           type: "boolean" as const,

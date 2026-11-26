@@ -54,7 +54,7 @@ Tu décides seul :
 | Situation | Action |
 |---|---|
 | **Vraie incohérence** : deux sources d'autorité se contredisent (carte contre code mesuré, consigne opérateur contre contrat, test vert contre écran cassé), ou une action ferait perdre du travail d'autrui | ARRÊT de la ligne concernée. Explication à l'écran, puis `ask_operator`. Tu ne devines pas. |
-| **Arbitrage opérateur** : comportement produit, contrat public ou d'agent, périmètre contre coût, sécurité, promesse mesurée fausse, carte à tuer ou à redimensionner | Explication à l'écran, puis `ask_operator` avec 2 à 4 `options` et ton hypothèse de travail dans `question`. La carte attend. |
+| **Arbitrage opérateur** : comportement produit, contrat public ou d'agent, périmètre contre coût, sécurité, promesse mesurée fausse, carte à tuer ou à redimensionner | Explication à l'écran, puis `ask_operator` avec 2 à 4 `options` et `recommended` = l'index (base 0) de ton hypothèse de travail. La carte attend. |
 | **Doute qu'une mesure lèverait** | Pas de question : tu fais mesurer par un worker. |
 | Le reste : progression, relance, test rouge en diagnostic | Selon le niveau (section 1). |
 
