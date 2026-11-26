@@ -4,7 +4,7 @@
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1879,5 +1879,44 @@ test("a lock sweep period outside 1..86400 or not an integer falls back to the d
     });
   } finally {
     await Promise.all(probes.map((probe) => (probe.status === "fulfilled" ? stopBroker(probe.value) : undefined)));
+  }
+}, 60_000);
+
+test("every unusable timer period of a broker is named in a warning, bounded, and arms no runaway timer", async () => {
+  const periods = [
+    ["CLAUDE_PEERS_DORMANT_SWEEP_SEC", "0", "1 and 86400, using 1"],
+    ["CLAUDE_PEERS_CLEAN_INTERVAL_SEC", "-5", "1 and 86400, using 1"],
+    ["CLAUDE_PEERS_PURGE_INTERVAL_SEC", "1", "60 and 86400, using 60"],
+    ["CLAUDE_PEERS_SYNC_TICK_MS", "150", "200 and 86400000, using 200"],
+    ["CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC", "0", "1 and 86400, using 1"],
+    ["CLAUDE_PEERS_LOCK_SWEEP_SEC", "0", "1 and 86400, using 60"],
+    ["CLAUDE_PEERS_DELEGATION_SWEEP_SEC", "3000000000", "1 and 86400, using 15"],
+  ] as const;
+  // A replica, the only mode that arms the sync timer; nothing listens upstream.
+  const b = await startBroker({
+    ...Object.fromEntries(periods.map(([name, value]) => [name, value])),
+    CLAUDE_PEERS_BROKER_URL: "http://127.0.0.1:1",
+    CLAUDE_PEERS_BROKER_TOKEN: "x".repeat(32),
+    CLAUDE_PEERS_OFFLINE_REPLICA: "1",
+  });
+  try {
+    const lines = readFileSync(join(b.tmpDir, "logs", "broker.log"), "utf8").split("\n");
+    const missing = periods
+      .map(([name, , verdict]) => `${name} is not an integer between ${verdict}`)
+      .filter((warning) => !lines.some((line) => line.includes("WARN") && new RegExp(`${warning}(?!\\d)`).test(line)));
+    expect(missing, "variables without their own bounds and fallback warning").toEqual([]);
+    const boot = lines.find((line) => line.includes("listening on")) ?? "";
+    expect(boot.match(/(sweep_interval|purge_interval|sync_tick)=\w+/g)?.sort()).toEqual([
+      "purge_interval=60s",
+      "sweep_interval=1s",
+      "sync_tick=200ms",
+    ]);
+    const stderr = readdirSync(b.tmpDir)
+      .filter((file) => file.startsWith("broker-stderr"))
+      .map((file) => readFileSync(join(b.tmpDir, file), "utf8"))
+      .join("");
+    expect(stderr.match(/Timeout\w+Warning/g), "timers armed with an unusable delay").toBeNull();
+  } finally {
+    await stopBroker(b);
   }
 }, 60_000);

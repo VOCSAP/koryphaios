@@ -62,6 +62,7 @@ import {
 import { createPeerTelemetryImportCache, createPeerTelemetryRegistry } from "./shared/peer-telemetry-registry.ts";
 import type { MessageContextSnapshot, MessageContextSource, PeerTelemetrySnapshot } from "./shared/peer-telemetry.ts";
 import { guardedInterval as guardInterval } from "./shared/guarded-interval.ts";
+import { envInt, type EnvIntRule } from "./shared/env-int.ts";
 import { measureWriterGeneration } from "./shared/process-generation.ts";
 import {
   keepsActiveWithoutHeartbeat,
@@ -414,21 +415,35 @@ const ACTIVE_STALE_SEC = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_ACTIVE_STALE_SEC ?? "120", 10)
 );
-const SWEEP_INTERVAL_SEC = Math.max(
-  1,
-  parseInt(process.env.CLAUDE_PEERS_DORMANT_SWEEP_SEC ?? "60", 10)
-);
-const CLEAN_INTERVAL_MS = Math.max(
-  1_000,
-  parseInt(process.env.CLAUDE_PEERS_CLEAN_INTERVAL_SEC ?? "30", 10) * 1000
-);
+
+// Rolling file log (PLAN-observabilite-erreurs O1/O2). The broker daemon often
+// outlives the stderr of whoever spawned it (server.ts spawns it detached), so
+// it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
+const log = createLogger({ dir: coreLogDir(), name: "broker" }).child("broker");
+
+const DAY_SEC = 86_400;
+/** `envInt` over this process's environment, reporting to the broker log. */
+const envDuration = (name: string, rule: EnvIntRule): number =>
+  envInt(name, process.env[name], rule, (message, context) => log.warn(message, context));
+
+const SWEEP_INTERVAL_SEC = envDuration("CLAUDE_PEERS_DORMANT_SWEEP_SEC", {
+  min: 1,
+  max: DAY_SEC,
+  fallback: 60,
+  belowMin: "min",
+});
+const CLEAN_INTERVAL_MS =
+  envDuration("CLAUDE_PEERS_CLEAN_INTERVAL_SEC", { min: 1, max: DAY_SEC, fallback: 30, belowMin: "min" }) * 1000;
 // Roadmap work-lock sweep (PLAN K2): TTL without any write on the item, grace
 // period before an owner-less lock is released, and sweep cadence.
 const LOCK_TTL_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_TTL_SEC ?? "21600", 10));
 const LOCK_GRACE_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_GRACE_SEC ?? "600", 10));
-const lockSweepSecEnv = Number(process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC ?? 60);
-const LOCK_SWEEP_SEC =
-  Number.isSafeInteger(lockSweepSecEnv) && lockSweepSecEnv >= 1 && lockSweepSecEnv <= 86_400 ? lockSweepSecEnv : 60;
+const LOCK_SWEEP_SEC = envDuration("CLAUDE_PEERS_LOCK_SWEEP_SEC", {
+  min: 1,
+  max: DAY_SEC,
+  fallback: 60,
+  belowMin: "fallback",
+});
 // Card aaf4537d: a PARKED card (Pause stop) is immune to the two clauses
 // above for up to this long -- its own, dedicated env var, never mixed with
 // LOCK_TTL_SEC/LOCK_GRACE_SEC (a park is an operator's 24h decision, not an
@@ -461,10 +476,12 @@ const OPERATOR_INBOX_SESSION_TTL_MIN = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_OPERATOR_INBOX_SESSION_TTL_MIN ?? "1440", 10)
 );
-const PURGE_INTERVAL_SEC = Math.max(
-  60,
-  parseInt(process.env.CLAUDE_PEERS_PURGE_INTERVAL_SEC ?? "3600", 10)
-);
+const PURGE_INTERVAL_SEC = envDuration("CLAUDE_PEERS_PURGE_INTERVAL_SEC", {
+  min: 60,
+  max: DAY_SEC,
+  fallback: 3600,
+  belowMin: "min",
+});
 
 // Replication (DESIGN-OFFLINE-REPLICA). BROKER_MODE is read from the ONE
 // function that decides it, so the broker and its clients cannot disagree on
@@ -478,10 +495,12 @@ const UPSTREAM_URL = upstreamUrl(config);
 const SERVE_REPLICAS = config.serve_replicas;
 // Cadence of the replication pass. Floored at 200 ms: a lower value would
 // spend the broker's time on round-trips rather than on serving its clients.
-const SYNC_TICK_MS = Math.max(
-  200,
-  parseInt(process.env.CLAUDE_PEERS_SYNC_TICK_MS ?? "5000", 10)
-);
+const SYNC_TICK_MS = envDuration("CLAUDE_PEERS_SYNC_TICK_MS", {
+  min: 200,
+  max: DAY_SEC * 1000,
+  fallback: 5000,
+  belowMin: "min",
+});
 // Ceiling of a pull page, applied to the caller's `limit` as well as used as
 // its default.
 const SYNC_PULL_LIMIT_MAX = 500;
@@ -500,21 +519,10 @@ const MIRROR_ACTIVE_STALE_SEC = mirrorStaleSec(ACTIVE_STALE_SEC, SYNC_BACKOFF_MA
 /** A replica's copy of an upstream peer; an upstream's relay of a replica's peer sets relay_id too. */
 const MIRROR_ROW_SQL = "(via IS NOT NULL AND relay_id IS NULL)";
 
-// Rolling file log (PLAN-observabilite-erreurs O1/O2). The broker daemon often
-// outlives the stderr of whoever spawned it (server.ts spawns it detached), so
-// it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
-const log = createLogger({ dir: coreLogDir(), name: "broker" }).child("broker");
-
 const bindRefusal = bindHostRefusal(config.bind_host, BROKER_TOKEN);
 if (bindRefusal) {
   log.error(`${bindRefusal}, exiting`);
   process.exit(1);
-}
-
-if (LOCK_SWEEP_SEC !== lockSweepSecEnv) {
-  log.warn("CLAUDE_PEERS_LOCK_SWEEP_SEC is not an integer between 1 and 86400, using 60", {
-    value: process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC,
-  });
 }
 
 type OperatorTrustSnapshot =
@@ -4791,16 +4799,12 @@ function handleDelegationsAttach(body: unknown): TaskResult<DelegationsAttachRes
 }
 
 const DELEGATION_SWEEP_BATCH = 100;
-const delegationSweepSecEnv = Number(process.env.CLAUDE_PEERS_DELEGATION_SWEEP_SEC ?? 15);
-const DELEGATION_SWEEP_SEC =
-  Number.isSafeInteger(delegationSweepSecEnv) && delegationSweepSecEnv >= 1 && delegationSweepSecEnv <= 86_400
-    ? delegationSweepSecEnv
-    : 15;
-if (DELEGATION_SWEEP_SEC !== delegationSweepSecEnv) {
-  log.warn("CLAUDE_PEERS_DELEGATION_SWEEP_SEC is not an integer between 1 and 86400, using 15", {
-    value: process.env.CLAUDE_PEERS_DELEGATION_SWEEP_SEC,
-  });
-}
+const DELEGATION_SWEEP_SEC = envDuration("CLAUDE_PEERS_DELEGATION_SWEEP_SEC", {
+  min: 1,
+  max: DAY_SEC,
+  fallback: 15,
+  belowMin: "fallback",
+});
 
 type DeckPush = { token: InstanceToken; messageId: number; text: string; sentAt: string };
 type TaskSettlement = "escalated" | "orphaned";
@@ -12292,10 +12296,12 @@ type DispatchRequestRow = {
 };
 
 /** How long /dispatch-request/add may hold its response open. */
-const DISPATCH_WAIT_MAX_SEC = Math.max(
-  1,
-  parseInt(process.env.CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC ?? "60", 10)
-);
+const DISPATCH_WAIT_MAX_SEC = envDuration("CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC", {
+  min: 1,
+  max: DAY_SEC,
+  fallback: 60,
+  belowMin: "min",
+});
 /** Bounds on a Deck-supplied outcome, so a report cannot flood an agent's context. */
 const DISPATCH_OUTCOME_MAX_CARDS = 50;
 const DISPATCH_OUTCOME_MAX_TARGETS = 50;
