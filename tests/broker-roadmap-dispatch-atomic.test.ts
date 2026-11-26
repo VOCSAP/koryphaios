@@ -317,7 +317,8 @@ const REFUSALS: Refusal[] = [
   [
     "a directive card queued in the head wave",
     async (s, items) => {
-      await card(s, { kind: "directive", directive: "clear", queue: 1, status: "planned" });
+      const directive = await card(s, { kind: "directive", directive: "clear", status: "planned" });
+      writeDb(`UPDATE roadmap_items SET queue = 1, lot_id = 'default' WHERE id = '${directive.id}'`);
       return intentFor(s, items);
     },
     "queue-changed",

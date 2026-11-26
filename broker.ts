@@ -6753,8 +6753,19 @@ function handleRoadmapUpsert(
     // clears on its own: a `remove` for it would be refused as not queued.
     const movesRank =
       BROKER_MODE === "replica" && next.queue !== existing.queue && !isTerminalStatus(next.status);
+    // Journaled, this card would make the upstream refuse the whole queue entry, healthy moves included.
+    if (movesRank && next.queue !== null && terminalForQueue({ ...existingRow, status: next.status })) {
+      return {
+        error: `item '${body.id}' is in conflict and the upstream closed it -- resolve the conflict before queuing it`,
+        status: 409,
+      };
+    }
+    const entersWave =
+      next.queue !== existing.queue || (next.kind === "directive" && existing.kind !== "directive");
     const waveRefusal =
-      movesRank ? directiveWaveRefusal(existing.project_key, body.id!, next.kind, next.queue) : null;
+      entersWave && !isNamedRoadmapLot(existing.lot_id)
+        ? directiveWaveRefusal(existing.project_key, body.id!, next.kind, next.queue)
+        : null;
     if (waveRefusal !== null) return { error: waveRefusal, status: 400 };
     const write = db.transaction(() => {
       const queueBefore = movesRank ? queueRowsOf(existing.project_key) : [];
@@ -6923,8 +6934,7 @@ function handleRoadmapUpsert(
     ]
   );
   const createdRank = queueForStatus(createStatus, body.queue ?? null);
-  const createWaveRefusal =
-    BROKER_MODE === "replica" ? directiveWaveRefusal(projectKey, id, createKind, createdRank) : null;
+  const createWaveRefusal = directiveWaveRefusal(projectKey, id, createKind, createdRank);
   if (createWaveRefusal !== null) return { error: createWaveRefusal, status: 400 };
   db.transaction(() => {
     const queueBefore = BROKER_MODE === "replica" && createdRank !== null ? queueRowsOf(projectKey) : [];
@@ -10595,7 +10605,7 @@ function journalQueueMutation(projectKey: string, ops: QueueDeltaOp[], before: M
   ]);
 }
 
-/** The refusal a rank write meets upstream when it would put a directive in a wave of several cards, said here before the entry is built on it. */
+/** Refuses a write that would leave a directive in a default-lot wave of several cards. */
 function directiveWaveRefusal(projectKey: string, id: string, kind: string, rank: number | null): string | null {
   if (rank === null) return null;
   const mates = db

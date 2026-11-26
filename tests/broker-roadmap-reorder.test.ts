@@ -245,6 +245,92 @@ test("a directive-kind item may not share a wave of size > 1, but a singleton wa
   expect(singleton.status).toBe(200);
 });
 
+const DIRECTIVE = { kind: "directive", directive: "clear" };
+
+async function storedCards(): Promise<RoadmapItem[]> {
+  return (await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, { project_key: KEY })).body.items;
+}
+
+/** The upsert is refused over `directiveId` (a new card has no id the caller knows) and no card changes. */
+async function expectSoloWaveRefusal(fields: Record<string, unknown>, directiveId?: string): Promise<void> {
+  const before = await storedCards();
+  const res = await upsert(fields);
+  const error = directiveId
+    ? `directive item '${directiveId}' must be in a singleton wave`
+    : expect.stringMatching(/^directive item '[0-9a-f-]{36}' must be in a singleton wave$/);
+  expect([res.status, res.body]).toEqual([400, { error }]);
+  expect(await storedCards()).toEqual(before);
+}
+
+test("upsert refuses turning a card of a shared wave into a directive", async () => {
+  const a = await create("solo kind a", { queue: 1 });
+  await create("solo kind a mate", { queue: 1 });
+  await expectSoloWaveRefusal({ id: a.id, ...DIRECTIVE }, a.id);
+});
+
+test("upsert refuses turning a card of a shared wave into a directive when the same rank is sent again", async () => {
+  const b = await create("solo kind b", { queue: 1 });
+  await create("solo kind b mate", { queue: 1 });
+  await expectSoloWaveRefusal({ id: b.id, ...DIRECTIVE, queue: 1 }, b.id);
+});
+
+test("upsert refuses creating a directive in an occupied wave", async () => {
+  await create("solo create occupant", { queue: 1 });
+  await expectSoloWaveRefusal({ title: "solo create directive", ...DIRECTIVE, queue: 1 });
+});
+
+test("upsert refuses creating a card in the wave of a directive", async () => {
+  const directive = await create("solo create holder", { ...DIRECTIVE, queue: 1 });
+  await expectSoloWaveRefusal({ title: "solo create plain", queue: 1 }, directive.id);
+});
+
+test("upsert refuses moving a directive into an occupied wave", async () => {
+  await create("solo move occupant", { queue: 1 });
+  const directive = await create("solo move directive", DIRECTIVE);
+  await expectSoloWaveRefusal({ id: directive.id, queue: 1 }, directive.id);
+});
+
+test("upsert refuses moving a card into the wave of a directive", async () => {
+  const directive = await create("solo move holder", { ...DIRECTIVE, queue: 1 });
+  const plain = await create("solo move plain");
+  await expectSoloWaveRefusal({ id: plain.id, queue: 1 }, directive.id);
+});
+
+test("upsert turns a card into a directive when it is alone in its wave or out of the queue", async () => {
+  const alone = await create("solo allowed alone", { queue: 1 });
+  const unqueued = await create("solo allowed unqueued");
+  for (const card of [alone, unqueued]) {
+    const res = await upsert({ id: card.id, ...DIRECTIVE });
+    expect([card.title, res.status]).toEqual([card.title, 200]);
+  }
+});
+
+test("a wave already mixed stays editable as long as no card enters it or becomes a directive", async () => {
+  const directive = await create("mixed directive", { queue: 1 });
+  const mate = await create("mixed mate", { queue: 1 });
+  sqlOnBroker("UPDATE roadmap_items SET kind = 'directive', directive = 'clear' WHERE id = ?", directive.id);
+
+  for (const write of [
+    { id: directive.id, title: "mixed directive renamed", ...DIRECTIVE, queue: 1 },
+    { id: mate.id, title: "mixed mate renamed", kind: "bug", queue: 1 },
+    { id: mate.id, queue: 2 },
+  ]) {
+    const res = await upsert(write);
+    expect([write, res.status]).toEqual([write, 200]);
+  }
+});
+
+test("a card of a named lot is not judged against the default-lot wave of the same rank", async () => {
+  const lot = await createLot(KEY, "solo wave lot");
+  const held = await create("lot held");
+  expect((await moveLot(KEY, [held.id], null, lot.id)).status).toBe(200);
+  sqlOnBroker("UPDATE roadmap_items SET queue = 1 WHERE id = ?", held.id);
+  await create("default lot at the same rank", { queue: 1 });
+
+  const res = await upsert({ id: held.id, ...DIRECTIVE });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+});
+
 test("an empty waves array alongside an empty ids array clears the queue", async () => {
   const a = await create("wf clear via waves", { queue: 1 });
   const res = await reorder({ ids: [], waves: [] });

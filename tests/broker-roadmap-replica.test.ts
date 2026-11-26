@@ -4343,14 +4343,14 @@ async function refusedMutationIds(): Promise<string[]> {
 
 /**
  * A card of a queue of three that is edited here and closed upstream, so it
- * waits for the operator in conflict, and a gesture kept unsent: a reorder made
- * before or after the conflict, or a rank written on that card itself. The pull
- * goes on and refuses the revisions, which keeps the entry here until the caller
- * lifts the override.
+ * waits for the operator in conflict, and possibly an entry kept unsent: a
+ * reorder made before or after the conflict, or one naming that card, written
+ * straight to the journal. The pull goes on and refuses the revisions, which
+ * keeps the entry here until the caller lifts the override.
  */
 async function conflictedCardClosedUpstream(
   tag: string,
-  gesture: "before" | "after" | "own rank",
+  gesture: "before" | "after" | "seeded entry" | "none",
   closed: "with the edit" | "once in conflict" = "with the edit",
   closedAs: "done" | "archived" = "done"
 ): Promise<{ a: RoadmapItem; b: RoadmapItem; c: RoadmapItem }> {
@@ -4404,7 +4404,16 @@ async function conflictedCardClosedUpstream(
   } finally {
     pushSuppressed = false;
   }
-  if (gesture === "own rank") await createOn(replica, { id: c.id, by: "agent-local", queue: 1000 });
+  if (gesture === "seeded entry") {
+    const db = openBrokerDb(replica.dbPath);
+    db.run("INSERT INTO roadmap_queue_outbox (project_key, mutation_id, ops, withheld) VALUES (?, ?, ?, ?)", [
+      PK,
+      `seeded-${tag}`,
+      JSON.stringify([{ op: "place", ids: [c.id], at: "end" }]),
+      JSON.stringify({ [a.id]: 1, [b.id]: 2, [c.id]: 3 }),
+    ]);
+    db.close();
+  }
   return { a, b, c };
 }
 
@@ -4452,10 +4461,10 @@ test("a reorder made while a card is in conflict with a closed upstream row does
 }, 120_000);
 
 test("resolving a conflict in favour of the upstream, which closed the card, takes it out of the unsent entry that names it", async () => {
-  const { a, b, c } = await conflictedCardClosedUpstream("resolved-closed", "own rank");
+  const { a, b, c } = await conflictedCardClosedUpstream("resolved-closed", "seeded entry");
   const refusedBefore = await refusedMutationIds();
   try {
-    expect(JSON.stringify(journaledOps()), "the rank written on the card itself names it").toContain(c.id);
+    expect(JSON.stringify(journaledOps()), "the unsent entry names the card").toContain(c.id);
     expect((await post(`${replica.url}/roadmap/sync/resolve`, deckAuthored({ id: c.id, choice: "remote" }))).status).toBe(200);
     expect(JSON.stringify(journaledOps()), "no operation names the card the operator gave to the upstream").not.toContain(c.id);
   } finally {
@@ -4465,6 +4474,55 @@ test("resolving a conflict in favour of the upstream, which closed the card, tak
   expect((await refusedMutationIds()).filter((id) => !refusedBefore.includes(id)), "no mutation was refused").toEqual([]);
   expect(await ranksOf(upstream, [a, b, c]), "the queue the upstream held is untouched").toEqual([1, 2, null]);
 }, 120_000);
+
+test("a new rank on a card in conflict that the upstream closed is refused here, and a healthy move still goes through", async () => {
+  // The entry pending before the conflict freezes the pull, so the closed card keeps its local rank, 3.
+  const { a, b, c } = await conflictedCardClosedUpstream("rank-on-closed", "after");
+  const refusedBefore = await refusedMutationIds();
+  const pending = JSON.stringify(journaledOps());
+  try {
+    const ranked = await post<{ error: string }>(`${replica.url}/roadmap/upsert`, {
+      project_key: PK,
+      id: c.id,
+      by: "agent-local",
+      description: "not written",
+      queue: 1000,
+    });
+    expect([ranked.status, ranked.body.error]).toEqual([
+      409,
+      `item '${c.id}' is in conflict and the upstream closed it -- resolve the conflict before queuing it`,
+    ]);
+    const kept = await itemOn(replica, c.id);
+    expect(["nothing was written", kept?.queue, kept?.description]).toEqual(["nothing was written", 3, "edited here"]);
+    expect(JSON.stringify(journaledOps()), "nothing was journaled").toBe(pending);
+
+    await createOn(replica, { id: c.id, by: "agent-local", queue: 3 });
+    await createOn(replica, { id: a.id, by: "agent-local", queue: 1 });
+    expect((await createOn(replica, { id: c.id, by: "agent-local", queue: null })).queue).toBeNull();
+    expect(JSON.stringify(journaledOps()), "no operation names the closed card").not.toContain(c.id);
+  } finally {
+    pullQueueRevsOverride = undefined;
+  }
+  await journalEmpties();
+  expect((await refusedMutationIds()).filter((id) => !refusedBefore.includes(id)), "no mutation was refused").toEqual([]);
+  expect(await ranksOf(upstream, [a, b, c]), "the healthy move applied").toEqual([1, 1, null]);
+  expect((await post(`${replica.url}/roadmap/sync/resolve`, deckAuthored({ id: c.id, choice: "remote" }))).status).toBe(200);
+}, 120_000);
+
+test("a card done here and reopened with a rank is judged on its new status, and the rank is accepted", async () => {
+  const card = await createOn(replica, { by: "agent-local", title: "reopened with a rank" });
+  await createOn(replica, { id: card.id, by: "agent-local", status: "done" });
+  const reopened = await post<{ item: RoadmapItem }>(`${replica.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: card.id,
+    by: "agent-local",
+    status: "planned",
+    queue: 1,
+  });
+  expect([reopened.status, reopened.body.item?.status, reopened.body.item?.queue]).toEqual([200, "planned", 1]);
+  await createOn(replica, { id: card.id, by: "agent-local", queue: null });
+  await journalEmpties();
+}, 90_000);
 
 test("an entry not sent yet that names a card closed upstream during a conflict leaves it out, behind a sent one", async () => {
   const [a, b, c] = (await queueCards("sent-then-unsent", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
