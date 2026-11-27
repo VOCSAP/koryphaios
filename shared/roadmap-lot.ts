@@ -62,6 +62,19 @@ export interface RoadmapLotListResponse {
   lots: RoadmapLot[];
 }
 
+/** The controller of a lot's execution mandates one session of its own Kory run. */
+export interface RoadmapLotGrantRequest extends RoadmapLotAuthorFields {
+  project_key: string;
+  lot_id: string;
+  to_peer_id: string;
+}
+
+export interface RoadmapLotGrantResponse {
+  lot_id: string;
+  epoch: number;
+  peer_id: string;
+}
+
 export interface RoadmapLotMoveRequest extends RoadmapLotAuthorFields, RoadmapLotMove {
   project_key: string;
 }

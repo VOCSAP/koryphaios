@@ -490,7 +490,7 @@ export async function createNamedLot(
 export function seedLotExecution(
   b: TestBroker,
   lot: NamedLot,
-  holder: { run: RunCredential; controller: { instance_token: string; peer_id: string } }
+  holder: { run: Pick<RunCredential, "group" | "run">; controller: { instance_token: string; peer_id: string } }
 ): void {
   const db = openBrokerDb(b.dbPath);
   try {

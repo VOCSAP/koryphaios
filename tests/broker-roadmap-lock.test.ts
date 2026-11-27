@@ -1782,6 +1782,7 @@ const ROUTES_WITHOUT_CARD: Record<string, string> = {
   "/roadmap/lock-park": "returns peer ids",
   "/roadmap/lock-release": "returns peer ids",
   "/roadmap/lot/create": "returns the lot record, no card",
+  "/roadmap/lot/execution/grant": "returns the lot id, the epoch and a peer id, no card",
   "/roadmap/lot/list": "returns lot records, no card",
   "/roadmap/sync/status": "returns counters",
 };
@@ -1982,6 +1983,33 @@ describe("a card of a named lot under execution", () => {
     expect(edited.status, JSON.stringify(edited.body)).toBe(200);
   });
 
+  test("a directive's command, targets and dependencies move only for a holder", async () => {
+    const card = { kind: "directive", directive: "clear", target_peer_ids: ["peer-a"] };
+    const lot = await createNamedLot(broker, PK, "execution fields", [{ title: "steered", ...card }]);
+    seedLotExecution(broker, lot, { run, controller });
+    const dependency = await add({ title: "a dependency" });
+    const id = lot.ids[0]!;
+
+    for (const fields of [{ directive: "compact" }, { target_peer_ids: ["peer-b"] }, { depends_on: [dependency.id] }]) {
+      const refused = await write(secondLead, id, fields);
+      expect([fields, refused.status, refused.body.error?.split(":")[0]]).toEqual([fields, 409, "lot_execution_held"]);
+    }
+    const echoed = await write(secondLead, id, { ...card, depends_on: [], title: "retitled with the same fields" });
+    expect(echoed.status, JSON.stringify(echoed.body)).toBe(200);
+    expect(echoed.body.item).toMatchObject({ directive: "clear", target_peer_ids: ["peer-a"], depends_on: [] });
+
+    const held = await write(controller, id, { target_peer_ids: ["peer-b"], depends_on: [dependency.id] });
+    expect(held.status, JSON.stringify(held.body)).toBe(200);
+    // Judged on what the write would store: a null directive keeps the command, an id prefix names the same card.
+    const resolved = await write(secondLead, id, {
+      directive: null,
+      target_peer_ids: ["peer-b"],
+      depends_on: [dependency.id.slice(0, 8)],
+    });
+    expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
+    expect(resolved.body.item).toMatchObject({ directive: "clear", depends_on: [dependency.id] });
+  });
+
   test("a worker claims only once granted", async () => {
     const lot = await heldLot("mandate");
     const refused = await write(worker, lot.ids[0]!, { status: "in_progress" });
@@ -2018,6 +2046,29 @@ describe("a card of a named lot under execution", () => {
 
     const byOperator = await post(`${broker.url}/roadmap/archive`, deckAuthored({ id: lot.ids[0]! }));
     expect(byOperator.status, JSON.stringify(byOperator.body)).toBe(200);
+  });
+
+  test("no one moves a card out of a held lot or into it, its controller and operator included", async () => {
+    const held = await heldLot("frozen membership");
+    const prepared = await createNamedLot(broker, PK, "still prepared", [{ title: "free to move" }]);
+    const loose = await add({ title: "waiting outside" });
+    const move = (body: Record<string, unknown>) =>
+      post<{ error?: string }>(`${broker.url}/roadmap/lot/move`, { project_key: PK, ...body });
+    const asController = { by: controller.peer_id, instance_token: controller.instance_token };
+
+    for (const [side, body] of [
+      ["source", { ids: held.ids, from: held.lotId, to: null }],
+      ["source to another lot", { ids: held.ids, from: held.lotId, to: prepared.lotId }],
+      ["destination from a lot", { ids: prepared.ids, from: prepared.lotId, to: held.lotId }],
+      ["destination from no lot", { ids: [loose.id], from: null, to: held.lotId }],
+    ] as const) {
+      for (const res of [await move({ ...asController, ...body }), await move(deckAuthored({ project_key: PK, ...body }))]) {
+        expect([side, res.status, res.body.error?.split(":")[0]]).toEqual([side, 409, "lot_execution_held"]);
+      }
+    }
+
+    const free = await move({ ...asController, ids: prepared.ids, from: prepared.lotId, to: null });
+    expect(free.status, JSON.stringify(free.body)).toBe(200);
   });
 
   test("a controller silent for less than the delay still holds the lot", async () => {

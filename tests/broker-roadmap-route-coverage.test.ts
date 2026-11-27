@@ -123,6 +123,7 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   "/roadmap/sync/resolve": (c) => ({ id: c.itemId, by: c.victimPeerId, choice: "local" }),
   "/roadmap/lot/create": (c) => ({ project_key: PK, by: c.victimPeerId, name: "x" }),
   "/roadmap/lot/move": (c) => ({ project_key: PK, by: c.victimPeerId, ids: [c.itemId], from: null, to: "default" }),
+  "/roadmap/lot/execution/grant": (c) => ({ project_key: PK, by: c.victimPeerId, lot_id: "x", to_peer_id: "y" }),
 };
 
 /**
@@ -183,6 +184,7 @@ const EXPECTED_ROUTES = [
   "/roadmap/lock-park",
   "/roadmap/lock-release",
   "/roadmap/lot/create",
+  "/roadmap/lot/execution/grant",
   "/roadmap/lot/list",
   "/roadmap/lot/move",
   "/roadmap/reorder",
@@ -499,6 +501,8 @@ const READ_ONLY_INACTIVE_HANDLERS = new Set([
   "handleRoadmapExport",
   // Create writes the lot table, never a card.
   "handleRoadmapLotCreate",
+  // Grant writes the participant table, never a card.
+  "handleRoadmapLotGrant",
   "handleRoadmapLotList",
   "handleRoadmapSyncPull",
   "handleRoadmapSyncStatus",
@@ -532,6 +536,7 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
   "handleRoadmapLotCreate",
+  "handleRoadmapLotGrant",
   "handleRoadmapLotList",
   "handleRoadmapLotMove",
   "handleRoadmapQueueDelta",
@@ -701,9 +706,17 @@ const LOT_GUARDED_HANDLERS: Record<string, string> = {
   handleRoadmapArchive: "beginOrContinueExecution(",
   handleRoadmapLockPark: "lotRefusesLockedCards(",
   handleRoadmapLockRelease: "lotRefusesLockedCards(",
+  handleRoadmapImport: "beginOrContinueExecution(",
+  handleRoadmapLotMove: "beginOrContinueExecution(",
+  handleRoadmapQueueDelta: "applyLotQueueMutation(",
+  handleRoadmapSyncPush: "beginOrContinueExecution(",
+  handleRoadmapSyncLock: "beginOrContinueExecution(",
 };
 
-/** Card writers outside the door, each with what that leaves them able to do on a named lot. */
+/** The functions a guarded handler goes through to reach the door. */
+const LOT_DOOR_RELAYS = ["lotRefusesLockedCards", "judgeLotQueueMutation"];
+
+/** Card writers outside the door, each with why it cannot act on a held lot. */
 const LOT_UNGUARDED_HANDLERS: Record<string, string> = {
   handleRoadmapDispatchAtomic: "writes through handleRoadmapUpsert and refuses a named lot's card",
   handleRoadmapReorder: "refuses a named lot's card",
@@ -712,11 +725,6 @@ const LOT_UNGUARDED_HANDLERS: Record<string, string> = {
   handleRoadmapContextDocumentSyncPush: "documents only",
   releaseStaleLocks: "releases the lock of an owner that is gone",
   handleRoadmapSyncResolve: "replica only, where no card of a named lot is claimed",
-  handleRoadmapImport: "open: replaces a card of a held lot",
-  handleRoadmapLotMove: "open: moves a card out of a held lot",
-  handleRoadmapQueueDelta: "open: moves or ranks a card of a held lot",
-  handleRoadmapSyncPush: "open: writes the status of a card of a held lot",
-  handleRoadmapSyncLock: "open: relays a claim on a card of a held lot",
 };
 
 test("every card writer passes the lot execution door or says why not", () => {
@@ -727,7 +735,10 @@ test("every card writer passes the lot execution door or says why not", () => {
   for (const [name, call] of Object.entries(LOT_GUARDED_HANDLERS)) {
     expect([name, stripComments(extractFunctionBody(source, name)).includes(call)]).toEqual([name, true]);
   }
-  expect(stripComments(extractFunctionBody(source, "lotRefusesLockedCards"))).toContain("beginOrContinueExecution(");
+  for (const name of LOT_DOOR_RELAYS) {
+    expect([name, stripComments(extractFunctionBody(source, name)).includes("beginOrContinueExecution(")]).toEqual([name, true]);
+  }
+  expect(stripComments(extractFunctionBody(source, "applyLotQueueMutation"))).toContain("judgeLotQueueMutation(");
 });
 
 /** The SQL literal of every db.run/query/prepare call that names both the card table and the rank column. */

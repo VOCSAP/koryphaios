@@ -266,6 +266,13 @@ const DECK_WRITE_ROUTES = [
     body: () => ({ action: "resolve", intent: {} }),
     signedStatus: 400,
   },
+  // A signed operator passes the author gate and is then told nobody processes
+  // this lot, which only a resolved author can reach.
+  {
+    route: "/roadmap/lot/execution/grant",
+    body: () => ({ project_key: PK, lot_id: "no-such-lot", to_peer_id: "nobody" }),
+    signedStatus: 409,
+  },
 ] as const;
 
 /** Status a signed operator write earns on THIS broker; 200 unless stated. */
@@ -999,6 +1006,55 @@ describe("lot execution identity", () => {
 
     const closed = await operatorWrite(FIXTURE_OPERATOR, { id, status: "done" });
     expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+  });
+
+  test("the controller alone grants a worker, and only a session of its own run and group", async () => {
+    const mandated = await createNamedLot(broker, PK, "mandated lot", [{ title: "mandated card" }]);
+    seedLotExecution(broker, mandated, { run, controller });
+    const homonym = await attest(run, "/work/lot-homonym");
+    const worker = await attest(run, "/work/lot-mandated-worker");
+    const phrase = "lot-identity-other-group";
+    const elsewhere = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+    const stranger = await attest(await mintRunCredential(broker, elsewhere, PK), "/work/lot-other-group");
+    const grant = (caller: Attested, to_peer_id: string, extra: Record<string, unknown> = {}) =>
+      post<{ error?: string; epoch?: number; peer_id?: string }>(`${broker.url}/roadmap/lot/execution/grant`, {
+        project_key: PK,
+        lot_id: mandated.lotId,
+        by: caller.peer_id,
+        instance_token: caller.instance_token,
+        to_peer_id,
+        ...extra,
+      });
+
+    for (const [caller, to, extra, status, code] of [
+      [secondLead, worker.peer_id, {}, 409, "lot_execution_held"],
+      [otherWindow, worker.peer_id, { run_ref: run.run, group_id: group.id }, 409, "lot_execution_held"],
+      [unbound, worker.peer_id, {}, 403, "lot_execution_unproven"],
+      [controller, otherWindow.peer_id, {}, 403, "lot_execution_grantee"],
+      [controller, stranger.peer_id, {}, 403, "lot_execution_grantee"],
+      [controller, unbound.peer_id, {}, 403, "lot_execution_grantee"],
+      [controller, "nobody-here", {}, 403, "lot_execution_grantee"],
+    ] as const) {
+      const res = await grant(caller, to, extra);
+      expect([caller.peer_id, to, res.status, res.body.error?.split(":")[0]]).toEqual([caller.peer_id, to, status, code]);
+    }
+    expect((await claim(worker, mandated.ids[0]!)).status).toBe(409);
+    // A homonym of the worker in a group sorting first, on an older row: the grant names the holding group's peer.
+    const db = openBrokerDb(broker.dbPath);
+    db.run("INSERT INTO groups (group_id, secret_hash, name, created_at) VALUES ('0000', NULL, '0000', ?)", [
+      new Date().toISOString(),
+    ]);
+    db.run("UPDATE peers SET group_id = '0000', peer_id = ? WHERE instance_token = ?", [
+      worker.peer_id,
+      homonym.instance_token,
+    ]);
+    db.close();
+
+    const granted = await grant(controller, worker.peer_id);
+    expect(granted.status, JSON.stringify(granted.body)).toBe(200);
+    expect(granted.body).toMatchObject({ epoch: 1, peer_id: worker.peer_id });
+    expect((await grant(controller, worker.peer_id)).status).toBe(200);
+    expect((await claim(worker, mandated.ids[0]!)).status).toBe(200);
   });
 
   test("revoking the holding run credential interrupts the lot, and its sessions then prove nothing", async () => {

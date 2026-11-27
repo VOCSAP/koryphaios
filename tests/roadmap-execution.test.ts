@@ -183,12 +183,69 @@ describe("a lot with no execution", () => {
   });
 });
 
-test("a replica neither starts nor claims, and still changes", () => {
+test("a replica neither starts, claims nor grants, and still changes and restructures", () => {
   expect(code({ replica: true })).toBe("lot_execution_replica");
   expect(code({ replica: true, execution: null, subject: OPERATOR, act: { kind: "start", controller: CONTROLLER } })).toBe(
     "lot_execution_replica"
   );
+  expect(code({ replica: true, act: { kind: "grant", grantee: CONTROLLER } })).toBe("lot_execution_replica");
   expect(code({ replica: true, execution: null, act: { kind: "change" } })).toBe("pass");
+  expect(code({ replica: true, execution: null, act: { kind: "restructure" } })).toBe("pass");
+});
+
+describe("restructuring a lot", () => {
+  test("is free while nobody processes it", () => {
+    for (const execution of [null, { ...EXECUTION, state: "closed" as const }]) {
+      expect(code({ execution, subject: { kind: "unproven" }, act: { kind: "restructure" } })).toBe("pass");
+    }
+  });
+
+  test("is refused to everyone under execution, its controller and operator included", () => {
+    for (const subject of [CONTROLLER, HOLDING_WINDOW, { kind: "unproven" } as const]) {
+      expect(code({ subject, act: { kind: "restructure" } })).toBe("lot_execution_held");
+      expect(code({ execution: { ...EXECUTION, state: "interrupted" }, subject, act: { kind: "restructure" } })).toBe(
+        "lot_execution_interrupted"
+      );
+    }
+  });
+});
+
+describe("granting a worker", () => {
+  const worker: LotInstanceSubject = { ...CONTROLLER, instance_ref: "instance-worker" };
+  const grant = { kind: "grant" as const, grantee: worker };
+
+  test("the controller grants a session of its own run", () => {
+    expect(code({ act: grant })).toBe("continue");
+  });
+
+  test("nobody else grants: another session, a granted worker, the operator, a bare writer", () => {
+    expect(code({ subject: worker, act: grant })).toBe("lot_execution_held");
+    expect(code({ subject: worker, participants: new Set(["instance-worker"]), act: grant })).toBe("lot_execution_held");
+    expect(code({ subject: HOLDING_WINDOW, act: grant })).toBe("lot_execution_held");
+    expect(code({ subject: { kind: "unproven" }, act: grant })).toBe("lot_execution_unproven");
+  });
+
+  test("a controller seen from another run grants nothing", () => {
+    expect(code({ subject: { ...CONTROLLER, run_ref: "run-b" }, act: grant })).toBe("lot_execution_held");
+  });
+
+  for (const [field, value] of [
+    ["operator_id", "operator-b"],
+    ["group_id", "group-b"],
+    ["run_ref", "run-b"],
+    ["project_key", "github.com/vocsap/other-repo"],
+  ] as const) {
+    test(`a grantee differing by ${field} is refused`, () => {
+      expect(code({ act: { kind: "grant", grantee: { ...worker, [field]: value } } })).toBe("lot_execution_grantee");
+    });
+  }
+
+  test("an unprovable grantee, a lot nobody processes and an interrupted lot take no grant", () => {
+    expect(code({ act: { kind: "grant", grantee: null } })).toBe("lot_execution_grantee");
+    expect(code({ execution: null, act: grant })).toBe("lot_execution_not_started");
+    expect(code({ execution: { ...EXECUTION, state: "interrupted" }, act: grant })).toBe("lot_execution_interrupted");
+    expect(lotExecutionRefusalStatus("lot_execution_grantee")).toBe(403);
+  });
 });
 
 describe("interruption", () => {

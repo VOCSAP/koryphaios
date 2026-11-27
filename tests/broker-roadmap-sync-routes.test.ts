@@ -14,6 +14,7 @@ import {
   FIXTURE_OPERATOR_ID,
   type TestBroker,
   openBrokerDb,
+  seedLotExecution,
 } from "./_helper.ts";
 import { buildRoadmapAppendHeader } from "../shared/roadmap-append.ts";
 import { ROADMAP_TITLE_MAX } from "../shared/roadmap-title.ts";
@@ -3457,21 +3458,18 @@ test("queue-delta v2: card rules hold inside a named lot, and a refusal writes a
 }, 30_000);
 
 test("queue-delta v2: a card another relay holds is neither moved nor unqueued, one that only takes a new number is", async () => {
-  const { b, project, lot, card } = await lotProject("lock", [["x", "a", 1], ["held", "a", 2], ["idle", "a", null]]);
-  const claim = await post(`${b.url}/roadmap/sync/lock`, {
-    replica_id: R2,
-    id: card("held"),
-    action: "claim",
-    owner: { peer_id: "agent-v2-lock", group_id: null },
-  });
-  expect(claim.status).toBe(200);
-  const claimIdle = await post(`${b.url}/roadmap/sync/lock`, {
-    replica_id: R2,
-    id: card("idle"),
-    action: "claim",
-    owner: { peer_id: "agent-v2-lock-idle", group_id: null },
-  });
-  expect(claimIdle.status).toBe(200);
+  const { b, project, lot, card } = await lotProject("lock", [["x", "a", 1], ["held", null, null], ["idle", null, null]]);
+  // A relay takes a card only outside a named lot; the card joins the lot with its lock.
+  for (const [name, rank] of [["held", 2], ["idle", null]] as const) {
+    const claim = await post(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R2,
+      id: card(name),
+      action: "claim",
+      owner: { peer_id: `agent-v2-lock-${name}`, group_id: null },
+    });
+    expect(claim.status).toBe(200);
+    lotSql(b, "UPDATE roadmap_items SET lot_id = ?, queue = ? WHERE id = ?", lot.a, rank, card(name));
+  }
   const before = placesOf(b, project);
   const send = (ops: unknown, ids = [lot.a]) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
 
@@ -3526,4 +3524,139 @@ test("queue-delta v2: every refusal is logged with its status and reason", async
   expect(traces[0]).toContain("version");
   expect(traces[1]).toContain("queue_rev");
   expect(traces[2]).toContain("no-such-lot");
+}, 30_000);
+
+// ----- a lot under execution on the upstream, where a replica proves no holder -----
+
+function holdLot(b: TestBroker, project: string, lotId: string): void {
+  seedLotExecution(b, { projectKey: project, lotId }, {
+    run: { group: "upstream-holder-group", run: crypto.randomUUID() },
+    controller: { instance_token: crypto.randomUUID(), peer_id: "upstream-holder" },
+  });
+}
+
+test("queue-delta v2: a lot under execution takes no rank and neither gains nor loses a card", async () => {
+  const { b, project, lot, card } = await lotProject("executed", [
+    ["a1", "a", 1], ["a2", "a", 2], ["b1", "b", 1], ["b2", "b", 2],
+  ]);
+  const earlier = crypto.randomUUID();
+  const reorder = [{ op: "place", lot_id: lot.a, ids: [card("a2")], at: "start" }];
+  const writtenBefore = currentLots(b, project, [lot.a]);
+  expect((await sendLotDelta(b, project, writtenBefore, reorder, { mutation_id: earlier })).status).toBe(200);
+  holdLot(b, project, lot.a);
+  const before = placesOf(b, project);
+  const send = (ids: string[], ops: unknown) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
+
+  const ranked = await send([lot.a], [{ op: "place", lot_id: lot.a, ids: [card("a1")], at: "start" }]);
+  const cleared = await send([lot.a], [{ op: "clear", lot_id: lot.a }]);
+  const out = await send([lot.a, lot.b], [{ op: "move_members", ids: [card("a1")], from: lot.a, to: lot.b }]);
+  const into = await send([lot.a, lot.b], [{ op: "move_members", ids: [card("b1")], from: lot.b, to: lot.a }]);
+
+  expect([ranked, cleared, out, into].map((res) => [res.status, res.body.reason])).toEqual(
+    Array(4).fill([409, "locked_upstream"])
+  );
+  expect([out.body.item_id, into.body.item_id]).toEqual([card("a1"), card("b1")]);
+  expect(placesOf(b, project)).toEqual(before);
+  const elsewhere = await send([lot.b], [{ op: "place", lot_id: lot.b, ids: [card("b2")], at: "start" }]);
+  expect(elsewhere.status, JSON.stringify(elsewhere.body)).toBe(200);
+  const replayed = await sendLotDelta(b, project, writtenBefore, reorder, { mutation_id: earlier });
+  expect([replayed.status, replayed.body.replayed]).toEqual([200, true]);
+}, 30_000);
+
+test("push: a card of a lot under execution takes text from a replica, and no change of work", async () => {
+  const b = shared;
+  const project = queueProject("executed-push");
+  const [held, prepared] = ["ex-push-held", "ex-push-prepared"];
+  await seedQueue(b, project, [[held, null], [prepared, null]]);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'ex-held' WHERE id = ?", held);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'ex-prepared' WHERE id = ?", prepared);
+  holdLot(b, project, "ex-held");
+  const push = (id: string, fields: Partial<RoadmapSyncPushItem>) => {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    const { content_rev } = db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number };
+    db.close();
+    return post<Partial<RoadmapSyncPushConflict>>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, project_key: project, ...fields }),
+      expected_content_rev: content_rev,
+    });
+  };
+
+  for (const fields of [
+    { status: "done" },
+    { status: "in_progress" },
+    { kind: "bug" },
+    { inactive: true },
+    { deleted_at: "2026-01-02T00:00:00.000Z" },
+  ] as const) {
+    const refused = await push(held, fields);
+    expect([fields, refused.status, refused.body.reason]).toEqual([fields, 409, "locked_upstream"]);
+  }
+  expect((await push(held, { title: "edited while held" })).status).toBe(200);
+  expect(placeIn(b, held)).toMatchObject({ title: "edited while held", lot_id: "ex-held" });
+
+  const stored: Partial<RoadmapSyncPushItem> = { kind: "directive", directive: "clear", target_peer_ids: ["peer-a"] };
+  lotSql(
+    b,
+    "UPDATE roadmap_items SET kind = 'directive', directive = 'clear', target_peer_ids = '[\"peer-a\"]' WHERE id = ?",
+    held
+  );
+  const changes: Partial<RoadmapSyncPushItem>[] = [
+    { directive: "compact" },
+    { target_peer_ids: ["peer-b"] },
+    { depends_on: [prepared] },
+  ];
+  for (const change of changes) {
+    const refused = await push(held, { ...stored, title: "edited while held", ...change });
+    expect([change, refused.status, refused.body.reason]).toEqual([change, 409, "locked_upstream"]);
+  }
+  expect((await push(held, { ...stored, title: "directive retitled" })).status).toBe(200);
+
+  const taken = await push(prepared, { status: "in_progress" });
+  expect([taken.status, taken.body.reason]).toEqual([409, "locked_upstream"]);
+  expect((await push(prepared, { status: "done" })).status).toBe(200);
+}, 30_000);
+
+test("lock relay: no replica takes a card of a named lot or re-asserts on a held one, and still gives its lock back", async () => {
+  const b = shared;
+  const project = queueProject("executed-lock");
+  const [relayed, free] = ["ex-lock-relayed", "ex-lock-free"];
+  await seedQueue(b, project, [[relayed, null], [free, null]]);
+  const relay = (id: string, action: "claim" | "release") =>
+    post<{ scope?: string; released?: boolean }>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id,
+      action,
+      owner: { peer_id: "agent-executed", group_id: null },
+    });
+  expect((await relay(relayed, "claim")).status).toBe(200);
+  for (const id of [relayed, free]) lotSql(b, "UPDATE roadmap_items SET lot_id = 'ex-lock' WHERE id = ?", id);
+  const holder = () => {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT id, locked FROM roadmap_items WHERE project_key = ? ORDER BY id").all(project);
+    } finally {
+      db.close();
+    }
+  };
+
+  const fresh = await relay(free, "claim");
+  expect([fresh.status, fresh.body.scope]).toEqual([409, "contested"]);
+  expect((await relay(relayed, "claim")).status, "a prepared lot keeps the relay it had").toBe(200);
+
+  holdLot(b, project, "ex-lock");
+  const reasserted = await relay(relayed, "claim");
+  expect([reasserted.status, reasserted.body.scope]).toEqual([409, "contested"]);
+  expect(holder()).toEqual([
+    { id: free, locked: 0 },
+    { id: relayed, locked: 1 },
+  ]);
+  const released = await relay(relayed, "release");
+  expect([released.status, released.body.released]).toEqual([200, true]);
+  expect(holder()).toEqual([
+    { id: free, locked: 0 },
+    { id: relayed, locked: 0 },
+  ]);
+  const retaken = await relay(relayed, "claim");
+  expect([retaken.status, retaken.body.scope]).toEqual([409, "contested"]);
 }, 30_000);

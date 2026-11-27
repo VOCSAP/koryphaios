@@ -149,6 +149,8 @@ import {
   type RoadmapLot,
   type RoadmapLotCreateRequest,
   type RoadmapLotCreateResponse,
+  type RoadmapLotGrantRequest,
+  type RoadmapLotGrantResponse,
   type RoadmapLotListRequest,
   type RoadmapLotListResponse,
   type RoadmapLotMoveRequest,
@@ -160,6 +162,7 @@ import {
   lotExecutionInterruption,
   lotExecutionRefusalStatus,
   type LotExecution,
+  type LotExecutionAct,
   type LotExecutionPresence,
   type LotExecutionSubject,
 } from "./shared/roadmap-execution.ts";
@@ -2843,6 +2846,46 @@ function lotExecutionSubject(
   };
 }
 
+/** Judges one act against the lot's execution that is not closed, and traces a refusal. */
+function judgeNamedLot(
+  projectKey: string,
+  lotId: string,
+  subject: LotExecutionSubject,
+  act: LotExecutionAct,
+  route: string,
+  target: string
+): { execution: LotExecution | null } | { error: string; status: number } {
+  const open = db
+    .query("SELECT * FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'")
+    .get(projectKey, lotId) as LotExecution | null;
+  const execution = open ? settleLotExecution(open) : null;
+  const participants = execution
+    ? (db
+        .query("SELECT instance_ref FROM roadmap_lot_participants WHERE project_key = ? AND lot_id = ? AND epoch = ?")
+        .all(projectKey, lotId, execution.epoch) as { instance_ref: string }[])
+    : [];
+  const verdict = judgeLotExecution({
+    project_key: projectKey,
+    execution,
+    subject,
+    act,
+    participants: new Set(participants.map((p) => p.instance_ref)),
+    replica: BROKER_MODE === "replica",
+  });
+  if (verdict.ok) return { execution };
+  const lot = db
+    .query("SELECT name FROM roadmap_lots WHERE project_key = ? AND id = ?")
+    .get(projectKey, lotId) as { name: string } | null;
+  log.warn(`${route}: refused a ${act.kind} on ${target} (${verdict.code})`, { lot_id: lotId, writer: subject.kind });
+  return {
+    error: formatLotExecutionRefusal(verdict.code, lot?.name ?? lotId, execution?.controller_peer_id ?? null),
+    status: lotExecutionRefusalStatus(verdict.code),
+  };
+}
+
+/** A writer no door of its route can identify: an upstream relay, an import, a lot move. */
+const UNPROVEN_WRITER: LotExecutionSubject = { kind: "unproven" };
+
 /**
  * The one door a card write passes before it touches a card of a named lot:
  * the lot is resolved from the card, then the writer is judged against its
@@ -2852,40 +2895,13 @@ function lotExecutionSubject(
 function beginOrContinueExecution(
   card: { id: string; project_key: string; lot_id?: string | null },
   subject: LotExecutionSubject,
-  act: "claim" | "change",
+  act: "claim" | "change" | "restructure",
   route: string
 ): { error: string; status: number } | null {
   const lotId = card.lot_id;
   if (typeof lotId !== "string" || !isNamedRoadmapLot(lotId)) return null;
-  const open = db
-    .query("SELECT * FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'")
-    .get(card.project_key, lotId) as LotExecution | null;
-  const execution = open ? settleLotExecution(open) : null;
-  const participants = execution
-    ? (db
-        .query("SELECT instance_ref FROM roadmap_lot_participants WHERE project_key = ? AND lot_id = ? AND epoch = ?")
-        .all(card.project_key, lotId, execution.epoch) as { instance_ref: string }[])
-    : [];
-  const verdict = judgeLotExecution({
-    project_key: card.project_key,
-    execution,
-    subject,
-    act: { kind: act },
-    participants: new Set(participants.map((p) => p.instance_ref)),
-    replica: BROKER_MODE === "replica",
-  });
-  if (verdict.ok) return null;
-  const lot = db
-    .query("SELECT name FROM roadmap_lots WHERE project_key = ? AND id = ?")
-    .get(card.project_key, lotId) as { name: string } | null;
-  log.warn(`${route}: refused a ${act} on card ${card.id} (${verdict.code})`, {
-    lot_id: lotId,
-    writer: subject.kind,
-  });
-  return {
-    error: formatLotExecutionRefusal(verdict.code, lot?.name ?? lotId, execution?.controller_peer_id ?? null),
-    status: lotExecutionRefusalStatus(verdict.code),
-  };
+  const judged = judgeNamedLot(card.project_key, lotId, subject, { kind: act }, route, `card ${card.id}`);
+  return "error" in judged ? judged : null;
 }
 
 // --- Prepared statements ---
@@ -6703,9 +6719,26 @@ function handleRoadmapUpsert(
       };
     }
 
+    // The values this write would store, resolved once for the guard below and the write.
+    const nextKind = body.kind ?? existing.kind;
+    const nextDirective: RoadmapDirective | null =
+      nextKind === "directive" ? ((body.directive ?? existing.directive) ?? null) : null;
+    const nextTargets =
+      nextKind !== "directive"
+        ? []
+        : body.target_peer_ids !== undefined
+          ? cleanPeerIds(body.target_peer_ids)
+          : existing.target_peer_ids;
+    const patchDependsOn = cleanList(body.depends_on);
+    const nextDependsOn =
+      patchDependsOn === null
+        ? null
+        : resolveDependsOn(patchDependsOn, existing.project_key, existing.id, existing.depends_on);
+
     // Lot execution guard, ahead of the work-lock guard so that neither force
     // nor the operator name walks past it. An agent restating in_progress is a
     // claim; the operator's editor resends the stored status with a text edit.
+    // Directive, targets and dependencies are guarded like the status; priority, value, effort, triage, tags and texts steer no running execution.
     const takesClaim =
       body.locked === true ||
       (nextStatus === "in_progress" && existing.status !== "in_progress") ||
@@ -6717,6 +6750,11 @@ function handleRoadmapUpsert(
       resolvedLock.lockedBy !== existing.locked_by ||
       nextInactive !== existing.inactive ||
       (body.kind !== undefined && body.kind !== existing.kind) ||
+      nextDirective !== existing.directive ||
+      JSON.stringify(nextTargets) !== JSON.stringify(existing.target_peer_ids) ||
+      (nextDependsOn !== null &&
+        "ids" in nextDependsOn &&
+        JSON.stringify(nextDependsOn.ids) !== JSON.stringify(existing.depends_on)) ||
       body.release === true;
     if (takesClaim || changesWork) {
       const lotRefusal = beginOrContinueExecution(
@@ -6828,36 +6866,19 @@ function handleRoadmapUpsert(
 
     // Directive coherence (CT1): a 'directive' item must carry a valid command;
     // any other kind must not. Fields resolve against the existing row on patch.
-    const nextKind = body.kind ?? existing.kind;
-    let nextDirective: RoadmapDirective | null;
-    let nextTargets: string[];
     if (nextKind === "directive") {
-      nextDirective = (body.directive ?? existing.directive) ?? null;
       if (!nextDirective || !DIRECTIVE_COMMANDS.includes(nextDirective)) {
         return {
           error: "kind 'directive' requires a directive (clear|compact|magic_compact)",
           status: 400,
         };
       }
-      nextTargets =
-        body.target_peer_ids !== undefined
-          ? cleanPeerIds(body.target_peer_ids)
-          : existing.target_peer_ids;
-    } else {
-      if (body.directive != null) {
-        return { error: "directive is only valid for kind 'directive'", status: 400 };
-      }
-      nextDirective = null;
-      nextTargets = [];
+    } else if (body.directive != null) {
+      return { error: "directive is only valid for kind 'directive'", status: 400 };
     }
 
     const updateTitleRefusal = body.title !== undefined ? roadmapTitleRefusal(body.title.trim()) : null;
     if (updateTitleRefusal) return { error: updateTitleRefusal, status: 400 };
-    const patchDependsOn = cleanList(body.depends_on);
-    const nextDependsOn =
-      patchDependsOn === null
-        ? null
-        : resolveDependsOn(patchDependsOn, existing.project_key, existing.id, existing.depends_on);
     if (nextDependsOn && "error" in nextDependsOn) return nextDependsOn;
 
     // A client that predates lots reads a named lot's rank as null and may send it back with its write.
@@ -7865,6 +7886,63 @@ function handleRoadmapLotList(
   return { lots: listRoadmapLots(projectKey) };
 }
 
+/**
+ * Writes the participant table, never a card. The caller is judged as the
+ * controller from the binding of its own token; the named peer is read from the
+ * holding group and proven the same way.
+ */
+function handleRoadmapLotGrant(
+  body: RoadmapLotGrantRequest
+): RoadmapLotGrantResponse | { error: string; status: number } {
+  const route = "/roadmap/lot/execution/grant";
+  const author = resolveRoadmapAuthor(body, "/roadmap/lot/execution/grant");
+  if ("error" in author) return author;
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const check = validateProjectKey(projectKey);
+  if (!check.ok) return { error: `project_key is invalid (${check.reason})`, status: 400 };
+  const caseRefusal = projectKeyCaseRefusal(projectKey);
+  if (caseRefusal) return { error: caseRefusal, status: 400 };
+  const { lot_id: lotId, to_peer_id: toPeerId } = body;
+  if (typeof lotId !== "string" || !isNamedRoadmapLot(lotId) || !lotId) {
+    return { error: "lot_id must name a lot other than the default one", status: 400 };
+  }
+  if (typeof toPeerId !== "string" || !toPeerId) return { error: "to_peer_id is required", status: 400 };
+  const grant = db.transaction((): RoadmapLotGrantResponse | { error: string; status: number } => {
+    const holding = db
+      .query(
+        "SELECT group_id FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'"
+      )
+      .get(projectKey, lotId) as { group_id: string } | null;
+    const peer = holding
+      ? (db
+          .query(
+            "SELECT instance_token, group_id FROM peers WHERE group_id = ? AND peer_id = ? AND status = 'active' AND via IS NULL"
+          )
+          .get(holding.group_id, toPeerId) as { instance_token: string; group_id: string } | null)
+      : null;
+    const subject = peer ? lotExecutionSubject({ by: toPeerId, proven: true, ...peer }) : null;
+    const grantee = subject?.kind === "instance" ? subject : null;
+    const judged = judgeNamedLot(
+      projectKey,
+      lotId,
+      lotExecutionSubject(author),
+      { kind: "grant", grantee },
+      route,
+      `a grant to '${toPeerId}'`
+    );
+    if ("error" in judged) return judged;
+    const execution = judged.execution!;
+    db.run(
+      "INSERT OR IGNORE INTO roadmap_lot_participants (project_key, lot_id, epoch, instance_ref, granted_at) VALUES (?, ?, ?, ?, ?)",
+      [projectKey, lotId, execution.epoch, grantee!.instance_ref, new Date().toISOString()]
+    );
+    log.info(`${route}: '${author.by}' granted '${toPeerId}'`, { lot_id: lotId, epoch: execution.epoch });
+    return { lot_id: lotId, epoch: execution.epoch, peer_id: toPeerId };
+  });
+  return grant();
+}
+
 function handleRoadmapLotMove(
   body: RoadmapLotMoveRequest
 ): RoadmapLotMoveResponse | { error: string; status: number } {
@@ -7905,6 +7983,12 @@ function handleRoadmapLotMove(
     if (!moved.ok) {
       if (moved.code === "same_lot") return { error: "from and to name the same lot", status: 400 };
       return { error: `item '${moved.card_id}' is not in the source lot`, status: 409 };
+    }
+    for (const row of rows) {
+      const lotRefusal =
+        beginOrContinueExecution(row, UNPROVEN_WRITER, "restructure", "/roadmap/lot/move") ??
+        beginOrContinueExecution({ ...row, lot_id: to }, UNPROVEN_WRITER, "restructure", "/roadmap/lot/move");
+      if (lotRefusal) return lotRefusal;
     }
     for (const card of moved.cards) {
       db.run(
@@ -8073,6 +8157,12 @@ function handleRoadmapImport(body: {
       // state, to skip/preserve correctly for the later duplicate too.
       const existingRow = getRoadmapRow(id);
       const existing = existingRow ? rowToRoadmapItem(existingRow) : null;
+      // Judged on the stored row, whose project may differ from the one this import re-keys to; force
+      // never reaches it.
+      if (existingRow && beginOrContinueExecution(existingRow, UNPROVEN_WRITER, "restructure", "/roadmap/import")) {
+        skipped.push(id);
+        continue;
+      }
       // Unconditional skip on a locked card, no author comparison -- comparing
       // the claimed author against locked_by here would be a self-declared
       // bypass, since the author is never proven on this route.
@@ -9390,6 +9480,26 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
         conflict: { error: "conflict", reason: "content", item: rowToSyncRow(existing) },
       };
     }
+    // A replica proves no execution holder: on a lot under execution it may only edit text.
+    const held = rowToRoadmapItem(existing);
+    const changesWork =
+      item.status !== held.status ||
+      item.kind !== held.kind ||
+      item.inactive !== held.inactive ||
+      item.directive !== held.directive ||
+      JSON.stringify(item.target_peer_ids) !== JSON.stringify(held.target_peer_ids) ||
+      JSON.stringify(item.depends_on) !== JSON.stringify(held.depends_on) ||
+      (item.deleted_at === null) !== (existing.deleted_at === null);
+    const takesClaim = item.status === "in_progress" && existing.status !== "in_progress";
+    if (
+      changesWork &&
+      beginOrContinueExecution(existing, UNPROVEN_WRITER, takesClaim ? "claim" : "change", "/roadmap/sync/push")
+    ) {
+      return {
+        ok: false,
+        conflict: { error: "conflict", reason: "locked_upstream", item: rowToSyncRow(existing) },
+      };
+    }
     // An omitted `queue` key leaves the upstream rank alone (older replicas never
     // send it), except on a terminal status, which always clears it. A rank, null
     // included, sent for a live card this broker holds in a named lot is dropped
@@ -9863,6 +9973,16 @@ function judgeLotQueueMutation(
       const row = stored.get(id)!;
       if (row.locked === 1 && !relayHoldsLock(id, replicaId)) return conflict("locked_upstream", { item_id: id });
     }
+    // A rank or a membership of a lot under execution never moves from a replica, whichever side it is on.
+    for (const next of changed) {
+      const row = stored.get(next.id)!;
+      if (
+        beginOrContinueExecution(row, UNPROVEN_WRITER, "restructure", "/roadmap/sync/queue-delta") ||
+        beginOrContinueExecution({ ...row, lot_id: next.lot_id }, UNPROVEN_WRITER, "restructure", "/roadmap/sync/queue-delta")
+      ) {
+        return conflict("locked_upstream", { item_id: next.id });
+      }
+    }
 
     const defaultRevBefore = queueRev(projectKey);
     const by = relayedAuthor("deck", replicaId);
@@ -9957,6 +10077,10 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
       // card no one else holds.
       return { ok: false, inactive: { error: "inactive", item: rowToSyncRow(row) } };
     }
+    // Re-asserting a relayed lock continues it; any other claim takes the card.
+    if (beginOrContinueExecution(row, UNPROVEN_WRITER, heldByThisRelay ? "change" : "claim", "/roadmap/sync/lock")) {
+      return { ok: false, contested: { scope: "contested", item: rowToSyncRow(row) } };
+    }
     if (row.locked === 0) {
       db.run(
         `UPDATE roadmap_items SET
@@ -9993,6 +10117,7 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
     return { ok: true, claim: { scope: "global", item: rowToSyncRow(getRoadmapRow(body.id)!) } };
   }
 
+  // No execution door here: a relay giving back its own lock only lowers its hold.
   if (heldByThisRelay) {
     db.run(
       `UPDATE roadmap_items SET ${CLEAR_LOCK_SET}, ${CLEAR_LOCK_RELAY_SET} WHERE id = ?`,
@@ -16668,6 +16793,13 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/lot/move": {
           const result = handleRoadmapLotMove(body as RoadmapLotMoveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/execution/grant": {
+          const result = handleRoadmapLotGrant(body as RoadmapLotGrantRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

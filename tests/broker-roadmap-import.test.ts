@@ -12,7 +12,17 @@
 // as the only override -- see the negative control below.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
+import {
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  type TestBroker,
+  deckAuthored,
+  openBrokerDb,
+  createNamedLot,
+  seedLotExecution,
+} from "./_helper.ts";
 import {
   ROADMAP_IMPORT_COLUMNS,
   findUncoveredRoadmapColumns,
@@ -800,4 +810,38 @@ test("a stored default-lot card keeps its place when the file ranks it in a name
   db.close();
 
   expect(stored).toEqual({ lot_id: "default", queue: 1 });
+});
+
+test("an import skips a card of a lot under execution, force and a re-keying project included", async () => {
+  const held = await createNamedLot(broker, PK, "held on import", [{ title: "held on import" }]);
+  const prepared = await createNamedLot(broker, PK, "prepared on import", [{ title: "prepared on import" }]);
+  seedLotExecution(broker, held, {
+    run: { group: "import-holder-group", run: crypto.randomUUID() },
+    controller: { instance_token: crypto.randomUUID(), peer_id: "import-holder" },
+  });
+  const [heldId, preparedId] = [held.ids[0]!, prepared.ids[0]!];
+  const items = [heldId, preparedId].map((id) => ({ id, kind: "feature", title: "rewritten", status: "done" }));
+  const stored = () => {
+    const db = openBrokerDb(broker.dbPath, { readonly: true });
+    try {
+      return db.query("SELECT project_key, title, status FROM roadmap_items WHERE id = ?").get(heldId);
+    } finally {
+      db.close();
+    }
+  };
+
+  const same = await post<ImportRes>(
+    `${broker.url}/roadmap/import`,
+    deckAuthored({ project_key: PK, force: true, items })
+  );
+  const rekeyed = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: "github.com/vocsap/import-elsewhere",
+    by: "unregistered-importer",
+    force: true,
+    items: [items[0]],
+  });
+
+  expect(same.body, JSON.stringify(same.body)).toEqual({ imported: 1, skipped: [heldId] });
+  expect(rekeyed.body, JSON.stringify(rekeyed.body)).toEqual({ imported: 0, skipped: [heldId] });
+  expect(stored()).toEqual({ project_key: PK, title: "held on import", status: "planned" });
 });
