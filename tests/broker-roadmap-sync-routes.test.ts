@@ -23,6 +23,8 @@ import type {
   RoadmapContextDocumentSyncPullResponse,
   RoadmapContextDocumentSyncPushResponse,
   RoadmapItem,
+  RoadmapLotQueueDeltaConflict,
+  RoadmapLotQueueDeltaResponse,
   RoadmapQueueDeltaConflict,
   RoadmapQueueDeltaResponse,
   RoadmapSyncLockClaimResponse,
@@ -3077,4 +3079,397 @@ test("pull, push replies and a replayed delta serve a named lot's card without i
   expect(replayed.body.replayed).toBe(true);
   expect(replayed.body.items?.find((item) => item.id === id)?.queue).toBeNull();
   expect(placeIn(b, id)).toMatchObject({ lot_id: "lot-m", queue: 7 });
+}, 30_000);
+
+// ----- /roadmap/sync/queue-delta, version 2 -----
+
+type LotDeltaBody = Partial<RoadmapLotQueueDeltaResponse> &
+  Partial<RoadmapLotQueueDeltaConflict> & { error?: string; op_index?: number };
+type Places = Array<[string, string | null, number | null]>;
+
+async function lotProject(name: string, cards: Array<[string, "a" | "b" | "default" | null, number | null]>) {
+  const b = shared;
+  const project = queueProject(`v2-${name}`);
+  const lot = { a: `${name}-lot-a`, b: `${name}-lot-b`, closed: `${name}-lot-closed` };
+  const card = (n: string) => `qd2-${name}-${n}`;
+  for (const [key, closedAt] of [["a", null], ["b", null], ["closed", "2026-01-01T00:00:00.000Z"]] as const) {
+    lotSql(
+      b,
+      "INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color) VALUES (?, ?, 'lot', 'deck', '2026-01-01T00:00:00.000Z', ?, NULL)",
+      project, lot[key], closedAt
+    );
+  }
+  await seedQueue(b, project, cards.map(([n]) => [card(n), null] as [string, null]));
+  for (const [n, where, rank] of cards) {
+    const lotId = where === null || where === "default" ? where : lot[where];
+    lotSql(b, "UPDATE roadmap_items SET lot_id = ?, queue = ? WHERE id = ?", lotId, rank, card(n));
+  }
+  return { b, project, lot, card };
+}
+
+function placesOf(b: TestBroker, project: string): Places {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return (
+      db.query("SELECT id, lot_id, queue FROM roadmap_items WHERE project_key = ? ORDER BY id").all(project) as {
+        id: string;
+        lot_id: string | null;
+        queue: number | null;
+      }[]
+    ).map((row) => [row.id, row.lot_id, row.queue]);
+  } finally {
+    db.close();
+  }
+}
+
+function lotRev(b: TestBroker, project: string, lotId: string): number {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT rev FROM roadmap_queue_state WHERE project_key = ? AND lot_id = ?").get(project, lotId) as
+      | { rev: number }
+      | null;
+    return row?.rev ?? 0;
+  } finally {
+    db.close();
+  }
+}
+
+const currentLots = (b: TestBroker, project: string, ids: string[]) =>
+  ids.map((lot_id) => ({ lot_id, expected_queue_rev: lotRev(b, project, lot_id) }));
+
+function sendLotDelta(
+  b: TestBroker,
+  project: string,
+  lots: unknown,
+  ops: unknown,
+  over: Record<string, unknown> = {}
+) {
+  return post<LotDeltaBody>(`${b.url}/roadmap/sync/queue-delta`, {
+    replica_id: R1,
+    project_key: project,
+    mutation_id: crypto.randomUUID(),
+    version: 2,
+    lots,
+    ops,
+    ...over,
+  });
+}
+
+test("queue-delta v2: each lot is judged on its own revision, and a stale one moves no other", async () => {
+  const { b, project, lot, card } = await lotProject("two", [["a1", "a", 1], ["a2", "a", 2], ["b1", "b", 1], ["b2", "b", 2]]);
+  const writtenAgainst = { a: currentLots(b, project, [lot.a]), b: currentLots(b, project, [lot.b]) };
+  const defaultRev = lotRev(b, project, "default");
+
+  const onA = await sendLotDelta(b, project, writtenAgainst.a, [{ op: "place", lot_id: lot.a, ids: [card("a2")], at: "start" }]);
+
+  expect(onA.status, JSON.stringify(onA.body)).toBe(200);
+  expect(onA.body.lot_revs).toEqual({ [lot.a]: lotRev(b, project, lot.a) });
+  expect(lotRev(b, project, lot.b), "a write on one lot leaves the other's revision").toBe(writtenAgainst.b[0]!.expected_queue_rev);
+  const stale = await sendLotDelta(b, project, writtenAgainst.a, [{ op: "remove", lot_id: lot.a, ids: [card("a1")] }]);
+  expect([stale.status, stale.body.reason, stale.body.lot_id]).toEqual([409, "queue_rev", lot.a]);
+  expect(stale.body.lot_revs).toEqual({ [lot.a]: lotRev(b, project, lot.a) });
+  const onB = await sendLotDelta(b, project, writtenAgainst.b, [{ op: "join", lot_id: lot.b, ids: [card("b2")], anchor: card("b1") }]);
+
+  expect(onB.status, JSON.stringify(onB.body)).toBe(200);
+  expect(onB.body.items?.map((row) => [row.id, row.updated_by])).toEqual([[card("b2"), `via:${R1.slice(0, 8)}:deck`]]);
+  expect(placesOf(b, project)).toEqual([
+    [card("a1"), lot.a, 2],
+    [card("a2"), lot.a, 1],
+    [card("b1"), lot.b, 1],
+    [card("b2"), lot.b, 1],
+  ]);
+  expect(lotRev(b, project, "default")).toBe(defaultRev);
+}, 30_000);
+
+test("queue-delta v2: a transfer writes lot and rank together, or neither", async () => {
+  const { b, project, lot, card } = await lotProject("move", [["x", "a", 1], ["y", "a", 2], ["z", "b", 1]]);
+  const before = placesOf(b, project);
+  const transfer = [
+    { op: "move_members", ids: [card("x")], from: lot.a, to: lot.b },
+    { op: "place", lot_id: lot.b, ids: [card("x")], at: "end" },
+  ];
+  const both = [lot.a, lot.b];
+
+  const stale = await sendLotDelta(b, project, [{ lot_id: lot.a, expected_queue_rev: lotRev(b, project, lot.a) }, { lot_id: lot.b, expected_queue_rev: 99 }], transfer);
+  expect([stale.status, stale.body.lot_id]).toEqual([409, lot.b]);
+  const trigger = "zz_fault_v2_receipt";
+  lotSql(b, `CREATE TRIGGER ${trigger} BEFORE INSERT ON roadmap_queue_receipts WHEN new.project_key = '${project}' BEGIN SELECT RAISE(ABORT, 'receipt fault'); END`);
+  try {
+    expect((await sendLotDelta(b, project, currentLots(b, project, both), transfer)).status).toBe(500);
+  } finally {
+    lotSql(b, `DROP TRIGGER IF EXISTS ${trigger}`);
+  }
+  expect(placesOf(b, project), "a refused or failed transfer writes nothing").toEqual(before);
+  expect(receiptCount(b, project)).toBe(0);
+
+  const moved = await sendLotDelta(b, project, currentLots(b, project, both), transfer);
+
+  expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+  expect(placesOf(b, project)).toEqual([
+    [card("x"), lot.b, 2],
+    [card("y"), lot.a, 1],
+    [card("z"), lot.b, 1],
+  ]);
+  expect(moved.body.items?.map((row) => [row.id, row.lot_id, row.queue]).sort()).toEqual([
+    [card("x"), lot.b, null],
+    [card("y"), lot.a, null],
+  ]);
+}, 30_000);
+
+test("queue-delta v2: a retry after a lost response answers the receipt, whose columns carry the default lot's revision", async () => {
+  const { b, project, lot, card } = await lotProject("retry", [["d", "default", 1], ["x", "a", 1], ["y", "a", 2]]);
+  const lots = currentLots(b, project, [lot.a]);
+  const ops = [{ op: "remove", lot_id: lot.a, ids: [card("x")] }];
+  const mutation_id = crypto.randomUUID();
+  const defaultRev = lotRev(b, project, "default");
+  expect(defaultRev, "non-vacuity: the default lot has a revision of its own").toBeGreaterThan(0);
+
+  const first = await sendLotDelta(b, project, lots, ops, { mutation_id });
+  const later = await sendLotDelta(b, project, currentLots(b, project, [lot.a]), [{ op: "remove", lot_id: lot.a, ids: [card("y")] }]);
+  const settled = lotRev(b, project, lot.a);
+  const retry = await sendLotDelta(b, project, lots, ops, { mutation_id });
+
+  expect([first.status, first.body.replayed, later.status]).toEqual([200, false, 200]);
+  expect([retry.status, retry.body.replayed]).toEqual([200, true]);
+  // The receipt answers with the revisions of the first attempt, not the current ones.
+  expect([retry.body.payload_hash, retry.body.lot_revs]).toEqual([first.body.payload_hash, first.body.lot_revs]);
+  expect(retry.body.items?.map((row) => row.id)).toEqual(first.body.items?.map((row) => row.id));
+  expect(lotRev(b, project, lot.a)).toBe(settled);
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  const receipt = db
+    .query("SELECT queue_rev_before, queue_rev_after FROM roadmap_queue_receipts WHERE project_key = ? AND mutation_id = ?")
+    .get(project, mutation_id);
+  db.close();
+  expect(receipt).toEqual({ queue_rev_before: defaultRev, queue_rev_after: defaultRev });
+}, 30_000);
+
+test("queue-delta v2: a mutation id receipted for another payload is refused, a v1 receipt included", async () => {
+  const { b, project, lot, card } = await lotProject("reuse", [["d", "default", 1], ["e", "default", 2], ["x", "a", 1]]);
+  const v1Id = crypto.randomUUID();
+  const v2Id = crypto.randomUUID();
+  const swap = [{ op: "place", ids: [card("e")], at: "start" }];
+  expect((await sendDelta(b, project, await queueRevOf(b, project), swap, { mutation_id: v1Id })).status).toBe(200);
+  const lots = currentLots(b, project, [lot.a]);
+  expect((await sendLotDelta(b, project, lots, [{ op: "clear", lot_id: lot.a }], { mutation_id: v2Id })).status).toBe(200);
+  const after = placesOf(b, project);
+
+  const asV2 = await sendLotDelta(b, project, currentLots(b, project, ["default"]), [{ op: "clear", lot_id: "default" }], { mutation_id: v1Id });
+  const otherPayload = await sendLotDelta(b, project, lots, [{ op: "remove", lot_id: lot.a, ids: [card("x")] }], { mutation_id: v2Id });
+  const asV1 = await sendDelta(b, project, await queueRevOf(b, project), swap, { mutation_id: v2Id });
+
+  expect([asV2, otherPayload, asV1].map((res) => [res.status, res.body.reason])).toEqual(Array(3).fill([409, "mutation_reused"]));
+  expect(placesOf(b, project)).toEqual(after);
+  expect(receiptCount(b, project)).toBe(2);
+}, 30_000);
+
+test("queue-delta v2: a receipt belongs to its replica and project: the same mutation id elsewhere is a new mutation", async () => {
+  const here = await lotProject("scope", [["x", "a", 1], ["y", "a", 2]]);
+  const there = await lotProject("scope-other", [["x", "a", 1]]);
+  const mutation_id = crypto.randomUUID();
+  const remove = (p: typeof here, n: string, replica_id: string) =>
+    sendLotDelta(p.b, p.project, currentLots(p.b, p.project, [p.lot.a]), [{ op: "remove", lot_id: p.lot.a, ids: [p.card(n)] }], {
+      mutation_id,
+      replica_id,
+    });
+
+  const sent = [await remove(here, "x", R1), await remove(here, "y", R2), await remove(there, "x", R1)];
+
+  expect(sent.map((res) => [res.status, res.body.replayed, res.body.reason])).toEqual(Array(3).fill([200, false, undefined]));
+  expect([receiptCount(here.b, here.project), receiptCount(there.b, there.project)]).toEqual([2, 1]);
+  expect([...placesOf(here.b, here.project), ...placesOf(there.b, there.project)].map((place) => place[2])).toEqual([null, null, null]);
+}, 30_000);
+
+test("queue-delta v2: one lot id in two projects is judged and written in the envelope's project alone", async () => {
+  const b = shared;
+  const states = ["open", "closed", "absent"] as const;
+  const projects: Record<string, { project: string; cards: string[] }> = {};
+  for (const state of states) {
+    const project = queueProject(`v2-twin-${state}`);
+    const cards = [`qd2-twin-${state}-1`, `qd2-twin-${state}-2`];
+    if (state !== "absent") {
+      lotSql(
+        b,
+        "INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color) VALUES (?, 'twin-lot', 'lot', 'deck', '2026-01-01T00:00:00.000Z', ?, NULL)",
+        project, state === "closed" ? "2026-01-01T00:00:00.000Z" : null
+      );
+    }
+    await seedQueue(b, project, cards.map((id) => [id, null] as [string, null]));
+    cards.forEach((id, i) => lotSql(b, "UPDATE roadmap_items SET lot_id = 'twin-lot', queue = ? WHERE id = ?", i + 1, id));
+    projects[state] = { project, cards };
+  }
+  const open = projects.open!;
+  const untouched = () => [placesOf(b, projects.closed!.project), placesOf(b, projects.absent!.project)];
+  const others = untouched();
+  const swap = (state: string) => {
+    const { project, cards } = projects[state]!;
+    return sendLotDelta(b, project, currentLots(b, project, ["twin-lot"]), [
+      { op: "place", lot_id: "twin-lot", ids: [cards[1]], at: "start" },
+    ]);
+  };
+
+  const answers = [await swap("open"), await swap("closed"), await swap("absent")];
+
+  expect(answers.map((res) => [res.status, res.body.reason])).toEqual([
+    [200, undefined],
+    [409, "lot_closed"],
+    [404, undefined],
+  ]);
+  expect(answers[0]!.body.items?.map((row) => row.id).sort()).toEqual(open.cards);
+  expect(placesOf(b, open.project)).toEqual([
+    [open.cards[0]!, "twin-lot", 2],
+    [open.cards[1]!, "twin-lot", 1],
+  ]);
+  expect(untouched()).toEqual(others);
+}, 30_000);
+
+test("queue-delta v2: a done or archived card changes lot and drops its rank", async () => {
+  const { b, project, lot, card } = await lotProject("finished", [["done", "a", null], ["archived", "a", null]]);
+  for (const status of ["done", "archived"]) {
+    lotSql(b, "UPDATE roadmap_items SET status = ?, queue = 4 WHERE id = ?", status, card(status));
+    const moved = await sendLotDelta(b, project, currentLots(b, project, [lot.a, lot.b]), [
+      { op: "move_members", ids: [card(status)], from: lot.a, to: lot.b },
+    ]);
+    expect([status, moved.status]).toEqual([status, 200]);
+  }
+  expect(placesOf(b, project)).toEqual([
+    [card("archived"), lot.b, null],
+    [card("done"), lot.b, null],
+  ]);
+}, 30_000);
+
+test("queue-delta v2: an unknown lot is a 404 and a closed one takes no card and no rank, though cards may leave it", async () => {
+  const { b, project, lot, card } = await lotProject("closed", [["x", "a", 1], ["old", null, null]]);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = ? WHERE id = ?", lot.closed, card("old"));
+  const before = placesOf(b, project);
+  const send = (ids: string[], ops: unknown) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
+
+  const unknown = await send([lot.a, "no-such-lot"], [{ op: "move_members", ids: [card("x")], from: lot.a, to: "no-such-lot" }]);
+  const unknownQueue = await send(["no-such-lot"], [{ op: "clear", lot_id: "no-such-lot" }]);
+  const into = await send([lot.a, lot.closed], [{ op: "move_members", ids: [card("x")], from: lot.a, to: lot.closed }]);
+  const ranked = await send([lot.closed], [{ op: "place", lot_id: lot.closed, ids: [card("old")], at: "end" }]);
+
+  expect([unknown.status, unknown.body.lot_id, unknownQueue.status]).toEqual([404, "no-such-lot", 404]);
+  expect([into, ranked].map((res) => [res.status, res.body.reason, res.body.lot_id])).toEqual(
+    Array(2).fill([409, "lot_closed", lot.closed])
+  );
+  expect(placesOf(b, project)).toEqual(before);
+  const out = await send([lot.closed], [{ op: "move_members", ids: [card("old")], from: lot.closed, to: null }]);
+  expect(out.status, JSON.stringify(out.body)).toBe(200);
+  expect(placesOf(b, project)).toContainEqual([card("old"), null, null]);
+}, 30_000);
+
+test("queue-delta v2: card rules hold inside a named lot, and a refusal writes and receipts nothing", async () => {
+  const { b, project, lot, card } = await lotProject("rules", [
+    ["x", "a", 1], ["dir", "a", 2], ["done", "a", null], ["off", "a", null], ["idle", "a", null], ["far", "b", 1],
+  ]);
+  lotSql(b, "UPDATE roadmap_items SET kind = 'directive', directive = 'clear' WHERE id = ?", card("dir"));
+  lotSql(b, "UPDATE roadmap_items SET status = 'done' WHERE id = ?", card("done"));
+  lotSql(b, "UPDATE roadmap_items SET inactive = 1 WHERE id = ?", card("off"));
+  const before = placesOf(b, project);
+  const send = (ops: unknown, ids = [lot.a]) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
+  const place = (n: string) => [{ op: "place", lot_id: lot.a, ids: [card(n)], at: "end" }];
+
+  const joined = await send([{ op: "join", lot_id: lot.a, ids: [card("x")], anchor: card("dir") }]);
+  const finished = await send(place("done"));
+  const inactive = await send(place("off"));
+  const stranger = await send(place("nobody"));
+  const foreign = await send(place("far"));
+  const wrongSource = await send([{ op: "move_members", ids: [card("far")], from: lot.a, to: null }]);
+  const unqueued = await send([{ op: "place", lot_id: lot.a, ids: [card("x")], before: card("idle") }]);
+
+  expect(
+    [joined, finished, inactive, stranger, foreign, wrongSource, unqueued].map((res) => [res.status, res.body.item_id])
+  ).toEqual([
+    [400, card("dir")],
+    [400, card("done")],
+    [403, card("off")],
+    [404, card("nobody")],
+    [409, card("far")],
+    [409, card("far")],
+    [400, card("idle")],
+  ]);
+  expect([foreign.body.reason, unqueued.body.op_index]).toEqual(["lot_mismatch", 0]);
+  expect(placesOf(b, project)).toEqual(before);
+  expect(receiptCount(b, project)).toBe(0);
+
+  // A wave already mixed stays editable elsewhere, and a done card's leftover rank is outside the queue.
+  lotSql(b, "UPDATE roadmap_items SET kind = 'directive', directive = 'clear', lot_id = ?, queue = 1 WHERE id = ?", lot.b, card("idle"));
+  lotSql(b, "UPDATE roadmap_items SET lot_id = ?, queue = 9 WHERE id = ?", lot.b, card("done"));
+  lotSql(b, "UPDATE roadmap_items SET lot_id = ?, queue = 2 WHERE id = ?", lot.b, card("x"));
+  const elsewhere = await send([{ op: "remove", lot_id: lot.b, ids: [card("x")] }], [lot.b]);
+  expect(elsewhere.status, JSON.stringify(elsewhere.body)).toBe(200);
+  expect(elsewhere.body.items?.map((row) => row.id)).toEqual([card("x")]);
+  expect(placesOf(b, project)).toContainEqual([card("done"), lot.b, 9]);
+}, 30_000);
+
+test("queue-delta v2: a card another relay holds is neither moved nor unqueued, one that only takes a new number is", async () => {
+  const { b, project, lot, card } = await lotProject("lock", [["x", "a", 1], ["held", "a", 2], ["idle", "a", null]]);
+  const claim = await post(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R2,
+    id: card("held"),
+    action: "claim",
+    owner: { peer_id: "agent-v2-lock", group_id: null },
+  });
+  expect(claim.status).toBe(200);
+  const claimIdle = await post(`${b.url}/roadmap/sync/lock`, {
+    replica_id: R2,
+    id: card("idle"),
+    action: "claim",
+    owner: { peer_id: "agent-v2-lock-idle", group_id: null },
+  });
+  expect(claimIdle.status).toBe(200);
+  const before = placesOf(b, project);
+  const send = (ops: unknown, ids = [lot.a]) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
+
+  const unqueued = await send([{ op: "clear", lot_id: lot.a }]);
+  const placed = await send([{ op: "place", lot_id: lot.a, ids: [card("held")], at: "start" }]);
+  const transferred = await send([{ op: "move_members", ids: [card("idle")], from: lot.a, to: lot.b }], [lot.a, lot.b]);
+
+  expect([unqueued, placed, transferred].map((res) => [res.status, res.body.reason, res.body.item_id])).toEqual([
+    [409, "locked_upstream", card("held")],
+    [409, "locked_upstream", card("held")],
+    [409, "locked_upstream", card("idle")],
+  ]);
+  expect(placesOf(b, project)).toEqual(before);
+  const renumbered = await send([{ op: "remove", lot_id: lot.a, ids: [card("x")] }]);
+  expect(renumbered.status, JSON.stringify(renumbered.body)).toBe(200);
+  expect(placesOf(b, project)).toContainEqual([card("held"), lot.a, 1]);
+}, 30_000);
+
+test("queue-delta v2: a malformed envelope is refused before anything is read", async () => {
+  const { b, project, lot, card } = await lotProject("shape", [["x", "a", 1]]);
+  const lots = currentLots(b, project, [lot.a]);
+  const ops = [{ op: "remove", lot_id: lot.a, ids: [card("x")] }];
+  const before = placesOf(b, project);
+
+  const refused = [
+    await sendLotDelta(b, project, lots, ops, { version: 3 }),
+    await sendLotDelta(b, project, lots, ops, { expected_queue_rev: 0 }),
+    await sendLotDelta(b, project, [], ops),
+    await sendLotDelta(b, project, lots, [{ op: "remove", lot_id: lot.a, ids: ["bad id"] }]),
+  ];
+
+  expect(refused.map((res) => res.status)).toEqual([400, 400, 400, 400]);
+  expect(refused[0]!.body.error).toContain("version");
+  expect(refused[1]!.body.error).toContain("expected_queue_rev");
+  expect(refused[3]!.body.item_id).toBe("bad id");
+  expect(placesOf(b, project)).toEqual(before);
+}, 30_000);
+
+test("queue-delta v2: every refusal is logged with its status and reason", async () => {
+  const { b, project, lot, card } = await lotProject("trace", [["x", "a", 1]]);
+  const log = () => Bun.file(join(b.tmpDir, "logs", "broker.log")).text();
+  const start = (await log()).length;
+  const ops = [{ op: "remove", lot_id: lot.a, ids: [card("x")] }];
+  const lots = currentLots(b, project, [lot.a]);
+
+  await sendLotDelta(b, project, lots, ops, { version: 3 });
+  await sendLotDelta(b, project, [{ lot_id: lot.a, expected_queue_rev: 99 }], ops);
+  await sendLotDelta(b, project, currentLots(b, project, ["no-such-lot"]), [{ op: "clear", lot_id: "no-such-lot" }]);
+
+  const traces = (await log()).slice(start).split("\n").filter((line) => line.includes("v2 queue delta refused"));
+  expect(traces).toHaveLength(3);
+  expect(traces[0]).toContain("version");
+  expect(traces[1]).toContain("queue_rev");
+  expect(traces[2]).toContain("no-such-lot");
 }, 30_000);

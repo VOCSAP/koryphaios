@@ -1,6 +1,6 @@
 import type { DelegationPolicy, DelegationTaskAction, DelegationTaskStatus } from "./delegated-task.ts";
 import type { PeerTelemetrySnapshot } from "./peer-telemetry.ts";
-import type { QueueDeltaOp } from "./roadmap-queue-delta.ts";
+import type { LotQueueDeltaOp, LotQueueRev, QueueDeltaOp } from "./roadmap-queue-delta.ts";
 
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
@@ -833,6 +833,38 @@ export interface RoadmapQueueDeltaConflict {
   error: "conflict";
   reason: "queue_rev" | "locked_upstream" | "mutation_reused";
   queue_rev: number;
+  item_id?: string;
+}
+
+/**
+ * The queue mutation across several lots, on the same route: `version` tells the
+ * two envelopes apart. `lots` lists exactly the lots the operations touch.
+ */
+export interface RoadmapLotQueueDeltaRequest {
+  replica_id: string;
+  project_key: string;
+  mutation_id: string;
+  version: 2;
+  lots: LotQueueRev[];
+  ops: LotQueueDeltaOp[];
+}
+
+export interface RoadmapLotQueueDeltaResponse {
+  mutation_id: string;
+  payload_hash: string;
+  /** Revision of each listed lot once this mutation is committed. */
+  lot_revs: Record<string, number>;
+  replayed: boolean;
+  /** Cards whose lot or rank changed, as /roadmap/sync/pull serves them. */
+  items: RoadmapSyncRow[];
+}
+
+/** 409 body of a v2 envelope; `lot_revs` holds the current revision of each listed lot. */
+export interface RoadmapLotQueueDeltaConflict {
+  error: "conflict";
+  reason: RoadmapQueueDeltaConflict["reason"] | "lot_mismatch" | "lot_closed";
+  lot_revs: Record<string, number>;
+  lot_id?: string;
   item_id?: string;
 }
 

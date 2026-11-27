@@ -3,6 +3,8 @@
 // anchors, never a rank, so it replays on a queue that moved since it was
 // written. Pure: the broker owns the database, the project and the preconditions.
 
+import { moveLotMembers } from "./roadmap-lot.ts";
+
 export const QUEUE_DELTA_MAX_OPS = 500;
 export const QUEUE_DELTA_MAX_IDS = 5000;
 const ID_MAX_CHARS = 64;
@@ -303,6 +305,183 @@ export function rankMoveToDeltaOps(
   const next = Math.min(...higher.map((row) => row.queue));
   const before = higher.filter((row) => row.queue === next).map((row) => row.id).sort()[0]!;
   return [{ op: "place", ids: [id], before }];
+}
+
+/** The revision a v2 envelope was written against, for one lot it touches. */
+export interface LotQueueRev {
+  lot_id: string;
+  expected_queue_rev: number;
+}
+
+/** An operation of a v2 envelope: a queue operation inside one lot, or cards changing lot (null: in no lot). */
+export type LotQueueDeltaOp =
+  | (QueueDeltaOp & { lot_id: string })
+  | { op: "move_members"; ids: string[]; from: string | null; to: string | null };
+
+export interface LotQueueDeltaState {
+  /** Lot of every card the operations may name; null: in no lot. */
+  membership: ReadonlyMap<string, string | null>;
+  /** Waves of each lot's queue. */
+  waves: ReadonlyMap<string, readonly (readonly string[])[]>;
+}
+
+export interface LotQueueDeltaParseError {
+  ok: false;
+  code: "malformed" | "too_large";
+  error: string;
+  /** Index of the offending operation; absent when the list of lots is at fault. */
+  op_index?: number;
+}
+
+export interface LotQueueDeltaApplyError {
+  ok: false;
+  code: QueueDeltaErrorCode | "lot_mismatch";
+  error: string;
+  op_index: number;
+  item_id?: string;
+}
+
+/** Every lot the operations write to or take cards from, sorted. */
+export function lotQueueDeltaLots(ops: readonly LotQueueDeltaOp[]): string[] {
+  const lots = new Set<string>();
+  for (const op of ops) {
+    if (op.op !== "move_members") lots.add(op.lot_id);
+    else for (const lot of [op.from, op.to]) if (lot !== null) lots.add(lot);
+  }
+  return [...lots].sort();
+}
+
+export function lotQueueDeltaCardIds(ops: readonly LotQueueDeltaOp[]): string[] {
+  return [...new Set(ops.flatMap((op) => (op.op === "move_members" ? op.ids : queueDeltaCardIds([op]))))];
+}
+
+export function lotQueueDeltaMovedIds(ops: readonly LotQueueDeltaOp[]): string[] {
+  return [...new Set(ops.flatMap((op) => (op.op === "move_members" ? op.ids : queueDeltaMovedIds([op]))))];
+}
+
+function isLotEnd(value: unknown): value is string | null {
+  return value === null || isId(value);
+}
+
+/**
+ * Wire shape of a v2 envelope's `lots` and `ops`. The lots listed are exactly
+ * the lots the operations touch: one more would refuse the envelope on a
+ * revision it does not depend on, one less would apply it unchecked.
+ */
+export function parseLotQueueDelta(
+  rawLots: unknown,
+  rawOps: unknown
+): { ok: true; lots: LotQueueRev[]; ops: LotQueueDeltaOp[] } | LotQueueDeltaParseError {
+  const refuse = (error: string, op_index?: number, code: LotQueueDeltaParseError["code"] = "malformed"): LotQueueDeltaParseError => ({
+    ok: false,
+    code,
+    error,
+    ...(op_index === undefined ? {} : { op_index }),
+  });
+  if (!Array.isArray(rawOps) || rawOps.length === 0) return refuse("ops must be a non-empty array", 0);
+  if (rawOps.length > QUEUE_DELTA_MAX_OPS) {
+    return refuse(`ops exceeds the ${QUEUE_DELTA_MAX_OPS}-operation limit`, QUEUE_DELTA_MAX_OPS, "too_large");
+  }
+  const ops: LotQueueDeltaOp[] = [];
+  let totalIds = 0;
+  for (let i = 0; i < rawOps.length; i++) {
+    const entry: unknown = rawOps[i];
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return refuse("an operation must be an object", i);
+    const o = entry as Record<string, unknown>;
+    let op: LotQueueDeltaOp;
+    if (o.op === "move_members") {
+      const ids = idList(o.ids);
+      const known = Object.keys(o).every((k) => ["op", "ids", "from", "to"].includes(k));
+      if (!known || ids === null || !isLotEnd(o.from) || !isLotEnd(o.to) || o.from === o.to) {
+        return refuse("move_members takes distinct card ids, and a from and a to that differ, each a lot id or null", i);
+      }
+      op = { op: "move_members", ids, from: o.from, to: o.to };
+    } else {
+      const { lot_id, ...queueOp } = o;
+      if (!isId(lot_id)) return refuse("an operation must name its lot_id", i);
+      const parsed = parseQueueDeltaOps([queueOp]);
+      if (!parsed.ok) return refuse(parsed.error, i, parsed.code === "too_large" ? "too_large" : "malformed");
+      op = { ...parsed.ops[0]!, lot_id };
+    }
+    if (op.op !== "clear") totalIds += op.ids.length;
+    if (totalIds > QUEUE_DELTA_MAX_IDS) {
+      return refuse(`the operations name more than ${QUEUE_DELTA_MAX_IDS} cards`, i, "too_large");
+    }
+    ops.push(op);
+  }
+  if (!Array.isArray(rawLots)) return refuse("lots must be an array");
+  const lots: LotQueueRev[] = [];
+  for (const entry of rawLots as unknown[]) {
+    const o = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+    const rev = o.expected_queue_rev;
+    const known = Object.keys(o).every((k) => k === "lot_id" || k === "expected_queue_rev");
+    if (!known || !isId(o.lot_id) || typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0) {
+      return refuse("each lot takes a lot_id and a non-negative integer expected_queue_rev");
+    }
+    lots.push({ lot_id: o.lot_id, expected_queue_rev: rev });
+  }
+  const listed = lots.map((lot) => lot.lot_id).sort();
+  const touched = lotQueueDeltaLots(ops);
+  if (listed.length !== touched.length || listed.some((lot, i) => lot !== touched[i])) {
+    return refuse(`lots must list exactly the lots the operations touch: ${touched.join(", ")}`);
+  }
+  return { ok: true, lots, ops };
+}
+
+/**
+ * applyQueueDelta across lots, in operation order. A queue operation names cards
+ * of its own lot only, and a card changes lot by move_members alone, which
+ * takes it out of the source queue.
+ */
+export function applyLotQueueDelta(
+  start: LotQueueDeltaState,
+  ops: readonly LotQueueDeltaOp[]
+): { ok: true; membership: Map<string, string | null>; waves: Map<string, string[][]> } | LotQueueDeltaApplyError {
+  const membership = new Map(start.membership);
+  const waves = new Map([...start.waves].map(([lot, queue]) => [lot, queue.map((wave) => [...wave])]));
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i]!;
+    const mismatch = (item_id: string, lot: string | null): LotQueueDeltaApplyError => ({
+      ok: false,
+      code: "lot_mismatch",
+      error: `card '${item_id}' is not in ${lot === null ? "no lot" : `lot '${lot}'`}`,
+      op_index: i,
+      item_id,
+    });
+    if (op.op === "move_members") {
+      const cards = op.ids
+        .filter((id) => membership.has(id))
+        .map((id) => ({ id, lot_id: membership.get(id)!, queue: null }));
+      const moved = moveLotMembers(cards, op);
+      // The parser refuses a move onto its source, so a refusal here names a card.
+      if (!moved.ok) return mismatch("card_id" in moved ? moved.card_id : op.ids[0]!, op.from);
+      for (const id of op.ids) membership.set(id, op.to);
+      if (op.from !== null) waves.set(op.from, without(waves.get(op.from) ?? [], new Set(op.ids)));
+      continue;
+    }
+    if (op.op !== "clear") {
+      const stray = op.ids.find((id) => membership.get(id) !== op.lot_id);
+      if (stray !== undefined) return mismatch(stray, op.lot_id);
+    }
+    const applied = applyQueueDelta(waves.get(op.lot_id) ?? [], [op]);
+    if (!applied.ok) return { ...applied, op_index: i };
+    waves.set(op.lot_id, applied.waves);
+  }
+  return { ok: true, membership, waves };
+}
+
+/** The v2 counterpart of canonicalQueueDelta; the version byte keeps the two hashes apart. */
+export function canonicalLotQueueDelta(projectKey: string, lots: readonly LotQueueRev[], ops: readonly LotQueueDeltaOp[]): string {
+  const sortedLots = [...lots]
+    .sort((a, b) => (a.lot_id < b.lot_id ? -1 : 1))
+    .map((lot) => ({ lot_id: lot.lot_id, expected_queue_rev: lot.expected_queue_rev }));
+  const normalized = ops.map((op) => {
+    if (op.op === "move_members") return { op: op.op, ids: op.ids, from: op.from, to: op.to };
+    // The key order inside one queue operation is the v1 canonical one.
+    const queueOp = (JSON.parse(canonicalQueueDelta(projectKey, 0, [op])) as { ops: object[] }).ops[0]!;
+    return { lot_id: op.lot_id, ...queueOp };
+  });
+  return JSON.stringify({ v: 2, project_key: projectKey, lots: sortedLots, ops: normalized });
 }
 
 /** Stable text of an envelope's meaning: key order and whitespace never change its hash. */

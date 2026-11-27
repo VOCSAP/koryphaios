@@ -2,16 +2,23 @@ import { expect, test } from "bun:test";
 import {
   QUEUE_DELTA_MAX_IDS,
   QUEUE_DELTA_MAX_OPS,
+  applyLotQueueDelta,
   applyQueueDelta,
+  canonicalLotQueueDelta,
   canonicalQueueDelta,
   diffToDeltaOps,
   fitsQueueDeltaLimits,
+  lotQueueDeltaCardIds,
+  lotQueueDeltaMovedIds,
+  parseLotQueueDelta,
   parseQueueDeltaOps,
   queueDeltaCardIds,
   queueDeltaMovedIds,
   queueToWaves,
   rankMoveToDeltaOps,
   wavesToRanks,
+  type LotQueueDeltaOp,
+  type LotQueueDeltaState,
   type QueueDeltaOp,
 } from "../shared/roadmap-queue-delta.ts";
 
@@ -151,6 +158,141 @@ test("the canonical text ignores key order and changes with any part of the mean
   expect(canonicalQueueDelta("q", 3, ops([{ op: "place", ids: ["x"], before: "b" }]))).not.toBe(a);
   expect(canonicalQueueDelta("p", 3, ops([{ op: "place", ids: ["x"], after: "b" }]))).not.toBe(a);
   expect(canonicalQueueDelta("p", 3, ops([{ op: "place", ids: ["x", "y"], before: "b" }]))).not.toBe(a);
+});
+
+// A receipt keeps the hash of this text: a byte that moves turns an in-flight retry into mutation_reused.
+test("the canonical text of a v1 envelope keeps its exact bytes", () => {
+  const envelope = ops([
+    { before: "b", ids: ["x"], op: "place" },
+    { op: "place", after: "b", ids: ["y", "z"] },
+    { ids: ["w"], op: "place", at: "end" },
+    { anchor: "a", op: "join", ids: ["v"] },
+    { ids: ["u"], op: "remove" },
+    { op: "clear" },
+  ]);
+
+  expect(canonicalQueueDelta("github.com/o/r", 7, envelope)).toBe(
+    '{"v":1,"project_key":"github.com/o/r","expected_queue_rev":7,"ops":[' +
+      '{"op":"place","ids":["x"],"before":"b"},' +
+      '{"op":"place","ids":["y","z"],"after":"b"},' +
+      '{"op":"place","ids":["w"],"at":"end"},' +
+      '{"op":"join","ids":["v"],"anchor":"a"},' +
+      '{"op":"remove","ids":["u"]},' +
+      '{"op":"clear"}]}'
+  );
+});
+
+const at = (lot_id: string, expected_queue_rev = 0) => ({ lot_id, expected_queue_rev });
+
+function lotOps(raw: unknown[], lots: string[]): LotQueueDeltaOp[] {
+  const parsed = parseLotQueueDelta(lots.map((lot) => at(lot)), raw);
+  if (!parsed.ok) throw new Error(`unexpected refusal: ${parsed.error}`);
+  return parsed.ops;
+}
+
+const move = (ids: string[], from: string | null, to: string | null) => ({ op: "move_members", ids, from, to });
+
+test("a v2 envelope reads queue operations scoped to a lot and moves between lots", () => {
+  const raw = [{ op: "place", lot_id: "A", ids: ["x"], at: "end" }, move(["y"], "B", null), { op: "clear", lot_id: "C" }];
+
+  expect(parseLotQueueDelta([at("C", 3), at("A", 1), at("B", 2)], raw)).toEqual({
+    ok: true,
+    lots: [at("C", 3), at("A", 1), at("B", 2)],
+    ops: raw as LotQueueDeltaOp[],
+  });
+});
+
+test.each([
+  ["no operation", [at("A")], []],
+  ["an operation without its lot", [at("A")], [{ op: "remove", ids: ["x"] }]],
+  ["an operation with a padded lot", [at("A")], [{ op: "remove", lot_id: " A", ids: ["x"] }]],
+  ["an unknown key on a queue operation", [at("A")], [{ op: "remove", lot_id: "A", ids: ["x"], force: true }]],
+  ["a move without a destination", [at("A")], [{ op: "move_members", ids: ["x"], from: "A" }]],
+  ["a move without a source", [at("A")], [{ op: "move_members", ids: ["x"], to: "A" }]],
+  ["a move onto its source", [at("A")], [move(["x"], "A", "A")]],
+  ["a move naming a lot twice", [at("A"), at("B")], [{ ...move(["x"], "A", "B"), lot_id: "A" }]],
+  ["a move of no card", [at("A"), at("B")], [move([], "A", "B")]],
+  ["no list of lots", undefined, [{ op: "clear", lot_id: "A" }]],
+  ["a touched lot left out", [at("A")], [move(["x"], "A", "B")]],
+  ["a lot the operations do not touch", [at("A"), at("B")], [{ op: "clear", lot_id: "A" }]],
+  ["a lot listed twice", [at("A"), at("A")], [{ op: "clear", lot_id: "A" }]],
+  ["a negative revision", [at("A", -1)], [{ op: "clear", lot_id: "A" }]],
+  ["a missing revision", [{ lot_id: "A" }], [{ op: "clear", lot_id: "A" }]],
+  ["an unknown key on a lot", [{ ...at("A"), rev: 0 }], [{ op: "clear", lot_id: "A" }]],
+])("the v2 parser refuses %s", (_name, lots, raw) => {
+  expect(parseLotQueueDelta(lots, raw)).toMatchObject({ ok: false, code: "malformed" });
+});
+
+test("the v2 parser names the operation that lacks its lot", () => {
+  const raw = [{ op: "clear", lot_id: "A" }, { op: "clear" }];
+
+  expect(parseLotQueueDelta([at("A")], raw)).toMatchObject({ ok: false, code: "malformed", op_index: 1 });
+});
+
+test("the v2 parser bounds the whole envelope, by operations and by cards named across them", () => {
+  const clears = Array.from({ length: QUEUE_DELTA_MAX_OPS + 1 }, () => ({ op: "clear", lot_id: "A" }));
+  expect(parseLotQueueDelta([at("A")], clears)).toMatchObject({ ok: false, code: "too_large" });
+  const half = (prefix: string) => Array.from({ length: QUEUE_DELTA_MAX_IDS / 2 + 1 }, (_, i) => `${prefix}${i}`);
+  const split = [{ op: "remove", lot_id: "A", ids: half("a") }, move(half("b"), "A", null)];
+  expect(parseLotQueueDelta([at("A")], split)).toMatchObject({ ok: false, code: "too_large", op_index: 1 });
+});
+
+test("the v2 canonical text keeps its bytes, whatever the order of the lots and of the keys", () => {
+  const raw = [{ ids: ["x"], at: "end", lot_id: "B", op: "place" }, { to: "B", from: "A", ids: ["y"], op: "move_members" }];
+  const parsed = lotOps(raw, ["A", "B"]);
+
+  const text = canonicalLotQueueDelta("p", [at("B", 4), at("A", 2)], parsed);
+
+  expect(text).toBe(
+    '{"v":2,"project_key":"p","lots":[{"lot_id":"A","expected_queue_rev":2},{"lot_id":"B","expected_queue_rev":4}],' +
+      '"ops":[{"lot_id":"B","op":"place","ids":["x"],"at":"end"},{"op":"move_members","ids":["y"],"from":"A","to":"B"}]}'
+  );
+  expect(canonicalLotQueueDelta("p", [at("A", 2), at("B", 4)], parsed)).toBe(text);
+});
+
+const lotState = (): LotQueueDeltaState => ({
+  membership: new Map<string, string | null>([["a1", "A"], ["a2", "A"], ["b1", "B"], ["free", null]]),
+  waves: new Map([["A", [["a1"], ["a2"]]], ["B", [["b1"]]]]),
+});
+
+test("each lot's queue moves alone, and a moved card leaves its source queue unranked", () => {
+  const start = lotState();
+  const result = applyLotQueueDelta(start, lotOps([{ op: "place", lot_id: "A", ids: ["a2"], before: "a1" }, move(["a1"], "A", "B"), move(["free"], null, "B"), { op: "join", lot_id: "B", ids: ["free"], anchor: "b1" }], ["A", "B"]));
+
+  if (!result.ok) throw new Error(result.error);
+  expect(Object.fromEntries(result.waves)).toEqual({ A: [["a2"]], B: [["b1", "free"]] });
+  expect(Object.fromEntries(result.membership)).toEqual({ a1: "B", a2: "A", b1: "B", free: "B" });
+  expect(start, "the input state is never mutated").toEqual(lotState());
+});
+
+test("a card leaves every lot by a move to none", () => {
+  const result = applyLotQueueDelta(lotState(), lotOps([move(["b1"], "B", null)], ["B"]));
+
+  if (!result.ok) throw new Error(result.error);
+  expect([result.membership.get("b1"), result.waves.get("B")]).toEqual([null, []]);
+});
+
+test.each([
+  ["placing a card of another lot", [{ op: "place", lot_id: "B", ids: ["a1"], at: "end" }], ["B"], "lot_mismatch", "a1"],
+  ["placing a card in no lot", [{ op: "place", lot_id: "A", ids: ["free"], at: "end" }], ["A"], "lot_mismatch", "free"],
+  ["removing a card of another lot", [{ op: "remove", lot_id: "A", ids: ["b1"] }], ["A"], "lot_mismatch", "b1"],
+  ["a move naming the wrong source", [move(["a1"], "B", "A")], ["A", "B"], "lot_mismatch", "a1"],
+  ["an anchor queued in another lot", [{ op: "join", lot_id: "A", ids: ["a1"], anchor: "b1" }], ["A"], "unknown_anchor", "b1"],
+])("the v2 application refuses %s", (_name, raw, lots, code, item_id) => {
+  expect(applyLotQueueDelta(lotState(), lotOps(raw, lots))).toMatchObject({ ok: false, code, item_id, op_index: 0 });
+});
+
+test("a v2 refusal names the operation that failed", () => {
+  const parsed = lotOps([{ op: "clear", lot_id: "B" }, { op: "join", lot_id: "A", ids: ["a1"], anchor: "gone" }], ["A", "B"]);
+
+  expect(applyLotQueueDelta(lotState(), parsed)).toMatchObject({ ok: false, code: "unknown_anchor", op_index: 1 });
+});
+
+test("the cards a v2 envelope names include anchors and moved members, the moved ones exclude anchors", () => {
+  const parsed = lotOps([{ op: "join", lot_id: "A", ids: ["x"], anchor: "k" }, move(["y"], "A", null)], ["A"]);
+
+  expect(lotQueueDeltaCardIds(parsed).sort()).toEqual(["k", "x", "y"]);
+  expect(lotQueueDeltaMovedIds(parsed).sort()).toEqual(["x", "y"]);
 });
 
 const sortedWaves = (waves: readonly (readonly string[])[]): string[][] => waves.map((wave) => [...wave].sort());

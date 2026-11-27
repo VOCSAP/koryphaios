@@ -715,7 +715,7 @@ const RANK_STATEMENTS_WITHOUT_LOT: Record<string, string> = {
 };
 
 // A dropped extraction would hide a statement from the rule below.
-const EXPECTED_RANK_STATEMENTS = 30;
+const EXPECTED_RANK_STATEMENTS = 32;
 
 test("the rank statement extractor bites: it finds both quote styles and skips other tables", () => {
   const fixture = `

@@ -121,10 +121,15 @@ import {
 import { formatRoadmapStaleSaveError, isRoadmapStaleSaveError } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
+  applyLotQueueDelta,
   applyQueueDelta,
+  canonicalLotQueueDelta,
   canonicalQueueDelta,
   diffToDeltaOps,
   fitsQueueDeltaLimits,
+  lotQueueDeltaCardIds,
+  lotQueueDeltaMovedIds,
+  parseLotQueueDelta,
   parseQueueDeltaOps,
   queueDeltaCardIds,
   queueDeltaMovedIds,
@@ -255,6 +260,8 @@ import type {
   RoadmapLockReleaseRequest,
   RoadmapLockReleaseResponse,
   RoadmapPriority,
+  RoadmapLotQueueDeltaConflict,
+  RoadmapLotQueueDeltaResponse,
   RoadmapQueueDeltaConflict,
   RoadmapQueueDeltaRequest,
   RoadmapQueueDeltaResponse,
@@ -9223,12 +9230,17 @@ function queueDeltaResponse(receipt: QueueDeltaReceipt, replayed: boolean): Road
   };
 }
 
-/** Revision of the default lot, the one queue the delta protocol carries. */
-function queueRev(projectKey: string): number {
+/** Revision of one lot's queue; a lot that never held a card reads as 0. */
+function lotQueueRev(projectKey: string, lotId: string): number {
   const row = db
     .query("SELECT rev FROM roadmap_queue_state WHERE project_key = ? AND lot_id = ?")
-    .get(projectKey, DEFAULT_ROADMAP_LOT_ID) as { rev: number } | null;
+    .get(projectKey, lotId) as { rev: number } | null;
   return row?.rev ?? 0;
+}
+
+/** Revision of the default lot, the one queue the v1 envelope carries. */
+function queueRev(projectKey: string): number {
+  return lotQueueRev(projectKey, DEFAULT_ROADMAP_LOT_ID);
 }
 
 /**
@@ -9239,7 +9251,7 @@ function queueRev(projectKey: string): number {
  * No `content_rev` is read: a rank move depends on the queue, not on what the
  * cards say.
  */
-function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResult {
+function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResult | LotQueueDeltaResult {
   const route = "/roadmap/sync/queue-delta";
   const refused = refuseWhenReplica(route);
   if (refused) return refused;
@@ -9262,6 +9274,8 @@ function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResu
     return { error: "mutation_id must be 8 to 64 chars of [A-Za-z0-9-]", status: 400 };
   }
   const mutationId = body.mutation_id;
+  const envelope = body as unknown as Record<string, unknown>;
+  if (envelope.version !== undefined) return applyLotQueueMutation(envelope, replicaId, projectKey, mutationId);
   const expected = syncInteger(body.expected_queue_rev, "expected_queue_rev", 0);
   if (typeof expected !== "number") return expected;
   const parsed = parseQueueDeltaOps(body.ops);
@@ -9393,6 +9407,221 @@ function handleRoadmapQueueDelta(body: RoadmapQueueDeltaRequest): QueueDeltaResu
     log.error(`${route}: queue delta write failed`, error);
     return { error: "queue delta write failed", status: 500 };
   }
+}
+
+type LotQueueDeltaResult =
+  | { ok: true; response: RoadmapLotQueueDeltaResponse }
+  | { ok: false; conflict: RoadmapLotQueueDeltaConflict }
+  | { error: string; status: number; op_index?: number; item_id?: string; lot_id?: string };
+
+/** Stored beside v1 receipts; the two are told apart by their payload hash before either is parsed. */
+interface LotQueueDeltaReceipt {
+  v: 2;
+  mutation_id: string;
+  payload_hash: string;
+  lot_revs: Record<string, number>;
+  changes: { id: string; lot_id: string | null; queue: number | null; rev: number }[];
+}
+
+function lotQueueDeltaResponse(receipt: LotQueueDeltaReceipt, replayed: boolean): RoadmapLotQueueDeltaResponse {
+  return {
+    mutation_id: receipt.mutation_id,
+    payload_hash: receipt.payload_hash,
+    lot_revs: receipt.lot_revs,
+    replayed,
+    items: receipt.changes.flatMap(({ id }) => {
+      const row = getRoadmapRow(id);
+      return row ? [rowToSyncRow(row)] : [];
+    }),
+  };
+}
+
+/** The v2 half of /roadmap/sync/queue-delta, reached past the gates the two envelopes share. */
+function applyLotQueueMutation(
+  envelope: Record<string, unknown>,
+  replicaId: string,
+  projectKey: string,
+  mutationId: string
+): LotQueueDeltaResult {
+  const route = "/roadmap/sync/queue-delta";
+  let result: LotQueueDeltaResult;
+  try {
+    result = judgeLotQueueMutation(envelope, replicaId, projectKey, mutationId);
+  } catch (error) {
+    log.error(`${route}: v2 queue delta write failed`, error);
+    return { error: "queue delta write failed", status: 500 };
+  }
+  if ("error" in result) {
+    log.warn(`${route}: v2 queue delta refused (${result.status}) for ${mutationId}: ${result.error}`);
+  } else if (!result.ok) {
+    const { reason, lot_id, item_id } = result.conflict;
+    log.warn(
+      `${route}: v2 queue delta refused (409 ${reason}) for ${mutationId}, lot ${lot_id ?? "-"}, card ${item_id ?? "-"}`
+    );
+  }
+  return result;
+}
+
+/**
+ * One transaction and one receipt, as for v1: the receipt is looked up before
+ * any revision is compared, and a refusal writes nothing. Each listed lot is
+ * judged on its own revision. The receipt table's revision columns hold the
+ * default lot's, whatever lots the mutation names.
+ */
+function judgeLotQueueMutation(
+  envelope: Record<string, unknown>,
+  replicaId: string,
+  projectKey: string,
+  mutationId: string
+): LotQueueDeltaResult {
+  if (envelope.version !== 2) return { error: "version must be 2 for an envelope that carries one", status: 400 };
+  if (envelope.expected_queue_rev !== undefined) {
+    return { error: "a version 2 envelope carries lots, not expected_queue_rev", status: 400 };
+  }
+  const parsed = parseLotQueueDelta(envelope.lots, envelope.ops);
+  if (!parsed.ok) {
+    return { error: parsed.error, status: 400, ...(parsed.op_index === undefined ? {} : { op_index: parsed.op_index }) };
+  }
+  const { lots, ops } = parsed;
+  const malformedId = lotQueueDeltaCardIds(ops).find((id) => !ROADMAP_ID_REGEX.test(id));
+  if (malformedId !== undefined) {
+    return { error: `card id '${malformedId}' is malformed`, status: 400, item_id: malformedId };
+  }
+  const payloadHash = createHash("sha256").update(canonicalLotQueueDelta(projectKey, lots, ops)).digest("hex");
+  const lotRevs = (): Record<string, number> =>
+    Object.fromEntries(lots.map(({ lot_id }) => [lot_id, lotQueueRev(projectKey, lot_id)]));
+  const conflict = (
+    reason: RoadmapLotQueueDeltaConflict["reason"],
+    named: { lot_id?: string; item_id?: string } = {}
+  ): LotQueueDeltaResult => ({ ok: false, conflict: { error: "conflict", reason, lot_revs: lotRevs(), ...named } });
+
+  return db.transaction((): LotQueueDeltaResult => {
+    const receipt = db
+      .query(
+        "SELECT payload_hash, response FROM roadmap_queue_receipts WHERE replica_id = ? AND project_key = ? AND mutation_id = ?"
+      )
+      .get(replicaId, projectKey, mutationId) as { payload_hash: string; response: string } | null;
+    if (receipt) {
+      if (receipt.payload_hash !== payloadHash) return conflict("mutation_reused");
+      return { ok: true, response: lotQueueDeltaResponse(JSON.parse(receipt.response) as LotQueueDeltaReceipt, true) };
+    }
+    const stale = lots.find((lot) => lotQueueRev(projectKey, lot.lot_id) !== lot.expected_queue_rev);
+    if (stale) return conflict("queue_rev", { lot_id: stale.lot_id });
+
+    const closed = new Set<string>();
+    for (const { lot_id } of lots) {
+      if (lot_id === DEFAULT_ROADMAP_LOT_ID) continue;
+      const lot = db
+        .query("SELECT closed_at FROM roadmap_lots WHERE project_key = ? AND id = ?")
+        .get(projectKey, lot_id) as { closed_at: string | null } | null;
+      if (!lot) return { error: `unknown lot '${lot_id}' in this project`, status: 404, lot_id };
+      if (lot.closed_at !== null) closed.add(lot_id);
+    }
+    // A closed lot takes no card and no rank; cards may still leave it.
+    for (const op of ops) {
+      const destination =
+        op.op === "move_members" ? op.to : op.op === "place" || op.op === "join" ? op.lot_id : null;
+      if (destination !== null && closed.has(destination)) return conflict("lot_closed", { lot_id: destination });
+    }
+
+    const cards = new Map<string, RoadmapRow>();
+    for (const id of lotQueueDeltaCardIds(ops)) {
+      const row = getRoadmapRow(id);
+      if (!row || row.project_key !== projectKey) {
+        return { error: `unknown roadmap item '${id}' in this project`, status: 404, item_id: id };
+      }
+      cards.set(id, row);
+    }
+    for (const op of ops) {
+      if (op.op !== "place" && op.op !== "join") continue;
+      for (const id of op.ids) {
+        const row = cards.get(id)!;
+        if (row.status === "done" || row.status === "archived") {
+          return { error: `item '${id}' is ${row.status} and cannot be queued`, status: 400, item_id: id };
+        }
+        if (row.inactive === 1) {
+          return { error: `item '${id}' is inactive -- clear inactive before queuing it`, status: 403, item_id: id };
+        }
+      }
+    }
+
+    const queued = db
+      .query(
+        `SELECT * FROM roadmap_items WHERE project_key = ? AND lot_id IN (${lots.map(() => "?").join(", ")})
+           AND queue IS NOT NULL AND status NOT IN ('done', 'archived')`
+      )
+      .all(projectKey, ...lots.map((lot) => lot.lot_id)) as RoadmapRow[];
+    const stored = new Map([...queued, ...cards.values()].map((row) => [row.id, row]));
+    const applied = applyLotQueueDelta(
+      {
+        membership: new Map([...stored.values()].map((row) => [row.id, row.lot_id])),
+        waves: new Map(
+          lots.map(({ lot_id }) => [
+            lot_id,
+            queueToWaves(queued.filter((row) => row.lot_id === lot_id) as { id: string; queue: number }[]),
+          ])
+        ),
+      },
+      ops
+    );
+    if (!applied.ok) {
+      if (applied.code === "lot_mismatch") return conflict("lot_mismatch", { item_id: applied.item_id });
+      return {
+        error: applied.error,
+        status: 400,
+        op_index: applied.op_index,
+        ...(applied.item_id ? { item_id: applied.item_id } : {}),
+      };
+    }
+    const moved = new Set(lotQueueDeltaMovedIds(ops));
+    const ranks = new Map<string, number>();
+    for (const waves of applied.waves.values()) {
+      for (const wave of waves) {
+        const directive = wave.find((id) => stored.get(id)!.kind === "directive");
+        if (wave.length > 1 && directive !== undefined && wave.some((id) => moved.has(id))) {
+          return { error: `directive item '${directive}' must be in a singleton wave`, status: 400, item_id: directive };
+        }
+      }
+      for (const [id, rank] of wavesToRanks(waves)) ranks.set(id, rank);
+    }
+
+    const changed = [...new Set([...queued.map((row) => row.id), ...moved])]
+      .map((id) => ({ id, lot_id: applied.membership.get(id) ?? null, queue: ranks.get(id) ?? null }))
+      .filter((next) => {
+        const row = stored.get(next.id)!;
+        return row.lot_id !== next.lot_id || row.queue !== next.queue;
+      });
+    // As for v1: the lock protects a card the operations move or unqueue, not
+    // one that merely takes a new rank number.
+    const guarded = new Set([...moved, ...changed.filter((next) => next.queue === null).map((next) => next.id)]);
+    for (const id of guarded) {
+      const row = stored.get(id)!;
+      if (row.locked === 1 && !relayHoldsLock(id, replicaId)) return conflict("locked_upstream", { item_id: id });
+    }
+
+    const defaultRevBefore = queueRev(projectKey);
+    const by = relayedAuthor("deck", replicaId);
+    for (const next of changed) {
+      db.run(
+        "UPDATE roadmap_items SET lot_id = ?, queue = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?",
+        [next.lot_id, next.queue, by, next.id]
+      );
+    }
+    const record: LotQueueDeltaReceipt = {
+      v: 2,
+      mutation_id: mutationId,
+      payload_hash: payloadHash,
+      lot_revs: lotRevs(),
+      changes: changed.map((next) => ({ ...next, rev: getRoadmapRow(next.id)!.rev })),
+    };
+    db.run(
+      `INSERT INTO roadmap_queue_receipts
+         (replica_id, project_key, mutation_id, payload_hash, queue_rev_before, queue_rev_after, response)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [replicaId, projectKey, mutationId, payloadHash, defaultRevBefore, queueRev(projectKey), JSON.stringify(record)]
+    );
+    return { ok: true, response: lotQueueDeltaResponse(record, false) };
+  })();
 }
 
 type SyncLockResult =

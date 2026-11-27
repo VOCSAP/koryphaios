@@ -39,6 +39,7 @@
     "../shared/context-deposit-id.ts",
     "../shared/types.ts",
     "../shared/roadmap-queue-delta.ts",
+    "../shared/roadmap-lot.ts",
     "../shared/delegated-task.ts",
     "../shared/project-key.ts",
     "../shared/approval-client.ts",
