@@ -877,11 +877,11 @@ export interface RoadmapLotQueueDeltaConflict {
   item_id?: string;
 }
 
-/** A queue mutation the upstream refused: its ranks were restored to the upstream's and the entry is gone. */
+/** A queue mutation the upstream refused: its cards were restored to the upstream's places and the entry is gone. */
 export interface RoadmapQueueOutboxRefusal {
   project_key: string;
   mutation_id: string;
-  reason: RoadmapQueueDeltaConflict["reason"] | "invalid" | "not_found" | "forbidden";
+  reason: RoadmapLotQueueDeltaConflict["reason"] | "invalid" | "not_found" | "forbidden";
   /** HTTP status of the refusal. */
   status: number;
   message: string;

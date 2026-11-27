@@ -238,6 +238,14 @@ test("queue_outbox crosses the sanitizer field for field, a refusal's optional i
   });
 });
 
+test("the refusal reasons of a lot mutation cross the sanitizer", () => {
+  const refused = ["lot_mismatch", "lot_closed"].map((reason) => ({ ...OUTBOX_REFUSAL, reason }));
+  expect(
+    sanitizeSyncStatus({ mode: "replica", queue_outbox: { pending: 0, refused, last_failure: null } }).queue_outbox
+      ?.refused as unknown
+  ).toEqual(refused);
+});
+
 test("a delivered queue keeps last_failure null instead of dropping the outbox", () => {
   expect(
     sanitizeSyncStatus({ mode: "replica", queue_outbox: { pending: 0, refused: [], last_failure: null } })

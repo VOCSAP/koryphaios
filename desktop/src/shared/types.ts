@@ -996,6 +996,8 @@ export const ROADMAP_QUEUE_OUTBOX_REASONS = [
   'queue_rev',
   'locked_upstream',
   'mutation_reused',
+  'lot_mismatch',
+  'lot_closed',
   'invalid',
   'not_found',
   'forbidden'

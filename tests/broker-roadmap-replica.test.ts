@@ -104,6 +104,10 @@ let queueDeltaSuppressed = false;
 /** Every queue-delta request the replica made, in order. */
 type QueueDeltaSeen = { mutation_id: string; expected_queue_rev: number; ops: Array<{ op: string; ids?: string[] }> };
 const queueDeltaSeen: QueueDeltaSeen[] = [];
+/** The raw body of every queue-delta request, in the same order. */
+const queueDeltaTexts: string[] = [];
+/** Mutation ids answered 503 without asking the upstream, the others going through. */
+const queueDeltaFailing = new Set<string>();
 /** Runs once, while the next queue-delta request is held by the proxy, before it reaches the upstream. */
 let duringNextQueueDelta: (() => Promise<void>) | null = null;
 /** The card of every /roadmap/sync/push the replica made, as the upstream received it. */
@@ -167,6 +171,10 @@ beforeAll(async () => {
         if (queueDeltaSuppressed) return new Response("queue-delta suppressed for a test", { status: 503 });
         const text = await req.text();
         queueDeltaSeen.push(JSON.parse(text) as QueueDeltaSeen);
+        queueDeltaTexts.push(text);
+        if (queueDeltaFailing.has(queueDeltaSeen.at(-1)!.mutation_id)) {
+          return new Response(JSON.stringify({ error: "queue-delta failing for a test" }), { status: 503 });
+        }
         if (duringNextQueueDelta) {
           const hook = duringNextQueueDelta;
           duringNextQueueDelta = null;
@@ -5855,3 +5863,493 @@ test("a replica serves a named lot's card without a rank, in a conflict too", as
     sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", card.id);
   }
 }, 60_000);
+
+async function lotCards(tag: string, count: number): Promise<{ lot: string; cards: RoadmapItem[] }> {
+  const cards = await queueCards(tag, count);
+  const lot = await upstreamLot();
+  await moveUpstream(cards.map((card) => card.id), lot);
+  for (const [i, card] of cards.entries()) sqlOn(upstream, "UPDATE roadmap_items SET queue = ? WHERE id = ?", i + 1, card.id);
+  for (const [i, card] of cards.entries()) await waitPlace(card.id, lot, i + 1, `the replica holds ${card.title}`);
+  await waitPasses(2);
+  return { lot, cards };
+}
+
+type Place = { lot: string | null; queue: number | null };
+const at = (lot: string, queue: number | null): Place => ({ lot, queue });
+
+interface LotEntry {
+  id: string;
+  version?: 1;
+  lots: string[];
+  ops: object[];
+  withheld: Record<string, Place | number | null>;
+}
+
+let lotEntries = 0;
+const lotEntry = (lots: string[], ops: object[], withheld: LotEntry["withheld"]): LotEntry => ({
+  id: `lot-entry-${++lotEntries}-${Date.now()}`,
+  lots,
+  ops,
+  withheld,
+});
+const defaultEntry = (ops: object[], withheld: Record<string, number | null>): LotEntry => ({
+  ...lotEntry([], ops, withheld),
+  version: 1,
+});
+const reorderIn = (lot: string, first: RoadmapItem, then: RoadmapItem, withheld: Record<string, Place>) =>
+  lotEntry([lot], [{ op: "place", ids: [first.id], before: then.id, lot_id: lot }], withheld);
+
+function seedLotEntries(entries: LotEntry[], local: Array<[RoadmapItem, string | null, number | null]> = []): void {
+  const db = openBrokerDb(replica.dbPath);
+  try {
+    db.transaction(() => {
+      db.run("INSERT OR REPLACE INTO roadmap_sync_meta (key, value) VALUES ('applying', '1')");
+      for (const [card, lot, queue] of local) {
+        db.run("UPDATE roadmap_items SET lot_id = ?, queue = ? WHERE id = ?", [lot, queue, card.id]);
+      }
+      for (const entry of entries) {
+        db.run(
+          "INSERT INTO roadmap_queue_outbox (project_key, mutation_id, version, lots, ops, withheld) VALUES (?, ?, ?, ?, ?, ?)",
+          [
+            PK,
+            entry.id,
+            entry.version ?? 2,
+            entry.version === 1 ? null : JSON.stringify(entry.lots),
+            JSON.stringify(entry.ops),
+            JSON.stringify(entry.withheld),
+          ]
+        );
+      }
+      db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'applying'");
+    })();
+  } finally {
+    db.close();
+  }
+}
+
+interface StoredEntry {
+  mutation_id: string;
+  version: number;
+  ops: string;
+  withheld: string;
+  sent_at: string | null;
+}
+
+function storedEntries(): StoredEntry[] {
+  const db = openBrokerDb(replica.dbPath, { readonly: true });
+  try {
+    return db
+      .query("SELECT mutation_id, version, ops, withheld, sent_at FROM roadmap_queue_outbox ORDER BY seq")
+      .all() as StoredEntry[];
+  } finally {
+    db.close();
+  }
+}
+
+const withheldOf = (entry: LotEntry) =>
+  JSON.parse(storedEntries().find((row) => row.mutation_id === entry.id)!.withheld) as LotEntry["withheld"];
+const requestsFor = (entry: LotEntry) => queueDeltaSeen.filter((seen) => seen.mutation_id === entry.id).length;
+const clearOutbox = () => sqlOn(replica, "DELETE FROM roadmap_queue_outbox");
+const outboxFailure = async () => (await syncStatus()).queue_outbox?.last_failure ?? "";
+
+test("a refused lot mutation gives its cards back their lot and rank, drops what was written on it and leaves the other lots", async () => {
+  const a = await lotCards("v2-refused", 3);
+  const d = await lotCards("v2-independent", 2);
+  const [b, c] = [await upstreamLot(), await upstreamLot()];
+  await waitPasses(2);
+  const [m, n, o] = a.cards as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  // The upstream holds m in lot a: moving it out of lot b is a lot_mismatch.
+  const refused = lotEntry([b, "default"], [{ op: "move_members", ids: [m.id], from: b, to: "default" }], {
+    [m.id]: at(a.lot, 1),
+  });
+  const onIt = lotEntry([b, c], [{ op: "clear", lot_id: b }], { [n.id]: at(a.lot, 2) });
+  const onThat = lotEntry([c], [{ op: "clear", lot_id: c }], { [o.id]: at(a.lot, 3) });
+  const apart = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+  const refusedBefore = await refusedMutationIds();
+  try {
+    seedLotEntries([refused, onIt, onThat, apart], [
+      [m, "default", null],
+      [n, b, null],
+      [o, c, 1],
+      [q, d.lot, 1],
+      [p, d.lot, 2],
+    ]);
+    await journalEmpties();
+    await waitPasses(2);
+
+    expect(await newRefusals(refusedBefore)).toEqual([refused.id]);
+    expect((await syncStatus()).queue_outbox?.refused.at(-1)?.reason).toBe("lot_mismatch");
+    expect([m, n, o].map((card) => storedPlaceOn(replica, card.id))).toEqual([
+      [a.lot, 1],
+      [a.lot, 2],
+      [a.lot, 3],
+    ]);
+    expect([onIt, onThat, apart].map(requestsFor), "only the independent entry left").toEqual([0, 0, 1]);
+    expect([p, q].map((card) => storedPlaceOn(upstream, card.id)[1])).toEqual([2, 1]);
+    expect([p, q].map((card) => storedPlaceOn(replica, card.id)[1])).toEqual([2, 1]);
+  } finally {
+    clearOutbox();
+  }
+}, 90_000);
+
+test("a refused chain of both queue versions puts each card where the upstream holds it", async () => {
+  const lot = await upstreamLot();
+  await waitPasses(2);
+  type Stored = [string | null, number | null];
+  const chains: Array<[string, number | null, Place, Stored, Stored]> = [
+    ["a default rank behind a move out of the queue", 1, at("default", 1), [lot, null], ["default", 1]],
+    ["a null before a lot the later entry knows", null, at(lot, 3), ["default", null], [lot, 3]],
+    ["a null before a card in no lot", null, { lot: null, queue: null }, [lot, null], [null, null]],
+    ["a null before a card of the default queue", null, at("default", 1), [lot, null], ["default", null]],
+  ];
+  try {
+    for (const [index, [what, rank, known, local, expected]] of chains.entries()) {
+      const { a: card } = await queuePair(`chain-${index}`);
+      const head = defaultEntry([{ op: "remove", ids: [card.id] }], { [card.id]: rank });
+      const behind = lotEntry(["default", lot], [{ op: "move_members", ids: [card.id], from: "default", to: lot }], {
+        [card.id]: known,
+      });
+      queueDeltaOverride = { status: 409, body: { error: "conflict", reason: "queue_rev" } };
+      seedLotEntries([head, behind], [[card, local[0], local[1]]]);
+      await journalEmpties();
+      await waitPasses(1);
+      expect([what, storedPlaceOn(replica, card.id)]).toEqual([what, expected]);
+      queueDeltaOverride = null;
+    }
+  } finally {
+    queueDeltaOverride = null;
+    clearOutbox();
+  }
+}, 120_000);
+
+test("each failing lot mutation names only the terminal cards it covers", async () => {
+  const x = await lotCards("v2-terminal-x", 1);
+  const y = await lotCards("v2-terminal-y", 1);
+  const [first, second] = [x, y].map(({ lot, cards }) =>
+    lotEntry([lot], [{ op: "clear", lot_id: lot }], { [cards[0]!.id]: at(lot, 1) })
+  ) as [LotEntry, LotEntry];
+  queueDeltaFailing.add(first.id).add(second.id);
+  const logStart = replicaLog().length;
+  try {
+    await goOffline();
+    for (const { cards } of [x, y]) await createOn(replica, { id: cards[0]!.id, by: "agent-local", status: "done" });
+    seedLotEntries([first, second]);
+    sqlOn(replica, "UPDATE roadmap_queue_outbox SET sent_at = datetime('now'), expected_lot_revs = '{}'");
+    await goOnline();
+    await waitPasses(3);
+    const named = [first, second].map((entry) =>
+      replicaLog()
+        .slice(logStart)
+        .split("\n")
+        .filter((line) => line.includes("not delivered") && line.includes(entry.id))
+        .map((line) => /terminal card\(s\) ([^;]*?) wait for it/.exec(line)?.[1])
+    );
+    expect(named).toEqual([[x.cards[0]!.id], [y.cards[0]!.id]]);
+  } finally {
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("a failing lot mutation holds only what is written on its lots, and keeps its failure beside the others' successes", async () => {
+  const a = await lotCards("v2-failing", 2);
+  const d = await lotCards("v2-flowing", 2);
+  const [a1, a2] = a.cards as [RoadmapItem, RoadmapItem];
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  const failing = reorderIn(a.lot, a2, a1, { [a1.id]: at(a.lot, 1) });
+  const flowing = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+  const logStart = replicaLog().length;
+  queueDeltaFailing.add(failing.id);
+  try {
+    seedLotEntries([failing, flowing]);
+    await pollUntil("the independent entry is settled", 20_000, async () => ({
+      done: storedEntries().length === 1,
+      value: storedEntries().map((row) => row.mutation_id),
+    }));
+    await waitPasses(2);
+    expect(await outboxFailure()).toContain(failing.id);
+
+    const next = reorderIn(d.lot, p, q, { [p.id]: at(d.lot, 2), [q.id]: at(d.lot, 1) });
+    const later = lotEntry([d.lot], [{ op: "clear", lot_id: d.lot }], { [p.id]: at(d.lot, 7) });
+    const behind = reorderIn(a.lot, a1, a2, { [a2.id]: at(a.lot, 2) });
+    queueDeltaFailing.add(later.id);
+    seedLotEntries([next, later, behind]);
+    await pollUntil("the next entry of the flowing lot is settled", 20_000, async () => ({
+      done: requestsFor(later) >= 1 && storedEntries().length === 3,
+      value: storedEntries().map((row) => row.mutation_id),
+    }));
+    await waitPasses(3);
+
+    expect(storedEntries().map((row) => row.mutation_id)).toEqual([failing.id, later.id, behind.id]);
+    expect(requestsFor(behind), "written on a lot that is waiting").toBe(0);
+    expect(withheldOf(later)).toEqual({ [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+    expect([withheldOf(failing), withheldOf(behind)]).toEqual([failing.withheld, behind.withheld]);
+    const traces = replicaLog().slice(logStart).split("\n").filter((line) => line.includes("not delivered"));
+    expect(
+      [failing, later].map((entry) => traces.filter((line) => line.includes(entry.id)).length),
+      "each failing entry is said once"
+    ).toEqual([1, 1]);
+  } finally {
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("a lot mutation waits while the upstream announces no lot protocol, and its retry is the same bytes", async () => {
+  const d = await lotCards("v2-capability", 2);
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  const entry = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+  const refusedBefore = await refusedMutationIds();
+  const first = queueDeltaTexts.length;
+  try {
+    pullRewrite = withoutLotProtocol;
+    await pollUntil("the capability is gone", 20_000, async () => {
+      const value = localSyncMetaText(replica, "upstream_lot_protocol");
+      return { done: value === "1", value };
+    });
+    seedLotEntries([entry]);
+    await waitPasses(3);
+    expect([requestsFor(entry), storedEntries()[0]?.sent_at]).toEqual([0, null]);
+    expect(await outboxFailure()).toContain("does not announce the multi-lot queue");
+
+    // The upstream commits the first attempt, whose answer is lost, then is replaced by an older one.
+    duringNextQueueDelta = async () => {
+      pullRewrite = withoutLotProtocol;
+    };
+    queueDeltaLoseAnswers = 1;
+    pullRewrite = null;
+    await pollUntil("the first attempt leaves", 20_000, async () => ({ done: requestsFor(entry) === 1, value: requestsFor(entry) }));
+    await waitPasses(3);
+    expect(requestsFor(entry), "a sent entry waits too").toBe(1);
+    expect(storedEntries().map((row) => [row.version, row.sent_at !== null])).toEqual([[2, true]]);
+
+    pullRewrite = null;
+    await journalEmpties();
+    const sent = queueDeltaTexts.slice(first).filter((text) => text.includes(entry.id));
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]!);
+    expect(JSON.parse(sent[0]!)).toMatchObject({ version: 2, lots: [{ lot_id: d.lot }] });
+    expect(await newRefusals(refusedBefore)).toEqual([]);
+    expect([p, q].map((card) => storedPlaceOn(upstream, card.id)[1])).toEqual([2, 1]);
+  } finally {
+    pullRewrite = null;
+    duringNextQueueDelta = null;
+    queueDeltaLoseAnswers = 0;
+    clearOutbox();
+  }
+}, 120_000);
+
+test("a 400 naming nothing on a lot mutation is final only after a later announcement, one naming an operation at once", async () => {
+  const d = await lotCards("v2-unnamed", 2);
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  const unnamed = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+  const refusedBefore = await refusedMutationIds();
+  try {
+    queueDeltaOverride = { status: 400, body: { error: "unreadable envelope" } };
+    // No pull reaches a final page after the first attempt, so nothing is announced again.
+    duringNextQueueDelta = async () => {
+      await createOn(upstream, { by: "agent-upstream", title: "row the capped pages repeat" });
+      pullFullPages = true;
+    };
+    seedLotEntries([unnamed]);
+    await pollUntil("the entry is sent again under a capped pull", 60_000, async () => ({
+      done: requestsFor(unnamed) >= 3,
+      value: requestsFor(unnamed),
+    }));
+    expect(storedEntries().map((row) => row.mutation_id)).toEqual([unnamed.id]);
+    pullFullPages = false;
+    await journalEmpties();
+    await waitPasses(1);
+    expect(await newRefusals(refusedBefore)).toEqual([unnamed.id]);
+
+    const named = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+    queueDeltaOverride = { status: 400, body: { error: "bad operation", op_index: 0 } };
+    seedLotEntries([named]);
+    await journalEmpties();
+    expect(requestsFor(named)).toBe(1);
+
+    const closed = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1), [q.id]: at(d.lot, 2) });
+    queueDeltaOverride = { status: 409, body: { error: "conflict", reason: "lot_closed" } };
+    seedLotEntries([closed]);
+    await journalEmpties();
+    await waitPasses(1);
+    expect((await syncStatus()).queue_outbox?.refused.at(-1)).toMatchObject({ mutation_id: closed.id, reason: "lot_closed" });
+  } finally {
+    pullFullPages = false;
+    duringNextQueueDelta = null;
+    queueDeltaOverride = null;
+    clearOutbox();
+  }
+}, 120_000);
+
+test("a pending lot mutation keeps the cards it moves and the ranks of its lots, and sets the upstream's places aside", async () => {
+  const a = await lotCards("v2-from", 1);
+  const b = await lotCards("v2-to", 1);
+  const c = await lotCards("v2-free", 1);
+  const [m, k, j] = [a.cards[0]!, b.cards[0]!, c.cards[0]!];
+  const { a: unranked } = await queuePair("v2-default-held");
+  const move = lotEntry([a.lot, b.lot], [{ op: "move_members", ids: [m.id], from: a.lot, to: b.lot }], {
+    [m.id]: at(a.lot, 1),
+    [unranked.id]: at("default", 1),
+  });
+  const rename = async (title: string) => {
+    await createOn(upstream, { id: m.id, by: "agent-upstream", title });
+    await waitForItem(title, replica, m.id, (item) => item.title === title);
+  };
+  queueDeltaSuppressed = true;
+  try {
+    seedLotEntries([move], [[m, b.lot, null]]);
+    await pollUntil("the move is sent", 20_000, async () => ({ done: sentEntryCount() === 1, value: sentEntryCount() }));
+    sqlOn(upstream, "UPDATE roadmap_items SET queue = 5 WHERE id = ?", k.id);
+    sqlOn(upstream, "UPDATE roadmap_items SET queue = 6 WHERE id = ?", j.id);
+    await waitPlace(j.id, c.lot, 6, "a lot with nothing pending takes the upstream's rank");
+    await rename("moved card renamed upstream");
+
+    expect(storedPlaceOn(replica, m.id)).toEqual([b.lot, null]);
+    expect(storedPlaceOn(replica, k.id)).toEqual([b.lot, 1]);
+    const aside = { [m.id]: at(a.lot, 1), [unranked.id]: at("default", 1), [k.id]: at(b.lot, 5) };
+    expect(withheldOf(move)).toEqual(aside);
+
+    pullStripLot = true;
+    await createOn(upstream, { id: unranked.id, by: "agent-upstream", title: "renamed by an upstream without lots" });
+    await waitForItem("the lot-less row arrives", replica, unranked.id, (item) => item.title === "renamed by an upstream without lots");
+    expect(withheldOf(move), "a row without lot_id says nothing of a lot").toEqual(aside);
+    pullStripLot = false;
+
+    queueDeltaSuppressed = false;
+    await journalEmpties();
+    expect([m, k].map((card) => storedPlaceOn(replica, card.id))).toEqual([
+      [a.lot, 1],
+      [b.lot, 5],
+    ]);
+  } finally {
+    pullStripLot = false;
+    queueDeltaSuppressed = false;
+    clearOutbox();
+  }
+}, 120_000);
+
+test("a default-queue gesture is its own entry beside a lot mutation, and waits for one writing on the default lot", async () => {
+  const d = await lotCards("v2-beside", 2);
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  const { a, b } = await queuePair("v1-beside");
+  const apart = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1) });
+  const ahead = lotEntry(["default", d.lot], [{ op: "move_members", ids: [p.id], from: d.lot, to: "default" }], {
+    [p.id]: at(d.lot, 1),
+  });
+  queueDeltaFailing.add(apart.id).add(ahead.id);
+  try {
+    seedLotEntries([apart]);
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    await waitRanks("the default gesture reaches the upstream past the waiting lot", upstream, a, b, 2, 1);
+    await pollUntil("it is settled", 20_000, async () => ({ done: outboxCount() === 1, value: outboxCount() }));
+    expect(storedEntries()[0]).toMatchObject({ version: 2, ops: JSON.stringify(apart.ops) });
+
+    clearOutbox();
+    // Held unsent, so a terminal card could be written out of it.
+    pullRewrite = withoutLotProtocol;
+    await pollUntil("the capability is gone", 20_000, async () => {
+      const value = localSyncMetaText(replica, "upstream_lot_protocol");
+      return { done: value === "1", value };
+    });
+    seedLotEntries([ahead]);
+    await createOn(replica, { id: p.id, by: "agent-local", status: "done" });
+    expect((await restoreOnReplica(a, b)).status).toBe(200);
+    await waitPasses(3);
+    const rows = storedEntries();
+    expect(rows.map((row) => row.version)).toEqual([2, 1]);
+    expect(rows[0]!.ops, "a lot mutation is never rewritten").toBe(JSON.stringify(ahead.ops));
+    expect(rows[1]!.sent_at, "it waits behind the entry sharing the default lot").toBeNull();
+    expect(Object.keys(JSON.parse(rows[1]!.withheld)), "a named lot's card is none of the default queue's").not.toContain(p.id);
+  } finally {
+    pullRewrite = null;
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("an acknowledged default mutation writes what the upstream now holds into the lot mutation behind it", async () => {
+  const [a, b, c] = (await queueCards("v1-then-v2", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const behind = lotEntry(["default"], [{ op: "clear", lot_id: "default" }], { [c.id]: at("default", 9) });
+  queueDeltaFailing.add(behind.id);
+  queueDeltaSuppressed = true;
+  try {
+    expect((await swapAheadOf(a, b, c)).status).toBe(200);
+    seedLotEntries([behind]);
+    queueDeltaSuppressed = false;
+    await pollUntil("the default mutation is acknowledged", 20_000, async () => ({
+      done: outboxCount() === 1,
+      value: outboxCount(),
+    }));
+    expect(withheldOf(behind)).toEqual({ [a.id]: at("default", 2), [b.id]: at("default", 1), [c.id]: at("default", 3) });
+  } finally {
+    queueDeltaSuppressed = false;
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("an acknowledged null unranks, in the lot mutation behind it, only the default card that one already holds", async () => {
+  const [a, held, free] = (await queueCards("v1-null-then-v2", 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const head = defaultEntry([{ op: "remove", ids: [a.id] }], { [a.id]: 1, [held.id]: null, [free.id]: null });
+  const behind = lotEntry(["default"], [{ op: "clear", lot_id: "default" }], { [held.id]: at("default", 3) });
+  queueDeltaFailing.add(behind.id);
+  queueDeltaOverride = { status: 200, body: () => ({ mutation_id: queueDeltaSeen.at(-1)!.mutation_id, items: [] }) };
+  try {
+    seedLotEntries([head, behind]);
+    await pollUntil("the default mutation is acknowledged", 20_000, async () => ({
+      done: outboxCount() === 1,
+      value: outboxCount(),
+    }));
+    expect(withheldOf(behind)).toEqual({ [a.id]: at("default", 1), [held.id]: at("default", null) });
+  } finally {
+    queueDeltaOverride = null;
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("a gesture joins the unsent default mutation, whatever entry of another lot was written after it", async () => {
+  const d = await lotCards("v1-under-v2", 2);
+  const [p, q] = d.cards as [RoadmapItem, RoadmapItem];
+  const { a, b } = await queuePair("v1-joined");
+  const apart = reorderIn(d.lot, q, p, { [p.id]: at(d.lot, 1) });
+  queueDeltaFailing.add(apart.id);
+  holdQueueDelivery();
+  try {
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    seedLotEntries([apart]);
+    expect((await restoreOnReplica(a, b)).status).toBe(200);
+    expect(storedEntries().map((row) => row.version)).toEqual([1, 2]);
+  } finally {
+    pullSuppressed = false;
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+}, 90_000);
+
+test("a terminal card is held back for a sent mutation of its lot only", async () => {
+  const a = await lotCards("v2-terminal-sent", 1);
+  const d = await lotCards("v2-terminal-free", 1);
+  const [held, free] = [a.cards[0]!, d.cards[0]!];
+  const sent = lotEntry([a.lot], [{ op: "clear", lot_id: a.lot }], { [held.id]: at(a.lot, 1) });
+  const unsent = lotEntry([d.lot], [{ op: "clear", lot_id: d.lot }], { [free.id]: at(d.lot, 1) });
+  queueDeltaFailing.add(sent.id).add(unsent.id);
+  const logStart = replicaLog().length;
+  try {
+    await goOffline();
+    for (const card of [held, free]) await createOn(replica, { id: card.id, by: "agent-local", status: "done" });
+    seedLotEntries([sent, unsent]);
+    sqlOn(replica, "UPDATE roadmap_queue_outbox SET sent_at = datetime('now'), expected_lot_revs = ? WHERE mutation_id = ?", "{}", sent.id);
+    await goOnline();
+    await waitForItem("the card of the free lot is pushed", upstream, free.id, (item) => item.status === "done");
+    await waitPasses(2);
+    expect((await itemOn(upstream, held.id))?.status).not.toBe("done");
+    expect(replicaLog().slice(logStart)).toContain(`terminal card(s) ${held.id} wait for it`);
+  } finally {
+    queueDeltaFailing.clear();
+    clearOutbox();
+  }
+  await waitForItem("the held card leaves once nothing waits", upstream, held.id, (item) => item.status === "done");
+}, 90_000);

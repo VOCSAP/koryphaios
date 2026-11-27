@@ -378,7 +378,9 @@ encore ses revisions (le lot par defaut vaut `default`). S'il a tire des pages,
 le broker recent le voit au curseur deplace a son retour et retire toutes les
 cartes. Un amont qui sert un `lot_id` ou un `lot_rank` illisible met la
 replique hors ligne, curseur inchange: la cause est dans `last_error`. Les lots
-de l'amont sont ajoutes ou mis a jour. Un lot cree sur cette base avant qu'elle
+de l'amont sont ajoutes ou mis a jour. Ne pas redescendre une replique dont le
+journal garde une mutation `version = 2`: un broker plus ancien l'enverrait comme
+une version 1 et son refus defait le geste. Un lot cree sur cette base avant qu'elle
 soit une replique est garde et nomme dans le journal; ses cartes, elles, perdent
 leur lot au premier echange, l'amont ne le connaissant pas.
 
