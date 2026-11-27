@@ -637,3 +637,22 @@ test("a ranked card of a named lot is not part of the head wave", async () => {
   expect(res.body.delivery, JSON.stringify(res.body)).toBe("sent");
   expect(readDb("SELECT queue FROM roadmap_items WHERE id = ?", named.id)).toEqual([{ queue: 1 }]);
 });
+
+test("dispatching a card of a named lot, assigned or as a wave, is refused as ineligible and writes nothing", async () => {
+  const s = await scenario();
+  const named = await card(s, { status: "planned" });
+  writeDb(`UPDATE roadmap_items SET lot_id = 'lot-named', queue = 4 WHERE id = '${named.id}'`);
+  const [listed] = await reread(s, [named.id]);
+
+  const res = await dispatch(
+    s,
+    "execute",
+    intentFor(s, [listed!], { mode: "assign", target_kind: "assignee", to_peer_id: s.worker.peer_id })
+  );
+
+  expect([res.body.delivery, res.body.reason, res.body.card_ids]).toEqual(["not-sent", "ineligible", [named.id]]);
+  const wave = await dispatch(s, "execute", intentFor(s, [listed!]));
+  expect([wave.body.delivery, wave.body.reason, wave.body.card_ids]).toEqual(["not-sent", "ineligible", [named.id]]);
+  expect(readDb("SELECT queue, status FROM roadmap_items WHERE id = ?", named.id)).toEqual([{ queue: 4, status: "planned" }]);
+  expect([...messagesTo(s.worker.instance_token), ...messagesTo(s.lead.instance_token)]).toHaveLength(0);
+});

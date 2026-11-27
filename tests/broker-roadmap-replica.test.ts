@@ -5128,11 +5128,15 @@ test("a lot change made upstream reaches the replica whatever the lock state of 
 test("an upstream that predates lots leaves the replica's lots alone and its queued cards fall in the default lot", async () => {
   const card = await createOn(upstream, { by: "agent-upstream", title: "card of an older upstream" });
   await waitForItem("the card arrives", replica, card.id, () => true);
-  sqlOn(replica, "UPDATE roadmap_items SET lot_id = 'lot-local' WHERE id = ?", card.id);
+  const replacedBefore = (await syncStatus()).queue_replaced;
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
 
+  // Set before the local lot exists: the SQL dirties the card, and a lot-aware echo of its push would undo the lot.
   pullStripLot = true;
   try {
-    await createOn(upstream, { id: card.id, by: "agent-upstream", title: "renamed by an older upstream" });
+    sqlOn(replica, "UPDATE roadmap_items SET lot_id = 'lot-local', queue = 9 WHERE id = ?", card.id);
+    await createOn(upstream, { id: card.id, by: "agent-upstream", title: "renamed by an older upstream", queue: 3 });
     const born = await createOn(upstream, { by: "agent-upstream", title: "queued by an older upstream", queue: 1 });
     await waitForItem("the rename arrives", replica, card.id, (item) => item.title === "renamed by an older upstream");
     await waitForItem("the queued card arrives", replica, born.id, (item) => item.queue === 1);
@@ -5140,10 +5144,142 @@ test("an upstream that predates lots leaves the replica's lots alone and its que
       "lot-local",
       "default",
     ]);
+    expect(storedPlaceOn(replica, card.id), "the older upstream's rank is not a rank of this lot").toEqual(["lot-local", 9]);
+    expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(`ignored for card ${card.id}`);
+    await waitPasses(2);
+    expect((await syncStatus()).queue_replaced, "a kept rank was not replaced").toBe(replacedBefore);
   } finally {
     pullStripLot = false;
+    sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", card.id);
   }
 }, 60_000);
+
+async function localLotCard(tag: string): Promise<{ a: RoadmapItem; b: RoadmapItem; named: RoadmapItem; hold: () => void }> {
+  const [a, b, named] = (await queueCards(tag, 3)) as [RoadmapItem, RoadmapItem, RoadmapItem];
+  const hold = () => {
+    pullStripLot = true;
+    sqlOn(replica, "UPDATE roadmap_items SET lot_id = 'lot-local', queue = NULL WHERE id = ?", named.id);
+  };
+  return { a, b, named, hold };
+}
+
+const swapAheadOf = (a: RoadmapItem, b: RoadmapItem, last: RoadmapItem) =>
+  post(`${replica.url}/roadmap/reorder`, {
+    project_key: PK,
+    by: "agent-local",
+    ids: [b.id, a.id, last.id],
+    waves: [[b.id], [a.id], [last.id]],
+  });
+
+function withheldRanksOf(id: string): unknown[] {
+  const db = openBrokerDb(replica.dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT withheld FROM roadmap_queue_outbox ORDER BY seq").all() as { withheld: string }[]).map(
+      (row) => (JSON.parse(row.withheld) as Record<string, unknown>)[id]
+    );
+  } finally {
+    db.close();
+  }
+}
+
+test("a pending journal records no rank from a lot-less upstream for a locally named card", async () => {
+  const { a, b, named, hold } = await localLotCard("lot-less-withheld");
+  queueDeltaSuppressed = true;
+  try {
+    hold();
+    expect((await swapOnReplica(a, b)).status).toBe(200);
+    await createOn(upstream, { id: named.id, by: "agent-upstream", title: "ranked by a lot-less upstream" });
+    await waitForItem("the upstream row arrives", replica, named.id, (item) => item.title === "ranked by a lot-less upstream");
+    expect(withheldRanksOf(named.id)).toEqual([undefined]);
+  } finally {
+    queueDeltaSuppressed = false;
+    await journalEmpties();
+    pullStripLot = false;
+    sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", named.id);
+  }
+}, 90_000);
+
+const refusal = () => ({ status: 409, body: { error: "conflict", reason: "queue_rev" } });
+const lotLessReceipt = (id: string) => ({
+  status: 200,
+  body: () => ({ mutation_id: queueDeltaSeen.at(-1)!.mutation_id, items: [{ id, queue: 2 }] }),
+});
+
+/**
+ * Settles a sent mutation on a card held in a lot here. The pull is held for the
+ * settlement, so a trace of that window comes from the settlement alone.
+ */
+async function settleOnLocalLotCard(tag: string, answer: (id: string) => { status: number; body: unknown }, seed?: (id: string) => void) {
+  const { a, b, named, hold } = await localLotCard(tag);
+  const logPath = join(replica.tmpDir, "logs", "broker.log");
+  queueDeltaSuppressed = true;
+  try {
+    expect((await swapAheadOf(a, b, named)).status).toBe(200);
+    await pollUntil("the mutation is sent", 20_000, async () => {
+      const db = openBrokerDb(replica.dbPath, { readonly: true });
+      const row = db.query("SELECT COUNT(*) AS n FROM roadmap_queue_outbox WHERE sent_at IS NOT NULL").get() as { n: number };
+      db.close();
+      return { done: row.n === 1, value: row.n };
+    });
+    pullSuppressed = true;
+    await waitPasses(2);
+    const journaled = withheldRanksOf(named.id);
+    hold();
+    seed?.(named.id);
+    const logStart = readFileSync(logPath, "utf-8").length;
+    queueDeltaOverride = answer(named.id);
+    queueDeltaSuppressed = false;
+    await journalEmpties();
+    return {
+      id: named.id,
+      journaled,
+      place: storedPlaceOn(replica, named.id),
+      others: [storedPlaceOn(replica, a.id)[1], storedPlaceOn(replica, b.id)[1]],
+      traces: readFileSync(logPath, "utf-8").slice(logStart),
+    };
+  } finally {
+    queueDeltaSuppressed = false;
+    queueDeltaOverride = null;
+    pullSuppressed = false;
+    pullStripLot = false;
+    sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", named.id);
+  }
+}
+
+test("a refused mutation gives no rank back to a card held in a lot here", async () => {
+  const settled = await settleOnLocalLotCard("lot-less-restore", refusal);
+
+  expect(settled.journaled, "non-vacuity: the journal holds a default rank of the card").toEqual([3]);
+  expect(settled.place).toEqual(["lot-local", null]);
+  expect(settled.others).toEqual([1, 2]);
+  expect(settled.traces).toContain(`journaled rank 3 not restored on card ${settled.id}`);
+}, 90_000);
+
+test("an acknowledgement without lot_id writes no rank on a card held in a lot here", async () => {
+  const settled = await settleOnLocalLotCard("lot-less-ack", lotLessReceipt);
+
+  expect(settled.place).toEqual(["lot-local", null]);
+  expect(settled.traces).toContain(`ignored for card ${settled.id}`);
+}, 90_000);
+
+function rankInLotJournaledNone(id: string): void {
+  sqlOn(replica, "UPDATE roadmap_items SET queue = 9 WHERE id = ?", id);
+  sqlOn(replica, "UPDATE roadmap_queue_outbox SET withheld = json_set(withheld, ?, json('null'))", `$."${id}"`);
+}
+
+for (const [outcome, answer] of [["refused", refusal], ["acknowledged", lotLessReceipt]] as const) {
+  test(`a null journaled for a card held in a lot here leaves its rank when the mutation is ${outcome}`, async () => {
+    let seeded: unknown[] = [];
+    const settled = await settleOnLocalLotCard(`lot-less-null-${outcome}`, answer, (id) => {
+      rankInLotJournaledNone(id);
+      seeded = withheldRanksOf(id);
+    });
+
+    expect(seeded, "non-vacuity: the journal holds a null for the card").toEqual([null]);
+    expect(settled.place).toEqual(["lot-local", 9]);
+    expect(settled.traces).toContain(`journaled rank null not restored on card ${settled.id}`);
+  }, 90_000);
+}
 
 test("while a mutation is pending, a card moved upstream to a named lot takes the upstream's place", async () => {
   const { a, b } = await queuePair("lot-frozen");

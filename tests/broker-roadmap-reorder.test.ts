@@ -1,6 +1,8 @@
 // Workflow lane: atomic dispatch-queue rewrite via /roadmap/reorder.
 
 import { test, expect, beforeAll, beforeEach, afterAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored, openBrokerDb } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 import type { RoadmapLot } from "../shared/roadmap-lot.ts";
@@ -819,6 +821,23 @@ test("an upsert answers a named lot's card without its rank and leaves the store
 
   expect((res.body as { item: RoadmapItem }).item.queue).toBeNull();
   expect(storedPlace(card.id)[1]).toBe(1);
+});
+
+test("an upsert sending queue:null keeps a named lot card's stored rank, applies the rest and says so", async () => {
+  const { card, lot } = await rankedNamedCard("lot rank kept over a v1 null");
+  const logPath = join(broker.tmpDir, "logs", "broker.log");
+  const logStart = readFileSync(logPath, "utf-8").length;
+
+  const res = await upsert({ id: card.id, status: "in_progress", queue: null });
+
+  expect(res.status).toBe(200);
+  expect((res.body as { item: RoadmapItem }).item.status).toBe("in_progress");
+  expect(storedPlace(card.id)).toEqual([lot.id, 1]);
+  expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(`'${card.id}' belongs to a named lot`);
+  const closingStart = readFileSync(logPath, "utf-8").length;
+  expect((await upsert({ id: card.id, status: "done", queue: null })).status).toBe(200);
+  expect(storedPlace(card.id), "a terminal status still takes the card out of its queue").toEqual([lot.id, null]);
+  expect(readFileSync(logPath, "utf-8").slice(closingStart), "nothing was ignored").not.toContain("queue:null ignored");
 });
 
 test("a context append and a context deportation answer a named lot's card without its rank", async () => {

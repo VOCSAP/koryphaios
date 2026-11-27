@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { composeAtomicDispatchText, type DispatchCardView } from "./roadmap-dispatch-message";
 import { projectKeyCaseRefusal, validateProjectKey } from "./project-key";
+import { isNamedRoadmapLot } from "./roadmap-lot";
 import type {
   AtomicDispatchCapability,
   AtomicDispatchCard,
@@ -288,6 +289,7 @@ export interface AtomicDispatchMemberRow {
   inactive: boolean;
   deleted_at: string | null;
   queue: number | null;
+  lot_id: string | null;
   content_rev: number;
   state_tag: string;
 }
@@ -351,7 +353,9 @@ function isEligible(row: AtomicDispatchMemberRow): boolean {
     row.deleted_at === null &&
     row.status !== "done" &&
     row.status !== "archived" &&
-    row.kind !== "directive"
+    row.kind !== "directive" &&
+    // A named lot's cards are not dispatched through the default queue's door.
+    !isNamedRoadmapLot(row.lot_id)
   );
 }
 

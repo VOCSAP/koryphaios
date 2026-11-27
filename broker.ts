@@ -5211,6 +5211,7 @@ function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
         inactive: row.inactive === 1,
         deleted_at: row.deleted_at,
         queue: row.queue,
+        lot_id: row.lot_id,
         content_rev: row.content_rev,
         state_tag: dispatchStateTag(row, BROKER_ID),
       };
@@ -6625,6 +6626,13 @@ function handleRoadmapUpsert(
         : resolveDependsOn(patchDependsOn, existing.project_key, existing.id, existing.depends_on);
     if (nextDependsOn && "error" in nextDependsOn) return nextDependsOn;
 
+    // A client that predates lots reads a named lot's rank as null and may send it back with its write.
+    const ignoresNullRank =
+      isNamedRoadmapLot(existing.lot_id) &&
+      body.queue === null &&
+      existing.queue !== null &&
+      !isTerminalStatus(nextStatus);
+
     const next: RoadmapItem = {
       ...existing,
       kind: nextKind,
@@ -6644,7 +6652,7 @@ function handleRoadmapUpsert(
       depends_on: nextDependsOn?.ids ?? existing.depends_on,
       directive: nextDirective,
       target_peer_ids: nextTargets,
-      queue: queueForStatus(nextStatus, body.queue !== undefined ? body.queue : existing.queue),
+      queue: queueForStatus(nextStatus, body.queue !== undefined && !ignoresNullRank ? body.queue : existing.queue),
       updated_by: by,
       inactive: nextInactive,
     };
@@ -6786,6 +6794,7 @@ function handleRoadmapUpsert(
         status: 409,
       };
     }
+    if (ignoresNullRank) log.warn(`/roadmap/upsert: ${namedLotRankRefusal(body.id)}, queue:null ignored`);
     // The lock this write leaves behind is a LOCAL one: this route never sets a
     // relay, so a card that was dropped or handed to another holder keeps
     // neither the relay pointer nor the contest raised against the holder that
@@ -9110,11 +9119,15 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
       };
     }
     // An omitted `queue` key leaves the upstream rank alone (older replicas never
-    // send it), except on a terminal status, which always clears it. A rank sent
-    // for a card this broker holds in a named lot is dropped and the content still
-    // lands. Lock columns (their own protocol) and `operator_id` (a local
-    // signature proof) stay out of this SET on purpose.
-    const rankDropped = isNamedRoadmapLot(existing.lot_id) && typeof item.queue === "number";
+    // send it), except on a terminal status, which always clears it. A rank, null
+    // included, sent for a live card this broker holds in a named lot is dropped
+    // and the content still lands. Lock columns (their own protocol) and
+    // `operator_id` (a local signature proof) stay out of this SET on purpose.
+    const rankDropped =
+      isNamedRoadmapLot(existing.lot_id) &&
+      item.queue !== undefined &&
+      item.queue !== existing.queue &&
+      !isTerminalStatus(item.status);
     if (rankDropped) log.warn(`/roadmap/sync/push: ${namedLotRankRefusal(item.id)}, rank ignored`);
     const writesRank = (item.queue !== undefined && !rankDropped) || isTerminalStatus(item.status);
     const pushedRank = writesRank ? queueForStatus(item.status, item.queue ?? null) : existing.queue;
@@ -10105,11 +10118,14 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const queuePending =
     echoedQueue !== undefined && echoedQueue === remote.queue && local.sync_base_rev === remote.content_rev;
   const queueFrozen = queueFrozenProjects.has(local.project_key);
-  if (queueFrozen) withholdPulledRank(local.project_key, remote.id, remote.queue);
-  // A named lot's ranks never travel by this replica's queue mutations, so the
-  // upstream's wins there even while the default queue is frozen.
+  // An upstream that predates lots ranks this card in its single queue.
+  const foreignRank = remote.lot_id === undefined && isNamedRoadmapLot(local.lot_id);
+  if (foreignRank && remote.queue !== local.queue) warnForeignRank(remote.id);
+  if (queueFrozen && !foreignRank) withholdPulledRank(local.project_key, remote.id, remote.queue);
+  // A named lot's ranks never travel by this replica's queue mutations, so a
+  // lot-aware upstream's wins there even while the default queue is frozen.
   const pulledQueue =
-    (queuePending || queueFrozen) && !isNamedRoadmapLot(remoteLot) ? local.queue : remote.queue;
+    foreignRank || ((queuePending || queueFrozen) && !isNamedRoadmapLot(remoteLot)) ? local.queue : remote.queue;
   const pulledLot = lotForRank(remoteLot, pulledQueue);
   // Hoisted: the clean branch below needs it too. heldLocally is a SCOPE
   // predicate (locked/lock_scope on this row), never a liveness check: a
@@ -10220,7 +10236,11 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       remote.id,
     ]);
   }
-  return queueReplaced && !queuePending && !queueFrozen;
+  return queueReplaced && !queuePending && !queueFrozen && !foreignRank;
+}
+
+function warnForeignRank(id: string): void {
+  log.warn(`roadmap sync: rank from an upstream without lots ignored for card ${id}, it is in a named lot here`);
 }
 
 /** Said once per run of refused pages and re-armed by the next adoption: a pass every few seconds would log all day. */
@@ -10689,6 +10709,11 @@ function restoreRanks(ranks: WithheldRanks, skip: ReadonlySet<string>): number {
     if (skip.has(id)) continue;
     const row = getRoadmapRow(id);
     if (!row || row.queue === rank) continue;
+    // The journal holds default-lot ranks: a card now in a named lot takes none of them.
+    if (isNamedRoadmapLot(row.lot_id)) {
+      log.warn(`roadmap sync: journaled rank ${rank} not restored on card ${id}, it is in a named lot here`);
+      continue;
+    }
     db.run("UPDATE roadmap_items SET queue = ?, lot_id = ? WHERE id = ?", [rank, lotForRank(row.lot_id, rank), id]);
     changed += 1;
   }
@@ -10712,6 +10737,10 @@ function applyQueueDeltaAck(entry: QueueOutboxRow, response: RoadmapQueueDeltaRe
       }
       const row = getRoadmapRow(item.id);
       if (!row || row.project_key !== entry.project_key) continue;
+      if (item.lot_id === undefined && isNamedRoadmapLot(row.lot_id)) {
+        if (row.queue !== rank) warnForeignRank(item.id);
+        continue;
+      }
       moved.add(item.id);
       upstreamAfter[item.id] = rank;
       if (row.queue !== rank) {

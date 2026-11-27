@@ -3009,6 +3009,37 @@ test("a push carrying a rank for a card of a named lot lands the content and not
   expect(placeIn(b, id)).toEqual({ title: "edited on the replica", lot_id: "lot-p", queue: null });
 }, 30_000);
 
+test("a push with queue: null keeps a named lot card's stored rank and lands the content", async () => {
+  const b = shared;
+  const project = queueProject("named-push-null");
+  const id = "qd-named-push-null";
+  await seedQueue(b, project, [[id, null]]);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'lot-p', queue = 5 WHERE id = ?", id);
+  const push = async (title: string, status: "planned" | "done") => {
+    const db = openBrokerDb(b.dbPath, { readonly: true });
+    const { content_rev } = db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number };
+    db.close();
+    return post(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, project_key: project, title, status, queue: null }),
+      expected_content_rev: content_rev,
+    });
+  };
+
+  const log = () => Bun.file(join(b.tmpDir, "logs", "broker.log")).text();
+  const liveStart = (await log()).length;
+
+  const live = await push("edited by an older replica", "planned");
+
+  expect(live.status, JSON.stringify(live.body)).toBe(200);
+  expect(placeIn(b, id)).toEqual({ title: "edited by an older replica", lot_id: "lot-p", queue: 5 });
+  expect((await log()).slice(liveStart)).toContain(`'${id}' belongs to a named lot -- a rank cannot be written there, rank ignored`);
+  const closingStart = (await log()).length;
+  expect((await push("closed by an older replica", "done")).status).toBe(200);
+  expect(placeIn(b, id)).toEqual({ title: "closed by an older replica", lot_id: "lot-p", queue: null });
+  expect((await log()).slice(closingStart), "nothing was ignored").not.toContain("rank ignored");
+}, 30_000);
+
 test("pull, push replies and a replayed delta serve a named lot's card without its rank", async () => {
   const b = shared;
   const project = queueProject("masked");
