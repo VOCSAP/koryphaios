@@ -625,27 +625,12 @@ export function WorkflowLane({
         )}
       </h3>
 
-      {/* Card 5ec7494c: a queued card moves only as part of a WAVE that gets
-          sent, and nothing on this screen said so, so a card dropped in the
-          queue looked like it was already on its way. This line says it, and it
-          names the GESTURE rather than the state: it echoes the dispatch
-          button's own glyph and interpolates its own label, so the copy can
-          never drift from the control it points at.
-
-          The copy deliberately does NOT claim the queue never advances by
-          itself, and this is load-bearing: `dispatchedIds` has THREE producers
-          main-side, one of them `seedDispatchedFromRoadmap()` running just
-          before the watcher's interval is armed, so a Deck that starts with a
-          single locked in_progress card is already armed with no gesture at
-          all. The renderer cannot see that state (it lives in `barrierPending`
-          / `dispatchedIds`, behind no IPC), so the sentence is written to hold
-          in EVERY state where it renders instead of being conditioned on one.
-
-          Rendered only when a head is actually waiting -- a permanent banner
-          goes invisible in three days. It sits on its OWN row, outside the flex
-          head: .wf-lane clips its overflow, so long text inside the head would
-          silently cut the buttons instead of wrapping. Outside the canvas block
-          too, so a collapsed lane -- where the operator sees least -- keeps it. */}
+      {/* Says a queued card moves only as part of a sent wave, naming the dispatch
+          button by its own glyph and label so the copy cannot drift. It does not
+          claim the queue never advances by itself: the main process advances it
+          once the waves it waits on settle, a state this renderer cannot read.
+          Rendered only while a card is queued, on its own row since .wf-lane
+          clips overflow, and outside the canvas so a collapsed lane keeps it. */}
       {queuedIds.length > 0 && (
         <p className="wf-manual-hint">
           <span className="wf-manual-hint-glyph">{GLYPH_ACTIONS.forward}</span>

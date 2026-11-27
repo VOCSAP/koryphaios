@@ -2,7 +2,7 @@
 // Verifies the project-key mirror stays consistent with server.ts (same remote
 // normalization, same local: fallback) and drives the real broker routes.
 
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { test, expect, spyOn, beforeAll, afterAll } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,9 +21,13 @@ import {
   type TestBroker
 } from "./_helper.ts";
 import { reachedWithin } from "./_bounded-await.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
 import {
   atomicOperationId,
+  createDispatcher,
+  createDispatchWatcher,
+  deckWatcherDeps,
   dispatchWave,
   runAssign,
   settleUnconfirmed,
@@ -38,6 +42,8 @@ import {
   appendRoadmapContext,
   computeDeckProjectKey,
   configureRoadmapSigner,
+  setRoadmapRequestTimeout,
+  fetchLotExecutionState,
   invalidateRoadmapSigner,
   resetRoadmapSigner,
   listRoadmap,
@@ -1029,6 +1035,48 @@ test("postAtomicDispatch reads a lost connection as unknown transport", async ()
   }
 });
 
+const stalled: [string, () => Response | Promise<Response>][] = [
+  ["no answer", () => new Promise<Response>(() => {})],
+  ["a body that never ends", () => new Response(new ReadableStream({ start: (c) => c.enqueue(new TextEncoder().encode("{")) }), { status: 200 })]
+];
+
+test.each(stalled)("a dispatch whose post gets %s ends unknown at the deadline and frees the single flight", async (_name, respond) => {
+  const stub = Bun.serve({ port: 0, fetch: respond });
+  const endpoint = { url: `http://127.0.0.1:${stub.port}`, token: null };
+  const posted: string[] = [];
+  const dispatcher = createDispatcher({
+    openRun: async () => ({
+      port: {
+        capability: { version: 1, broker_id: POST_INTENT.broker_id, max_operation_ms: 600_000, max_members: 5, registry_capacity: 5 },
+        projectKey: POST_INTENT.project_key,
+        groupId: POST_INTENT.group_id,
+        newOperationId: () => POST_OP,
+        post: (action, intent) => {
+          posted.push(action);
+          return postAtomicDispatch(endpoint, { action, intent, groupSecretHash: null }, 100);
+        }
+      },
+      list: async () => [{ id: "a", title: "A", kind: "feature", status: "planned", queue: 1, content_rev: 1, dispatch_state_tag: "a".repeat(64) } as RoadmapItem],
+      directives: undefined as never,
+      legacy: undefined as never
+    }),
+    target: () => ({ peerId: "lead-1", kind: "lead" }),
+    track: () => {},
+    journal: () => {},
+    warn: () => {},
+    trace: () => {},
+    reportError: () => {}
+  });
+  try {
+    const result = await reachedWithin(dispatcher.dispatch(false), "the bounded dispatch");
+    expect(result).toMatchObject({ sent: false, delivery: "unknown", reason: "unconfirmed" });
+    expect(posted).toEqual(["execute", "resolve"]);
+    expect(dispatcher.inFlight()).toBe(false);
+  } finally {
+    stub.stop(true);
+  }
+});
+
 test.each<[string, () => Response, number, string]>([
   ["a same-id different-intent mismatch", () => json(409, { code: "dispatch-operation-mismatch", error: "other intent" }), 409, "other intent"],
   ["an invalid request", () => json(400, { code: "dispatch-invalid-request", error: "bad intent" }), 400, "bad intent"],
@@ -1039,4 +1087,322 @@ test.each<[string, () => Response, number, string]>([
   const { answer } = await postAgainst(respond);
   expect(answer).toBeInstanceOf(RoadmapRequestError);
   expect([(answer as RoadmapRequestError).status, (answer as Error).message]).toEqual([status, message]);
+});
+
+test("the send register of a real wave is read back, and a watcher started afterwards waits on it", async () => {
+  const s = await atomicScenario();
+  const items = await s.queued(2);
+  await dispatchWave(items, { atomic: s.waveDeps(s.portWith()), legacy: s.legacyMustNotRun, trace: () => {} });
+  const ids = items.map((i) => i.id).sort();
+  const state = await fetchLotExecutionState(s.endpoint, s.project, "default");
+  expect([state.lot_id, state.closed_epoch, state.execution, state.queue]).toEqual(["default", 0, null, []]);
+  expect(state.open_sends.map((x) => x.card_id).sort()).toEqual(ids);
+  expect(state.open_sends.map((x) => [x.mode, x.own, x.epoch, x.target_peer_id])).toEqual(
+    ids.map(() => ["wave", true, 0, s.lead.peer_id])
+  );
+
+  await upsertRoadmap(s.endpoint, s.project, { title: "the head behind the barrier", status: "planned", queue: 2 });
+  let dispatched = 0;
+  const errors: unknown[] = [];
+  const journal: string[] = [];
+  const watcher = createDispatchWatcher(
+    deckWatcherDeps({
+      endpoint: () => s.endpoint,
+      projectKey: () => s.project,
+      dispatch: async () => {
+        dispatched++;
+        return { sent: false };
+      },
+      journal: { add: (_kind, line) => journal.push(line) },
+      warn: () => {},
+      reportError: (_source, _message, error) => void errors.push(error)
+    })
+  );
+  await watcher.tick();
+  await upsertRoadmap(s.endpoint, s.project, { id: ids[0]!, status: "done" });
+  await watcher.tick();
+  const afterOne = dispatched;
+  await archiveRoadmap(s.endpoint, ids[1]!);
+  await watcher.tick();
+  expect(errors).toEqual([]);
+  expect(journal).toContain(`dispatched item archived: "${items.find((i) => i.id === ids[1])!.title}"`);
+  expect([afterOne, dispatched]).toEqual([0, 1]);
+  expect((await fetchLotExecutionState(s.endpoint, s.project, "default")).open_sends).toEqual([]);
+});
+
+test("a card of a named lot keeps its lot, and its rank is read from the lot state", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const project = "github.com/vocsap/lot-state";
+  const created = await upsertRoadmap(endpoint, project, { title: "named card", status: "planned" });
+  const db = openBrokerDb(broker.dbPath);
+  try {
+    db.run(
+      "INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color) VALUES (?, 'lot-state', 'State', 'deck', ?, NULL, 0)",
+      [project, new Date().toISOString()]
+    );
+    db.run("UPDATE roadmap_items SET lot_id = 'lot-state', queue = 3 WHERE id = ?", [created.id]);
+  } finally {
+    db.close();
+  }
+  const [card] = await listRoadmap(endpoint, project, {});
+  expect([card!.lot_id, card!.queue]).toEqual(["lot-state", null]);
+  const state = await fetchLotExecutionState(endpoint, project, "lot-state");
+  expect(state.queue).toEqual([
+    { card_id: created.id, queue: 3, content_rev: card!.content_rev!, dispatch_state_tag: card!.dispatch_state_tag! }
+  ]);
+});
+
+const REGISTER_SEND = {
+  card_id: "aaaaaaaa-0000-0000-0000-00000000000a",
+  epoch: 2,
+  mode: "wave",
+  target_peer_id: "lead-1",
+  sent_at: "2026-11-27T10:00:00.000Z",
+  claimed_at: null,
+  own: true
+};
+const REGISTER_ANSWER = {
+  lot_id: "lot-1",
+  closed_epoch: 1,
+  execution: {
+    epoch: 2,
+    state: "interrupted",
+    group_id: "group-1",
+    controller_peer_id: "lead-1",
+    started_at: "2026-11-27T09:00:00.000Z",
+    interrupted_at: "2026-11-27T11:00:00.000Z",
+    interrupted_reason: "run_ended",
+    own: true
+  },
+  open_sends: [REGISTER_SEND],
+  queue: [{ card_id: "bbbbbbbb-0000-0000-0000-00000000000b", queue: 1, content_rev: 4, dispatch_state_tag: "a".repeat(64) }]
+};
+
+async function readRegisterFrom(body: unknown, status = 200) {
+  let sent: Record<string, unknown> = {};
+  const stub = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      sent = (await req.json()) as Record<string, unknown>;
+      return Response.json(body, { status });
+    }
+  });
+  try {
+    const answer = await fetchLotExecutionState({ url: `http://127.0.0.1:${stub.port}`, token: null }, "p", "lot-1").catch(
+      (e: Error) => e
+    );
+    return { answer, sent };
+  } finally {
+    stub.stop(true);
+  }
+}
+
+test("fetchLotExecutionState signs the read as the operator and returns a readable answer unchanged", async () => {
+  const { answer, sent } = await readRegisterFrom(REGISTER_ANSWER);
+  expect(answer as unknown).toEqual(REGISTER_ANSWER);
+  expect(sent).toMatchObject({ by: "deck", project_key: "p", lot_id: "lot-1" });
+  expect(typeof sent.auth).toBe("object");
+});
+
+const sendsWith = (bad: unknown) => ({ ...REGISTER_ANSWER, open_sends: [REGISTER_SEND, bad] });
+
+test.each<[string, unknown]>([
+  ["no object", null],
+  ["another lot", { ...REGISTER_ANSWER, lot_id: "lot-2" }],
+  ["a negative closed epoch", { ...REGISTER_ANSWER, closed_epoch: -1 }],
+  ["no list of sends", { ...REGISTER_ANSWER, open_sends: undefined }],
+  ["a send without its owner flag", sendsWith({ ...REGISTER_SEND, own: undefined })],
+  ["a send with no card", sendsWith({ ...REGISTER_SEND, card_id: "" })],
+  ["a send with a textual epoch", sendsWith({ ...REGISTER_SEND, epoch: "2" })],
+  ["a null send", sendsWith(null)],
+  ["a plural send mode", sendsWith({ ...REGISTER_SEND, mode: "waves" })],
+  ["an unknown send mode", sendsWith({ ...REGISTER_SEND, mode: "assignx" })],
+  ["no execution field", { ...REGISTER_ANSWER, execution: undefined }],
+  ["an unknown execution state", { ...REGISTER_ANSWER, execution: { ...REGISTER_ANSWER.execution, state: "closed" } }],
+  ["a rank of zero", { ...REGISTER_ANSWER, queue: [{ ...REGISTER_ANSWER.queue[0], queue: 0 }] }],
+  ["a malformed state tag", { ...REGISTER_ANSWER, queue: [{ ...REGISTER_ANSWER.queue[0], dispatch_state_tag: "x" }] }]
+])("fetchLotExecutionState rejects an answer with %s as a whole", async (_name, body) => {
+  const { answer } = await readRegisterFrom(body);
+  expect(answer).toBeInstanceOf(Error);
+  expect((answer as Error).message).toContain("is not readable");
+});
+
+test("fetchLotExecutionState throws the broker's refusal", async () => {
+  const { answer } = await readRegisterFrom({ error: "unknown lot 'lot-1' in this project" }, 404);
+  expect([(answer as RoadmapRequestError).status, (answer as Error).message]).toEqual([404, "unknown lot 'lot-1' in this project"]);
+});
+
+test("fetchLotExecutionState reads an assignment send as it reads a wave send", async () => {
+  const body = { ...REGISTER_ANSWER, open_sends: [{ ...REGISTER_SEND, mode: "assign" }] };
+  expect((await readRegisterFrom(body)).answer as unknown).toEqual(body);
+});
+
+test("each broker read the Deck lends the watcher rejects when the broker refuses it", async () => {
+  const stub = Bun.serve({ port: 0, fetch: () => Response.json({ error: "refused" }, { status: 500 }) });
+  try {
+    const source = deckWatcherDeps({
+      endpoint: () => ({ url: `http://127.0.0.1:${stub.port}`, token: null }),
+      projectKey: () => "p",
+      dispatch: async () => ({ sent: false }),
+      journal: { add: () => {} },
+      warn: () => {},
+      reportError: () => {}
+    }).openRead();
+    const { signal } = new AbortController();
+    await expect(source.capability(signal)).rejects.toThrow("500");
+    await expect(source.state("default", signal)).rejects.toThrow("refused");
+    await expect(source.list(signal)).rejects.toThrow("refused");
+  } finally {
+    stub.stop(true);
+  }
+});
+
+const BARRIER_ROUTES = ["/health", "/roadmap/lot/execution/state", "/roadmap/list"];
+const LOT_CAPABILITY = {
+  version: 1,
+  broker_id: "11111111-aaaa-bbbb-cccc-222222222222",
+  max_operation_ms: 600_000,
+  max_members: 50,
+  registry_capacity: 2000,
+  lots: 1
+};
+
+test.each(BARRIER_ROUTES)(
+  "a watcher read hung on %s is aborted at the deadline, so no request piles up over the ticks",
+  async (hung) => {
+    let received = 0;
+    let open = 0;
+    let onAbort = () => {};
+    const stub = Bun.serve({
+      port: 0,
+      idleTimeout: 30,
+      fetch: (req) => {
+        const path = new URL(req.url).pathname;
+        if (path === hung) {
+          received++;
+          open++;
+          req.signal.addEventListener("abort", () => {
+            open--;
+            onAbort();
+          });
+          return new Promise<Response>(() => {});
+        }
+        if (path === "/health") return Response.json({ atomic_dispatch: LOT_CAPABILITY });
+        return Response.json({ lot_id: "default", closed_epoch: 0, execution: null, open_sends: [], queue: [] });
+      }
+    });
+    const errors: string[] = [];
+    const watcher = createDispatchWatcher({
+      ...deckWatcherDeps({
+        endpoint: () => ({ url: `http://127.0.0.1:${stub.port}`, token: null }),
+        projectKey: () => "p",
+        dispatch: async () => ({ sent: false }),
+        journal: { add: () => {} },
+        warn: () => {},
+        reportError: (_source, _message, error) => void errors.push((error as Error).message)
+      }),
+      readTimeoutMs: 100
+    });
+    try {
+      for (let tick = 1; tick <= 3; tick++) {
+        const aborted = new Promise<void>((resolve) => (onAbort = resolve));
+        await reachedWithin(watcher.tick(), `tick ${tick}`);
+        // Under the capability read's own two-second limit, so only the relayed abort can meet it.
+        await reachedWithin(aborted, `the abort of request ${tick} as the broker sees it`, 1000);
+        expect([received, open]).toEqual([tick, 0]);
+      }
+      expect(errors).toEqual(["the barrier read did not answer within 100 ms"]);
+    } finally {
+      stub.stop(true);
+    }
+  }
+);
+
+const hungCalls: [string, (endpoint: { url: string; token: null }) => Promise<unknown>][] = [
+  ["a list", (endpoint) => listRoadmap(endpoint, "p", {})],
+  ["a card write", (endpoint) => upsertRoadmap(endpoint, "p", { title: "t" })]
+];
+const stallCases = hungCalls.flatMap(([call, run]) => stalled.map(([how, respond]) => [call, how, run, respond] as const));
+
+test.each(stallCases)("%s that gets %s ends at the default deadline and is traced", async (_call, _how, run, respond) => {
+  const stub = Bun.serve({ port: 0, idleTimeout: 30, fetch: respond });
+  const traces: string[] = [];
+  onDeckError((scope, text) => traces.push(`${scope} ${text}`));
+  setRoadmapRequestTimeout(100);
+  try {
+    const outcome = await reachedWithin(
+      run({ url: `http://127.0.0.1:${stub.port}`, token: null }).then(
+        () => "answered",
+        (e: Error) => e.name
+      ),
+      "the bounded roadmap call"
+    );
+    expect(outcome).toBe("TimeoutError");
+    expect(traces).toHaveLength(1);
+    expect(traces[0]).toMatch(/^roadmap \/roadmap\/(list|upsert): no complete answer within 100 ms/);
+  } finally {
+    setRoadmapRequestTimeout();
+    onDeckError(() => {});
+    stub.stop(true);
+  }
+});
+
+test("a dispatch whose roadmap read hangs ends at the default deadline and frees the single flight", async () => {
+  const stub = Bun.serve({ port: 0, idleTimeout: 30, fetch: () => new Promise<Response>(() => {}) });
+  setRoadmapRequestTimeout(100);
+  const dispatcher = createDispatcher({
+    openRun: async () => ({
+      port: null,
+      list: () => listRoadmap({ url: `http://127.0.0.1:${stub.port}`, token: null }, "p", {}),
+      directives: undefined as never,
+      legacy: undefined as never
+    }),
+    target: () => null,
+    track: () => {},
+    journal: () => {},
+    warn: () => {},
+    trace: () => {},
+    reportError: () => {}
+  });
+  try {
+    expect(await reachedWithin(dispatcher.dispatch(false), "the bounded dispatch")).toEqual({ sent: false, reason: "error" });
+    expect(dispatcher.inFlight()).toBe(false);
+  } finally {
+    setRoadmapRequestTimeout();
+    stub.stop(true);
+  }
+});
+
+test("with nothing injected, a roadmap call is given between thirty seconds and two minutes", async () => {
+  const timers = spyOn(AbortSignal, "timeout");
+  try {
+    await listRoadmap({ url: broker.url, token: null }, "github.com/vocsap/default-deadline", {});
+    const delays = timers.mock.calls.map((call) => call[0]);
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBeGreaterThanOrEqual(30_000);
+    expect(delays[0]).toBeLessThanOrEqual(120_000);
+  } finally {
+    timers.mockRestore();
+  }
+});
+
+test("a call that is given its own signal is aborted by it and traces nothing itself", async () => {
+  const stub = Bun.serve({ port: 0, idleTimeout: 30, fetch: () => new Promise<Response>(() => {}) });
+  const traces: string[] = [];
+  onDeckError((scope, text) => traces.push(`${scope} ${text}`));
+  const controller = new AbortController();
+  const endpoint = { url: `http://127.0.0.1:${stub.port}`, token: null };
+  try {
+    const calls = [
+      listRoadmap(endpoint, "p", {}, controller.signal),
+      fetchLotExecutionState(endpoint, "p", "default", controller.signal),
+      fetchAtomicDispatchCapability(endpoint, fetch, controller.signal)
+    ].map((call) => call.then(() => "answered", (e: Error) => e.message));
+    controller.abort(new Error("given up"));
+    expect(await reachedWithin(Promise.all(calls), "the aborted calls", 1000)).toEqual(["given up", "given up", "given up"]);
+    expect(traces).toEqual([]);
+  } finally {
+    onDeckError(() => {});
+    stub.stop(true);
+  }
 });

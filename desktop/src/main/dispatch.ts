@@ -29,13 +29,19 @@ import type {
   DispatchRequest,
   DispatchRequestOutcome
 } from '../../../shared/types'
+import {
+  DEFAULT_ROADMAP_LOT_ID,
+  type RoadmapLotExecutionStateResponse,
+  type RoadmapLotOpenSend
+} from '../../../shared/roadmap-lot'
 import { queuedItems, resolveDependency, wavesOf } from '../shared/workflow'
 import {
   composeAssignText,
   composeDispatchText,
   composeMultiDispatchText
 } from '../../../shared/roadmap-dispatch-message'
-import { ATOMIC_OPERATION_MARGIN_MS } from './broker-client'
+import { ATOMIC_OPERATION_MARGIN_MS, fetchAtomicDispatchCapability, type BrokerEndpoint } from './broker-client'
+import { fetchLotExecutionState, listRoadmap } from './roadmap-service'
 import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
@@ -99,53 +105,6 @@ export function dependencyHoldReason(hold: Extract<AutoDispatchHold, { kind: 'de
 
 export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: { size: number }): boolean {
   return autoDispatchHold(items, dispatchedIds) === null
-}
-
-/**
- * Per-id tracking record in index.ts's dispatchedIds Map (roadmap card
- * 6f19206e). `claimed` distinguishes "dispatched but the lead has not yet
- * set it in_progress" from "the lead actually picked it up" -- the
- * distinction the naive fix (delete on planned+unlocked) got wrong, since a
- * freshly dispatched item is ALSO planned+unlocked before it is claimed.
- */
-export interface DispatchedEntry {
-  claimed: boolean
-}
-
-/** What a watchDispatched tick should do with one tracked (id, entry) pair. */
-export type DispatchedTickAction =
-  | { kind: 'keep' }
-  | { kind: 'claim' }
-  | { kind: 'remove'; reason: 'done' | 'archived' | 'absent' | 'abandoned' }
-
-/**
- * `claimed` is the sole discriminant for abandonment: a freshly dispatched item
- * is planned+unlocked too, same as an item that reverted after being claimed.
- * Claims on `in_progress` status alone, not on `locked`: a Deck-authored
- * in_progress write leaves `locked: false`, so requiring `locked` would strand
- * it as never-claimed.
- * Every 'remove' outcome, not just 'done', must be treated by the caller as
- * freeing the dispatch barrier.
- * The exhaustive switch on item.status has no default: a future new status must
- * fail compilation here rather than silently falling into 'keep'.
- */
-export function nextDispatchedState(entry: DispatchedEntry, item: RoadmapItem | undefined): DispatchedTickAction {
-  if (!item) return { kind: 'remove', reason: 'absent' }
-  switch (item.status) {
-    case 'done':
-      return { kind: 'remove', reason: 'done' }
-    case 'archived':
-      return { kind: 'remove', reason: 'archived' }
-    case 'in_progress':
-      return entry.claimed ? { kind: 'keep' } : { kind: 'claim' }
-    case 'planned':
-    case 'idea':
-      return entry.claimed && !item.locked ? { kind: 'remove', reason: 'abandoned' } : { kind: 'keep' }
-    default: {
-      const _exhaustive: never = item.status
-      return _exhaustive
-    }
-  }
 }
 
 export { composeDispatchText, composeMultiDispatchText, composeAssignText }
@@ -714,6 +673,228 @@ export function nextBarrierPending(
   if (dispatchSucceeded) return false
   if (dispatchedSize > 0) return current
   return queueHasHead
+}
+
+/** What one barrier read uses: all derived from a single endpoint and project key. */
+export interface BarrierSource {
+  capability: (signal: AbortSignal) => Promise<AtomicDispatchCapability | null>
+  state: (lotId: string, signal: AbortSignal) => Promise<Pick<RoadmapLotExecutionStateResponse, 'open_sends'>>
+  /** Archived cards included. */
+  list: (signal: AbortSignal) => Promise<RoadmapItem[]>
+}
+
+/** The sends the barrier waits on: this operator's own waves, on cards the roadmap still lists. */
+export function waitingSends(openSends: RoadmapLotOpenSend[], items: RoadmapItem[]): RoadmapLotOpenSend[] {
+  const listed = new Set(items.map((i) => i.id))
+  return openSends.filter((s) => s.own && s.mode === 'wave' && listed.has(s.card_id))
+}
+
+/** Under the watch interval, so a broker that stops answering costs one tick. */
+const BARRIER_READ_TIMEOUT_MS = 10_000
+
+interface BarrierRead {
+  openSends: RoadmapLotOpenSend[]
+  items: RoadmapItem[]
+}
+
+/** null: this broker keeps no send register. */
+async function readBarrier(source: BarrierSource, signal: AbortSignal): Promise<BarrierRead | null> {
+  if ((await source.capability(signal))?.lots !== 1) return null
+  // Sends before cards: a card sent after an older list would read as absent.
+  const { open_sends } = await source.state(DEFAULT_ROADMAP_LOT_ID, signal)
+  return { openSends: open_sends, items: await source.list(signal) }
+}
+
+/** Past the deadline, rejects and aborts the work, so no request stays open behind the next tick. */
+function withinDeadline<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController()
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const late = new Error(`the barrier read did not answer within ${ms} ms`)
+      // Rejected first: the abort makes the work fail too, with a less telling error.
+      reject(late)
+      controller.abort(late)
+    }, ms)
+    void work(controller.signal)
+      .then(resolve, reject)
+      .finally(() => clearTimeout(timer))
+  })
+}
+
+export interface DispatchWatcherDeps {
+  /** Called once per reading tick. */
+  openRead: () => BarrierSource
+  /** The automatic dispatch. */
+  dispatch: () => Promise<DispatchResult>
+  journal: (line: string) => void
+  warn: (line: string) => void
+  reportError: (message: string, error: unknown) => void
+  /** Deadline of one whole read; 10 seconds when absent. */
+  readTimeoutMs?: number
+}
+
+/** What the Deck lends the watcher; the endpoint and project key are read once per tick. */
+export interface DeckWatcherHost {
+  endpoint: () => BrokerEndpoint
+  projectKey: () => string
+  dispatch: DispatchWatcherDeps['dispatch']
+  journal: { add: (kind: 'dispatch', line: string) => unknown }
+  warn: DispatchWatcherDeps['warn']
+  reportError: (source: 'dispatch', message: string, error: unknown) => void
+}
+
+export function deckWatcherDeps(host: DeckWatcherHost): DispatchWatcherDeps {
+  return {
+    openRead: () => {
+      const endpoint = host.endpoint()
+      const key = host.projectKey()
+      return {
+        capability: (signal) => fetchAtomicDispatchCapability(endpoint, fetch, signal),
+        state: (lotId, signal) => fetchLotExecutionState(endpoint, key, lotId, signal),
+        list: (signal) => listRoadmap(endpoint, key, { include_archived: true }, signal)
+      }
+    },
+    dispatch: host.dispatch,
+    journal: (line) => void host.journal.add('dispatch', line),
+    warn: host.warn,
+    reportError: (message, error) => host.reportError('dispatch', message, error)
+  }
+}
+
+export interface DispatchWatcher {
+  /** Members confirmed sent: waited on until a later register read releases them. */
+  track: (members: DispatchedWaveMember[]) => void
+  tick: () => Promise<void>
+}
+
+/**
+ * Advances the default queue once the waves it waits on are settled in the
+ * broker's send register, so the wait survives a restart. A broker that keeps
+ * no register gets no automatic advance.
+ */
+export function createDispatchWatcher(deps: DispatchWatcherDeps): DispatchWatcher {
+  const waiting = new Set<string>()
+  // Until one read succeeds, sends from before a restart may be open.
+  let registerRead = false
+  // A head no send accounts for (a dependency, no lead) is retried on every tick.
+  let barrierPending = false
+  let tracked = 0
+  let ticking = false
+  let suspensionTraced = false
+  let namedBlockers = ''
+  const failures = createFailureReporter((e) => deps.reportError('the auto-dispatch watcher failed', e))
+
+  const advance = async (items: RoadmapItem[], completed: boolean): Promise<void> => {
+    if (!completed && !(waiting.size === 0 && barrierPending)) return
+    let dispatchSucceeded = false
+    let attempted = false
+    let dispatchReason: DispatchResult['reason'] | undefined
+    const hold = autoDispatchHold(items, waiting)
+    if (hold === null) {
+      attempted = true
+      const r = await deps.dispatch()
+      dispatchSucceeded = dispatchTracked(r)
+      dispatchReason = r.reason ?? (r.sent && !dispatchSucceeded ? 'every announced card closed meanwhile' : undefined)
+      if (dispatchSucceeded) {
+        deps.journal(
+          r.count
+            ? `auto-dispatched next queued wave: ${r.count} items (${(r.titles ?? []).join(', ')})`
+            : `auto-dispatched next queued item: "${r.title}"`
+        )
+      }
+    }
+    const wasBarrierPending = barrierPending
+    barrierPending = nextBarrierPending(barrierPending, waiting.size, dispatchSucceeded, firstQueued(items) !== null)
+    if (barrierPending && !wasBarrierPending) {
+      // A hold and a failed attempt are different diagnoses. The manual override
+      // is no advice without a lead: it would fail the same way.
+      const reason =
+        attempted && !dispatchSucceeded
+          ? dispatchReason === 'no-lead'
+            ? 'no team-lead connected, waiting for a lead to connect'
+            : dispatchReason === 'unconfirmed'
+              ? 'last wave delivery unconfirmed, automatic advance suspended until the broker settles it or the operator dispatches by hand'
+              : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry (use "send first to team-lead" to override)`
+          : hold?.kind === 'dependency'
+            ? dependencyHoldReason(hold)
+            : 'next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
+      deps.journal(`wave barrier: ${reason}`)
+    } else if (!barrierPending && wasBarrierPending && !dispatchSucceeded) {
+      // A successful dispatch has already written its own line.
+      deps.journal('wave barrier: cleared, queue advancing')
+    }
+  }
+
+  const read = async (): Promise<void> => {
+    if (registerRead && waiting.size === 0 && !barrierPending) return
+    const trackedBefore = tracked
+    const source = deps.openRead()
+    const answer = await withinDeadline(
+      (signal) => readBarrier(source, signal),
+      deps.readTimeoutMs ?? BARRIER_READ_TIMEOUT_MS
+    )
+    if (!answer) {
+      if (!suspensionTraced) {
+        deps.warn('automatic dispatch suspended: this broker keeps no send register (use "send first to team-lead")')
+      }
+      suspensionTraced = true
+      // Nothing tracked here can appear in a register the broker gains later.
+      waiting.clear()
+      barrierPending = false
+      registerRead = false
+      return
+    }
+    suspensionTraced = false
+    // A send tracked during this read may be missing from it.
+    if (tracked !== trackedBefore) return
+    const { openSends, items } = answer
+    const byId = new Map(items.map((i) => [i.id, i]))
+    const blocking = waitingSends(openSends, items)
+    const blockingIds = new Set(blocking.map((s) => s.card_id))
+    const released = [...waiting].filter((id) => !blockingIds.has(id))
+    for (const id of released) {
+      const card = byId.get(id)
+      if (!card) {
+        deps.journal(`dispatched item vanished from the roadmap: ${id.slice(0, 8)}`)
+        continue
+      }
+      const closed = card.status === 'done' || card.status === 'archived'
+      deps.journal(`dispatched item ${closed ? card.status : 'released by the send register'}: "${card.title}"`)
+    }
+    waiting.clear()
+    for (const id of blockingIds) waiting.add(id)
+    registerRead = true
+    const blockers = [...blockingIds].sort().join(' ')
+    if (blockers !== namedBlockers && blocking.length > 0) {
+      const named = blocking.map((s) => `${s.card_id.slice(0, 8)} "${byId.get(s.card_id)!.title}" (sent ${s.sent_at})`)
+      deps.journal(
+        `wave barrier: waiting on ${blocking.length} sent item(s) before advancing the queue: ${named.join(', ')}; close a card or send it again if its order is lost`
+      )
+    }
+    namedBlockers = blockers
+    await advance(items, released.length > 0)
+    failures.recovered()
+  }
+
+  return {
+    track: (members) => {
+      if (members.length === 0) return
+      tracked++
+      for (const m of members) waiting.add(m.id)
+    },
+    tick: async () => {
+      // Overlapping reads could apply an older answer over a newer one.
+      if (ticking) return
+      ticking = true
+      try {
+        await read()
+      } catch (e) {
+        failures.failed(e)
+      } finally {
+        ticking = false
+      }
+    }
+  }
 }
 
 /**

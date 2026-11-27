@@ -76,9 +76,11 @@ export const ATOMIC_OPERATION_MARGIN_MS = 5_000
  */
 export async function fetchAtomicDispatchCapability(
   endpoint: BrokerEndpoint,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal
 ): Promise<AtomicDispatchCapability | null> {
-  const res = await fetchImpl(`${endpoint.url}/health`, { signal: AbortSignal.timeout(2000) })
+  const limit = AbortSignal.timeout(2000)
+  const res = await fetchImpl(`${endpoint.url}/health`, { signal: signal ? AbortSignal.any([signal, limit]) : limit })
   if (!res.ok) throw new Error(`broker /health answered ${res.status}`)
   const health: unknown = await res.json()
   if (!health || typeof health !== 'object') throw new Error('broker /health is not an object')
@@ -94,7 +96,8 @@ export async function fetchAtomicDispatchCapability(
     !positive(c.max_operation_ms) ||
     c.max_operation_ms <= ATOMIC_OPERATION_MARGIN_MS ||
     !positive(c.max_members) ||
-    !positive(c.registry_capacity)
+    !positive(c.registry_capacity) ||
+    (c.lots !== undefined && c.lots !== 1)
   ) {
     throw new Error('broker /health carries an atomic_dispatch capability this Deck cannot use: dispatch refused, not sent in the previous order')
   }
@@ -103,7 +106,8 @@ export async function fetchAtomicDispatchCapability(
     broker_id: c.broker_id,
     max_operation_ms: c.max_operation_ms,
     max_members: c.max_members,
-    registry_capacity: c.registry_capacity
+    registry_capacity: c.registry_capacity,
+    ...(c.lots === 1 ? { lots: 1 as const } : {})
   }
 }
 

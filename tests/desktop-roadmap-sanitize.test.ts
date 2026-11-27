@@ -185,7 +185,14 @@ test("PICK-LIST, not spread: an unknown broker field does not travel through", (
   const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_extra_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
   expect(Object.keys(item)).not.toContain("surprise_extra_field");
-  expect(Object.keys(item)).toHaveLength(34);
+  expect(Object.keys(item)).toHaveLength(35);
+});
+
+test("lot_id survives as the card's lot, and anything but a non-empty string reads as no lot", () => {
+  expect(sanitized({ lot_id: "lot-1" }).lot_id).toBe("lot-1");
+  expect(sanitized({ lot_id: "" }).lot_id).toBeNull();
+  expect(sanitized({ lot_id: 3 }).lot_id).toBeNull();
+  expect(sanitized({}).lot_id).toBeNull();
 });
 
 test("content_updated_at survives as the broker's content date, and anything but a string reads as unknown (null)", () => {

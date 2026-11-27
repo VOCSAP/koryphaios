@@ -1,6 +1,6 @@
 // PLAN C15: queue → team-lead dispatch helpers (desktop/src/main/dispatch).
 
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -14,6 +14,8 @@ import {
   composeStopText,
   createAssigner,
   createDispatcher,
+  createDispatchWatcher,
+  deckWatcherDeps,
   createDispatchRequestPoller,
   createFailureReporter,
   createUnconfirmedGate,
@@ -23,7 +25,6 @@ import {
   dispatchWave,
   firstQueued,
   nextBarrierPending,
-  nextDispatchedState,
   nextQueuePosition,
   NO_TARGET_REQUESTED_NOTE,
   queuedItems,
@@ -34,16 +35,20 @@ import {
   runStop,
   settleUnconfirmed,
   splitWave,
+  waitingSends,
   UNRESOLVED_TARGET_NOTE,
   unresolvedDirectiveNote,
   type AssignDeps,
   type AtomicPort,
   type AtomicWaveDeps,
+  type BarrierSource,
   type DispatcherDeps,
+  type DispatchWatcher,
   type StopDeps
 } from "../desktop/src/main/dispatch.ts";
 import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
 import { findMatchingClose } from "./_braced-body.ts";
+import { reachedWithin } from "./_bounded-await.ts";
 import {
   assignInProgress,
   markDirectiveDone,
@@ -70,6 +75,7 @@ import type {
   DispatchRequest,
   DispatchRequestOutcome
 } from "../shared/types";
+import type { RoadmapLotOpenSend } from "../shared/roadmap-lot";
 
 function item(over: Partial<RoadmapItem>): RoadmapItem {
   return {
@@ -227,7 +233,7 @@ test("composeAssignText carries the full item and the take-it-now contract", () 
   expect(text).not.toContain("team-lead");
 });
 
-// R5 wave barrier (card 42edc88b phase 3): watchDispatched's policy for
+// The watcher's barrier policy:
 // whether an AUTOMATIC redispatch may fire. The manual "send first to
 // team-lead" button calls dispatchNext() directly and is untested here on
 // purpose -- it is intentionally unguarded (see canAutoDispatchNext's doc
@@ -387,75 +393,6 @@ test("dependencyHoldReason: names the head, every unknown id and every pending d
 test("autoDispatchHold: names an in-flight wave and an empty queue", () => {
   expect(autoDispatchHold([item({ id: "a", queue: 1 })], new Set(["x"]))).toEqual({ kind: "in-flight" });
   expect(autoDispatchHold([item({ id: "a" })], new Set())).toEqual({ kind: "empty" });
-});
-
-// watchDispatched's removal paths cover done, archived and absent states;
-// without a path for a claimed item reverting to planned (an operator stop, or
-// an idle-lock release), dispatchedIds would never clear and the wave barrier
-// would stay permanently closed.
-// Sense A guards against the naive fix of deleting on planned+unlocked: a
-// freshly dispatched item is planned and unlocked too, before it is ever
-// claimed.
-
-test("nextDispatchedState: sense A -- a freshly dispatched item (never claimed) stays tracked", () => {
-  const it = item({ status: "planned", locked: false });
-  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "keep" });
-});
-
-test("nextDispatchedState: claims when the lead locks it in_progress", () => {
-  const it = item({ status: "in_progress", locked: true });
-  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
-});
-
-// Claim must not require `locked`: broker.ts only grants the work-lock to a
-// non-'deck' author, so a Deck-authored in_progress write (author='deck')
-// leaves locked=false and would otherwise never claim, reproducing the
-// barrier-stuck-forever bug.
-test("nextDispatchedState: claims on status alone -- a Deck-authored in_progress write (unlocked) still claims", () => {
-  const it = item({ status: "in_progress", locked: false });
-  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
-});
-
-test("nextDispatchedState: claim is idempotent -- already-claimed stays keep while still in_progress", () => {
-  const it = item({ status: "in_progress", locked: true });
-  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "keep" });
-  // A momentary lock hiccup (locked flips false) while status is STILL
-  // in_progress must not be misread as an abandonment -- abandonment is
-  // defined on (planned|idea)+unlocked, not merely "not currently locked".
-  const flicker = item({ status: "in_progress", locked: false });
-  expect(nextDispatchedState({ claimed: true }, flicker)).toEqual({ kind: "keep" });
-});
-
-test("nextDispatchedState: a claimed item reverted to planned+unlocked is removed as abandoned", () => {
-  const it = item({ status: "planned", locked: false });
-  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "remove", reason: "abandoned" });
-});
-
-test("nextDispatchedState: same reverted-abandoned rule applies to idea", () => {
-  const it = item({ status: "idea", locked: false });
-  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "remove", reason: "abandoned" });
-});
-
-test("nextDispatchedState: done and archived are removed regardless of claimed", () => {
-  expect(nextDispatchedState({ claimed: false }, item({ status: "done" }))).toEqual({
-    kind: "remove",
-    reason: "done"
-  });
-  expect(nextDispatchedState({ claimed: true }, item({ status: "archived" }))).toEqual({
-    kind: "remove",
-    reason: "archived"
-  });
-});
-
-test("nextDispatchedState: an item absent from the roadmap (deleted) is removed", () => {
-  expect(nextDispatchedState({ claimed: true }, undefined)).toEqual({ kind: "remove", reason: "absent" });
-});
-
-test("nextDispatchedState: two sibling wave members diverge -- reverted one removed, untouched one kept", () => {
-  const reverted = item({ id: "a", status: "planned", locked: false });
-  const untouched = item({ id: "b", status: "planned", locked: false });
-  expect(nextDispatchedState({ claimed: true }, reverted)).toEqual({ kind: "remove", reason: "abandoned" });
-  expect(nextDispatchedState({ claimed: false }, untouched)).toEqual({ kind: "keep" });
 });
 
 // Multi-dispatch (roadmap card 5852c074): a whole head wave sent to the
@@ -837,7 +774,7 @@ test("dispatchNormalWave: an empty normal list is empty-queue without announcing
 });
 
 // Acceptance criterion 3: a throwing member's upsert must not orphan a
-// dispatchedIds entry for THAT member, while siblings still succeed.
+// tracked entry for THAT member, while siblings still succeed.
 test("dispatchNormalWave: one member's upsert throws -- not dispatched/tracked, siblings still are", async () => {
   const wave = [item({ id: "a", title: "A" }), item({ id: "b", title: "B" }), item({ id: "c", title: "C" })];
   const { deps } = mockDeps({ failIds: new Set(["b"]) });
@@ -1164,73 +1101,399 @@ test("SOURCE SCAN (weak): the poller's three deps are the REAL ones, not stubs",
   expect(src).toContain("inFlight: dispatcher.inFlight");
 });
 
-type RetryRun = { barrierPending: boolean; dispatched: number; lines: string[]; allLines: string[] };
+const sendOf = (cardId: string, over: Partial<RoadmapLotOpenSend> = {}): RoadmapLotOpenSend => ({
+  card_id: cardId,
+  epoch: 0,
+  mode: "wave",
+  target_peer_id: "lead-1",
+  sent_at: "2026-11-27T10:00:00.000Z",
+  claimed_at: null,
+  own: true,
+  ...over
+});
 
-/**
- * Executes the REAL body of watchDispatched (index.ts, not importable under
- * bun) from its roadmap fetch on, with the real dispatch.ts helpers, a
- * recording dispatchNext / journal, and a list that hides archived cards
- * unless asked for them, as the broker does. Only the names passed below are
- * in scope: a body that goes back to a helper not listed here throws a
- * ReferenceError instead of passing.
- * One tracked item finishing on this tick is what makes the barrier re-check
- * the head, so every run starts from that state.
- */
-async function runWatchRetry(
-  roadmap: RoadmapItem[],
-  result: DispatchResult = { sent: true, title: "dispatched", dispatched: [{ id: "w", title: "dispatched", kind: "feature" }] }
-): Promise<RetryRun> {
-  const watch = sliceBetween(indexSource(), "const watchDispatched = async (): Promise<void> => {", "\n}");
-  const start = watch.indexOf("const items = await listRoadmap(");
-  const end = watch.lastIndexOf("} catch (e) {");
-  if (start < 0 || end < start) throw new Error("watchDispatched body not found");
-  const fn = `async function watchBody(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, dispatchWatchFailures) {\n${watch.slice(start, end)}\nreturn barrierPending\n}`;
-  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
-  const watchBody = new Function(`${js}\nreturn watchBody`)();
-  const finished = item({ id: "finished-wave-member", status: "done" });
-  const run: RetryRun = { barrierPending: false, dispatched: 0, lines: [], allLines: [] };
-  const listRoadmap = async (_endpoint: string, _key: string, opts: { include_archived?: boolean }) =>
-    [finished, ...roadmap].filter((i) => opts.include_archived || i.status !== "archived");
-  const dispatchNext = async (): Promise<DispatchResult> => {
-    run.dispatched++;
-    return result;
+const never = () => new Promise<never>(() => {});
+const SENT = "aaaaaaaa-0000-0000-0000-0000000000a1";
+const LATER = "bbbbbbbb-0000-0000-0000-0000000000b2";
+const sentCard = (over: Partial<RoadmapItem> = {}) => item({ id: SENT, title: "Sent before restart", ...over });
+const laterCard = (over: Partial<RoadmapItem> = {}) => item({ id: LATER, title: "Sent by hand", ...over });
+const nextHead = (over: Partial<RoadmapItem> = {}) => item({ id: "next", title: "Next head", queue: 1, ...over });
+
+function watched(readTimeoutMs?: number) {
+  const broker = {
+    hung: null as "capability" | "state" | "list" | null,
+    lots: true,
+    atomic: true,
+    open: [] as RoadmapLotOpenSend[],
+    cards: [] as RoadmapItem[],
+    failure: null as Error | null,
+    dispatchFailure: null as Error | null,
+    result: { sent: true, title: "Next head", dispatched: [{ id: "next", title: "Next head", kind: "feature" }] } as DispatchResult,
+    gate: null as Promise<void> | null,
+    onSnapshot: () => {},
+    signals: [] as AbortSignal[]
   };
-  const journal = { add: (_channel: string, line: string) => run.lines.push(line) };
-  run.barrierPending = await watchBody(
-    "endpoint", "key", listRoadmap, new Map([[finished.id, { claimed: true }]]), false,
-    nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, createFailureReporter(() => undefined)
-  );
-  run.allLines = run.lines;
-  run.lines = run.lines.filter((l) => l.startsWith("wave barrier"));
-  return run;
+  const log = { reads: [] as string[], dispatched: 0, journal: [] as string[], warns: [] as string[], errors: [] as string[] };
+  const source: BarrierSource = {
+    capability: async (signal) => {
+      broker.signals.push(signal);
+      if (broker.hung === "capability") await never();
+      return !broker.atomic ? null : broker.lots ? { ...CAPABILITY, lots: 1 } : CAPABILITY;
+    },
+    state: async (lotId) => {
+      if (broker.hung === "state") await never();
+      log.reads.push(lotId);
+      const open_sends = [...broker.open];
+      broker.onSnapshot();
+      if (broker.gate) await broker.gate;
+      if (broker.failure) throw broker.failure;
+      return { open_sends };
+    },
+    list: async () => {
+      if (broker.hung === "list") await never();
+      return broker.cards.map((c) => ({ ...c }));
+    }
+  };
+  const watcher: DispatchWatcher = createDispatchWatcher({
+    openRead: () => source,
+    dispatch: async () => {
+      log.dispatched++;
+      if (broker.dispatchFailure) throw broker.dispatchFailure;
+      const members = broker.result.dispatched ?? [];
+      watcher.track(members);
+      broker.open.push(...members.map((m) => sendOf(m.id)));
+      return broker.result;
+    },
+    journal: (l) => log.journal.push(l),
+    warn: (l) => log.warns.push(l),
+    reportError: (_m, e) => log.errors.push((e as Error).message),
+    ...(readTimeoutMs === undefined ? {} : { readTimeoutMs })
+  });
+  const settle = (id: string) => {
+    broker.open = broker.open.filter((s) => s.card_id !== id);
+    broker.cards = broker.cards.map((c) => (c.id === id ? { ...c, status: "done" as const } : c));
+  };
+  const barrierLines = () => log.journal.filter((l) => l.startsWith("wave barrier"));
+  return { watcher, broker, log, settle, barrierLines };
 }
 
-test("watchDispatched: an unknown dependency holds the head and the journal names it", async () => {
-  const head = item({ id: "a", title: "Blocked head", queue: 1, depends_on: ["deadbeef"] });
-  const run = await runWatchRetry([head]);
-  expect(run.dispatched).toBe(0);
-  expect(run.barrierPending).toBe(true);
-  expect(run.lines).toHaveLength(1);
-  expect(run.lines[0]).toContain('"Blocked head"');
-  expect(run.lines[0]).toContain("depends on an id that matches no card: deadbeef");
+test("waitingSends: only this operator's wave sends on a listed card hold the barrier", () => {
+  const sends = [
+    sendOf("own-wave"),
+    sendOf("foreign", { own: false }),
+    sendOf("assigned", { mode: "assign" }),
+    sendOf("gone")
+  ];
+  const items = ["own-wave", "foreign", "assigned"].map((id) => item({ id }));
+  expect(waitingSends(sends, items).map((s) => s.card_id)).toEqual(["own-wave"]);
 });
 
-test("watchDispatched: an unfinished dependency holds the head and the journal names it by title", async () => {
+test("watcher: a restarted Deck names the open send it waits on, and advances once it is settled", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  await h.watcher.tick();
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.barrierLines()).toEqual([
+    'wave barrier: waiting on 1 sent item(s) before advancing the queue: aaaaaaaa "Sent before restart" (sent 2026-11-27T10:00:00.000Z); close a card or send it again if its order is lost'
+  ]);
+  h.settle(SENT);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+  expect(h.log.journal).toContain('dispatched item done: "Sent before restart"');
+  expect(h.log.journal).toContain('auto-dispatched next queued item: "Next head"');
+  expect(h.log.reads).toEqual(["default", "default", "default"]);
+});
+
+test("watcher: after a restart, a manual send that settles does not open the barrier while an older send is open", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), laterCard(), nextHead()];
+  await h.watcher.tick();
+  h.watcher.track([{ id: LATER, title: "Sent by hand", kind: "feature" }]);
+  h.broker.open.push(sendOf(LATER));
+  await h.watcher.tick();
+  h.settle(LATER);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  h.settle(SENT);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: a restart with no open send dispatches nothing and stops reading", async () => {
+  const h = watched();
+  h.broker.cards = [nextHead()];
+  await h.watcher.tick();
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.log.reads).toEqual(["default"]);
+});
+
+test("watcher: another operator's sends, assignments and unlisted cards do not keep the queue waiting", async () => {
+  const h = watched();
+  h.broker.cards = [sentCard(), laterCard(), item({ id: "assigned" }), nextHead()];
+  h.broker.open = [sendOf(SENT), sendOf(LATER, { own: false }), sendOf("assigned", { mode: "assign" }), sendOf("unlisted")];
+  await h.watcher.tick();
+  h.settle(SENT);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: a send the register releases without closing its card advances the queue", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  await h.watcher.tick();
+  h.broker.open = [];
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+  expect(h.log.journal).toContain('dispatched item released by the send register: "Sent before restart"');
+});
+
+test("watcher: a card that left the roadmap releases the barrier and is journaled by id", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  await h.watcher.tick();
+  h.broker.cards = [nextHead()];
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+  expect(h.log.journal).toContain("dispatched item vanished from the roadmap: aaaaaaaa");
+});
+
+test("watcher: a failed register read holds the barrier and is reported once", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  await h.watcher.tick();
+  h.broker.failure = new Error("register down");
+  await h.watcher.tick();
+  await h.watcher.tick();
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.log.errors).toEqual(["register down"]);
+});
+
+test("watcher: a first read that fails is retried, and the sends it then finds hold the barrier", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  h.broker.failure = new Error("broker still starting");
+  await h.watcher.tick();
+  h.broker.failure = null;
+  await h.watcher.tick();
+  h.settle(SENT);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: a different failure, or the same one after a successful tick, is reported again", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard()];
+  for (const failure of ["a", "b", null, "b"]) {
+    h.broker.failure = failure === null ? null : new Error(failure);
+    await h.watcher.tick();
+  }
+  expect(h.log.errors).toEqual(["a", "b", "b"]);
+});
+
+test("watcher: a tick whose dispatch fails after the read does not reset the failure memory", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead({ depends_on: [SENT] })];
+  await h.watcher.tick();
+  h.broker.open = [];
+  await h.watcher.tick();
+  h.broker.cards = [sentCard({ status: "done" }), nextHead()];
+  h.broker.dispatchFailure = new Error("dispatch exploded");
+  await h.watcher.tick();
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(2);
+  expect(h.log.errors).toEqual(["dispatch exploded"]);
+});
+
+test("watcher: a send tracked while the register is being read is not released by that older answer", async () => {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), laterCard(), nextHead()];
+  await h.watcher.tick();
+  let release!: () => void;
+  h.broker.gate = new Promise<void>((resolve) => (release = resolve));
+  h.settle(SENT);
+  const snapshot = new Promise<void>((resolve) => (h.broker.onSnapshot = resolve));
+  const reading = h.watcher.tick();
+  await reachedWithin(snapshot, "the register snapshot");
+  h.watcher.track([{ id: LATER, title: "Sent by hand", kind: "feature" }]);
+  h.broker.open.push(sendOf(LATER));
+  release();
+  await reading;
+  expect(h.log.dispatched).toBe(0);
+  h.broker.gate = null;
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  h.settle(LATER);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: a tick that arrives while one is reading does not read", async () => {
+  const h = watched();
+  let release!: () => void;
+  h.broker.gate = new Promise<void>((resolve) => (release = resolve));
+  const first = h.watcher.tick();
+  await h.watcher.tick();
+  release();
+  await first;
+  expect(h.log.reads).toEqual(["default"]);
+});
+
+test.each<[string, (b: ReturnType<typeof watched>["broker"], on: boolean) => void]>([
+  ["no lot capability", (b, on) => void (b.lots = on)],
+  ["no atomic dispatch", (b, on) => void (b.atomic = on)]
+])("watcher: a broker with %s gets no automatic advance, said once per outage", async (_name, serve) => {
+  const h = watched();
+  h.broker.cards = [sentCard({ status: "done" }), nextHead()];
+  serve(h.broker, false);
+  await h.watcher.tick();
+  h.watcher.track([{ id: SENT, title: "Sent before restart", kind: "feature" }]);
+  await h.watcher.tick();
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.log.reads).toEqual([]);
+  expect(h.log.warns).toHaveLength(1);
+  expect(h.log.warns[0]).toContain("automatic dispatch suspended");
+  serve(h.broker, true);
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.log.reads).toEqual(["default"]);
+  serve(h.broker, false);
+  h.watcher.track([{ id: LATER, title: "Sent by hand", kind: "feature" }]);
+  await h.watcher.tick();
+  expect(h.log.warns).toHaveLength(2);
+});
+
+test.each(["capability", "state", "list"] as const)(
+  "watcher: a %s read that never answers is abandoned, reported once, and the next tick reads again",
+  async (hung) => {
+    const h = watched(20);
+    h.broker.open = [sendOf(SENT)];
+    h.broker.cards = [sentCard(), nextHead()];
+    await h.watcher.tick();
+    h.settle(SENT);
+    h.broker.hung = hung;
+    await reachedWithin(h.watcher.tick(), "the first unanswered tick");
+    await reachedWithin(h.watcher.tick(), "the second unanswered tick");
+    expect(h.broker.signals.map((s) => s.aborted)).toEqual([false, true, true]);
+    expect(h.log.dispatched).toBe(0);
+    expect(h.log.errors).toEqual(["the barrier read did not answer within 20 ms"]);
+    h.broker.hung = null;
+    await h.watcher.tick();
+    expect(h.log.dispatched).toBe(1);
+  }
+);
+
+test("watcher: with no deadline given, a read gets more than a second and less than the twenty-second watch interval", async () => {
+  const h = watched();
+  const timers = spyOn(globalThis, "setTimeout");
+  try {
+    await h.watcher.tick();
+    const delays = timers.mock.calls.map((call) => call[1] as number);
+    expect(delays).toHaveLength(1);
+    expect(delays[0]).toBeGreaterThan(1_000);
+    expect(delays[0]).toBeLessThan(20_000);
+  } finally {
+    timers.mockRestore();
+  }
+});
+
+test("watcher: an answer that arrives after the deadline is dropped", async () => {
+  const h = watched(20);
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), nextHead()];
+  await h.watcher.tick();
+  let release!: () => void;
+  h.broker.gate = new Promise<void>((resolve) => (release = resolve));
+  h.settle(SENT);
+  await reachedWithin(h.watcher.tick(), "the unanswered tick");
+  release();
+  await Bun.sleep(0);
+  expect(h.log.dispatched).toBe(0);
+  expect(h.log.journal.filter((l) => l.startsWith("dispatched item"))).toEqual([]);
+});
+
+test("deckWatcherDeps names the dispatch channel on the journal and the error sink, and passes dispatch and warn through", async () => {
+  const lines: unknown[][] = [];
+  const dispatch = async (): Promise<DispatchResult> => ({ sent: false });
+  const warn = (): void => {};
+  const deps = deckWatcherDeps({
+    endpoint: () => ({ url: "http://127.0.0.1:1", token: null }),
+    projectKey: () => "p",
+    dispatch,
+    journal: { add: (kind, line) => lines.push(["journal", kind, line]) },
+    warn,
+    reportError: (source, message, error) => void lines.push(["error", source, message, error])
+  });
+  deps.journal("a line");
+  deps.reportError("a message", "a cause");
+  expect(lines).toEqual([
+    ["journal", "dispatch", "a line"],
+    ["error", "dispatch", "a message", "a cause"]
+  ]);
+  expect(deps.dispatch).toBe(dispatch);
+  expect(deps.warn).toBe(warn);
+});
+
+function releasedOnto(...cards: RoadmapItem[]) {
+  const h = watched();
+  h.broker.open = [sendOf(SENT)];
+  h.broker.cards = [sentCard(), ...cards];
+  const run = async () => {
+    await h.watcher.tick();
+    h.settle(SENT);
+    await h.watcher.tick();
+  };
+  return { ...h, run };
+}
+
+test("watcher: an unknown dependency holds the head, the journal names it, and the head leaves once it is fixed", async () => {
+  const h = releasedOnto(nextHead({ title: "Blocked head", depends_on: ["deadbeef"] }));
+  await h.run();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.barrierLines().at(-1)).toContain('"Blocked head"');
+  expect(h.barrierLines().at(-1)).toContain("depends on an id that matches no card: deadbeef");
+  h.broker.cards = [nextHead()];
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: an unfinished dependency holds the head and the journal names it by title", async () => {
   const dep = item({ id: DEP_ID, title: "Still running prerequisite", status: "in_progress" });
-  const head = item({ id: "a", title: "Waiting head", queue: 1, depends_on: ["3f9a1c2e"] });
-  const run = await runWatchRetry([dep, head]);
-  expect(run.dispatched).toBe(0);
-  expect(run.lines).toHaveLength(1);
-  expect(run.lines[0]).toContain('"Still running prerequisite"');
-  expect(run.lines[0]).not.toContain("matches no card");
+  const h = releasedOnto(dep, nextHead({ title: "Waiting head", depends_on: ["3f9a1c2e"] }));
+  await h.run();
+  expect(h.log.dispatched).toBe(0);
+  expect(h.barrierLines().at(-1)).toContain('"Still running prerequisite"');
+  expect(h.barrierLines().at(-1)).not.toContain("matches no card");
 });
 
-test("watchDispatched: a dependency on an archived card lets the head dispatch", async () => {
+test("watcher: a dependency on an archived card lets the head dispatch", async () => {
   const dep = item({ id: DEP_ID, status: "archived" });
-  const head = item({ id: "a", queue: 1, depends_on: [DEP_ID] });
-  const run = await runWatchRetry([dep, head]);
-  expect(run.dispatched).toBe(1);
-  expect(run.barrierPending).toBe(false);
+  const h = releasedOnto(dep, nextHead({ depends_on: [DEP_ID] }));
+  await h.run();
+  expect(h.log.dispatched).toBe(1);
+});
+
+test("watcher: a dispatched wave whose cards all closed is not tracked, so the head is retried instead of stalling", async () => {
+  const h = releasedOnto(nextHead());
+  h.broker.result = { sent: true, skipped: [{ id: "x", title: "X", kind: "feature" }] };
+  await h.run();
+  expect(h.log.dispatched).toBe(1);
+  expect(h.log.journal.some((l) => l.startsWith("auto-dispatched"))).toBe(false);
+  expect(h.barrierLines().at(-1)).toContain("every announced card closed meanwhile");
+  await h.watcher.tick();
+  expect(h.log.dispatched).toBe(2);
 });
 
 function wavePool(cards: RoadmapItem[]) {
@@ -1510,15 +1773,6 @@ test("runStop: an unknown card answers not-found without writing or notifying", 
   expect(pool.writes).toEqual([]);
 });
 
-test("watchDispatched: a dispatched wave whose cards all closed is not tracked, so the barrier re-arms instead of stalling", async () => {
-  const head = item({ id: "a", title: "Next head", queue: 1 });
-  const run = await runWatchRetry([head], { sent: true, skipped: [{ id: "x", title: "X", kind: "feature" }] });
-  expect(run.dispatched).toBe(1);
-  expect(run.barrierPending).toBe(true);
-  expect(run.allLines.some((l) => l.startsWith("auto-dispatched"))).toBe(false);
-  expect(run.lines.join("\n")).toContain("every announced card closed meanwhile");
-});
-
 test("runStop: the notice and the journal carry the title of the card that was written, not the one first read", async () => {
   const pool = wavePool([runningCard()]);
   const notified: string[] = [];
@@ -1537,51 +1791,6 @@ test("runStop: the notice and the journal carry the title of the card that was w
   expect(pool.writes.map((w) => w.expected_content_rev)).toEqual([1, 2]);
   expect(notified).toEqual(["A renamed"]);
   expect(log.journaled[0]).toContain("A renamed");
-});
-
-async function runWatchTicks(outcomes: (Error | null)[], dispatchFailure: Error | null = null): Promise<string[]> {
-  const watch = sliceBetween(indexSource(), "const watchDispatched = async (): Promise<void> => {", "\n}");
-  const start = watch.indexOf("const items = await listRoadmap(");
-  if (start < 0) throw new Error("watchDispatched body not found");
-  const fn = `async function tick(endpoint, key, listRoadmap, dispatchedIds, barrierPending, nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued, dispatchTracked, dispatchNext, journal, dispatchWatchFailures) {\ntry {\n${watch.slice(start)}\n}`;
-  const js = new Bun.Transpiler({ loader: "ts" }).transformSync(fn);
-  const tick = new Function(`${js}\nreturn tick`)();
-  const reports: string[] = [];
-  const failures = createFailureReporter((error) => reports.push((error as Error).message));
-  const pending = [...outcomes];
-  const listRoadmap = async () => {
-    const next = pending.shift();
-    if (next) throw next;
-    return dispatchFailure ? [item({ id: "h", queue: 1 })] : [];
-  };
-  for (let i = 0; i < outcomes.length; i++) {
-    await tick(
-      "endpoint", "key", listRoadmap, new Map(), dispatchFailure !== null,
-      nextDispatchedState, autoDispatchHold, dependencyHoldReason, nextBarrierPending, firstQueued,
-      dispatchTracked,
-      async () => {
-        if (dispatchFailure) throw dispatchFailure;
-        return { sent: false };
-      },
-      { add: () => undefined }, failures
-    );
-  }
-  return reports;
-}
-
-test("watchDispatched: the same failure on consecutive ticks is traced once", async () => {
-  expect(await runWatchTicks([new Error("broker down"), new Error("broker down"), new Error("broker down")])).toEqual([
-    "broker down"
-  ]);
-});
-
-test("watchDispatched: a different failure, or the same one after a successful tick, is traced again", async () => {
-  expect(await runWatchTicks([new Error("a"), new Error("b")])).toEqual(["a", "b"]);
-  expect(await runWatchTicks([new Error("down"), null, new Error("down")])).toEqual(["down", "down"]);
-});
-
-test("watchDispatched: a tick that fails after the roadmap read does not reset the failure memory", async () => {
-  expect(await runWatchTicks([null, null], new Error("dispatch exploded"))).toEqual(["dispatch exploded"]);
 });
 
 const BROKER_ID = "11111111-aaaa-bbbb-cccc-222222222222";
@@ -2069,7 +2278,12 @@ const EP = { url: "http://127.0.0.1:1", token: null };
 
 test("the capability is absent only when /health says nothing about it", async () => {
   expect(await fetchAtomicDispatchCapability(EP, healthOf({ status: "ok" }))).toBeNull();
-  expect(await fetchAtomicDispatchCapability(EP, healthOf({ status: "ok", atomic_dispatch: GOOD_CAPABILITY }))).toEqual(GOOD_CAPABILITY);
+  expect(await fetchAtomicDispatchCapability(EP, healthOf({ status: "ok", atomic_dispatch: GOOD_CAPABILITY }))).toStrictEqual(GOOD_CAPABILITY);
+});
+
+test("the capability keeps the lot support the broker announces", async () => {
+  const health = healthOf({ status: "ok", atomic_dispatch: { ...GOOD_CAPABILITY, lots: 1 } });
+  expect(await fetchAtomicDispatchCapability(EP, health)).toStrictEqual({ ...GOOD_CAPABILITY, lots: 1 });
 });
 
 test.each<[string, unknown]>([
@@ -2079,6 +2293,7 @@ test.each<[string, unknown]>([
   ["a lifetime no longer than the margin", { atomic_dispatch: { ...GOOD_CAPABILITY, max_operation_ms: 5_000 } }],
   ["a malformed broker id", { atomic_dispatch: { ...GOOD_CAPABILITY, broker_id: "x" } }],
   ["a non-positive limit", { atomic_dispatch: { ...GOOD_CAPABILITY, max_members: 0 } }],
+  ["an unknown lot support", { atomic_dispatch: { ...GOOD_CAPABILITY, lots: 2 } }],
   ["a string", { atomic_dispatch: "yes" }]
 ])("a present but unusable capability (%s) rejects instead of selecting the previous order", async (_name, health) => {
   await expect(fetchAtomicDispatchCapability(EP, healthOf(health))).rejects.toThrow("cannot use");

@@ -346,7 +346,7 @@ export interface LotSendRecord {
   card_id: string;
   operator_id: string;
   operation_id: string;
-  mode: string;
+  mode: AtomicDispatchIntent["mode"];
   target_peer_id: string;
   sent_at: string;
 }

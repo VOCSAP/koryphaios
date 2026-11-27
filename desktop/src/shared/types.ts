@@ -874,6 +874,8 @@ export interface RoadmapItem {
   deleted_at: string | null
   /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
   queue: number | null
+  /** Lot the card belongs to (mirror of core RoadmapItem); the broker serves a named lot's rank as null. */
+  lot_id?: string | null
   /** Agent work-lock (PLAN K2): an agent is ACTIVELY working on the item. */
   locked: boolean
   /** peer_id snapshot of the lock owner; null when unlocked. */

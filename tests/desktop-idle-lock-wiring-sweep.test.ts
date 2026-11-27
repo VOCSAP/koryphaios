@@ -115,11 +115,10 @@ test("the status-write sites of index.ts call their orchestration and guarded wr
   const src = readFileSync(INDEX_PATH, "utf-8");
   const dispatcher = /const\s+dispatcher\s*=\s*createDispatcher\(\{/;
   const sites: [string, RegExp, RegExp[]][] = [
-    ["dispatcher", dispatcher, [/markDone:\s*async\s*\(item\)\s*=>\s*\(\(await markDirectiveDone\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /upsert:\s*async\s*\(item\)\s*=>\s*\(\(await unqueueDispatched\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /warn:\s*warnDispatch\b/]],
+    ["dispatcher", dispatcher, [/markDone:\s*async\s*\(item\)\s*=>\s*\(\(await markDirectiveDone\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /upsert:\s*async\s*\(item\)\s*=>\s*\(\(await unqueueDispatched\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /warn:\s*warnDispatch\b/, /^ {2}track: \(members\) => dispatchWatcher\.track\(members\),\r?$/m]],
     ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*createAssigner\(\{/, [/write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)/, /warn:\s*warnDispatch\b/]],
     ["stopRoadmapItem", /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/, [/runStop\(id,/, /write:\s*\(item\)\s*=>\s*requestOperatorStop\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/]],
     ["warnDispatch", /const\s+warnDispatch\s*=\s*\(line:\s*string\)\s*:\s*void\s*=>\s*\{/, [/logWarn\('dispatch',\s*line\)/, /journal\.add\('dispatch',/]],
-    ["watchDispatched", /const\s+watchDispatched\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<void>\s*=>\s*\{/, [/dispatchSucceeded\s*=\s*dispatchTracked\(r\)/]]
   ];
   for (const [site, declaration, calls] of sites) {
     const body = bodyOf(src, declaration);
@@ -128,6 +127,31 @@ test("the status-write sites of index.ts call their orchestration and guarded wr
     }
     expect([site + " has no bare upsertRoadmap", /upsertRoadmap\(/.test(body)]).toEqual([site + " has no bare upsertRoadmap", false]);
   }
+});
+
+// index.ts imports electron, so what it lends the watcher (its config, journal and sinks) cannot be executed.
+test("index.ts hands the watcher its broker endpoint, project, automatic dispatch and three traces", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8").replace(/\r\n/g, "\n");
+  const body = bodyOf(src, /const dispatchWatcher = createDispatchWatcher\(\n {2}deckWatcherDeps\(\{/);
+  expect(body.split("\n").map((l) => l.trim()).filter(Boolean)).toEqual([
+    "endpoint: () => resolveBrokerEndpoint(),",
+    "projectKey: () => computeDeckProjectKey(config.projectDir),",
+    "dispatch: () => dispatchNext(),",
+    "journal,",
+    "warn: warnDispatch,",
+    "reportError"
+  ]);
+  expect(src.match(/^const dispatchNext = .*$/gm)).toEqual([
+    "const dispatchNext = (): Promise<DispatchResult> => dispatcher.dispatch(false)"
+  ]);
+});
+
+test("index.ts reads the barrier at startup without waiting for it, then on the watch interval", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8").replace(/\r\n/g, "\n");
+  expect(src.match(/^.*dispatchWatcher\.tick\(.*$/gm)?.map((l) => l.trim())).toEqual([
+    "void dispatchWatcher.tick()",
+    "dispatchTimer = setInterval(() => void dispatchWatcher.tick(), DISPATCH_WATCH_MS)"
+  ]);
 });
 
 test("stopRoadmapItem writes through requestOperatorStop and never carries the sweep marker", () => {

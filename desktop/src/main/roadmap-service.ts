@@ -15,6 +15,12 @@ import type {
   AtomicDispatchRefusal
 } from '../../../shared/types'
 import type {
+  RoadmapLotExecutionStateResponse,
+  RoadmapLotExecutionView,
+  RoadmapLotOpenSend,
+  RoadmapLotQueuedCard
+} from '../../../shared/roadmap-lot'
+import type {
   RoadmapArchiveResponse,
   RoadmapContextAppendResponse,
   RoadmapFacetBucket,
@@ -166,24 +172,44 @@ export class RoadmapRequestError extends Error {
   }
 }
 
-async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unknown): Promise<T> {
+// Far above the broker's 3 s database wait and 10 s upstream bound: a write cut
+// off here may still have been committed, so only a broker that stopped answering
+// should reach it.
+const ROADMAP_REQUEST_TIMEOUT_MS = 60_000
+let roadmapRequestTimeoutMs = ROADMAP_REQUEST_TIMEOUT_MS
+
+/** Test seam; no argument restores the default. */
+export function setRoadmapRequestTimeout(ms = ROADMAP_REQUEST_TIMEOUT_MS): void {
+  roadmapRequestTimeoutMs = ms
+}
+
+/** `signal` replaces the default deadline; its owner traces the abort. Both cover the body read. */
+async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
-  const res = await fetch(`${endpoint.url}${path}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body)
-  })
-  if (!res.ok) {
-    let detail = ''
-    try {
-      detail = ((await res.json()) as { error?: string }).error ?? ''
-    } catch {
-      /* non-json error body */
+  const timeoutMs = roadmapRequestTimeoutMs
+  const bound = signal ?? AbortSignal.timeout(timeoutMs)
+  try {
+    const res = await fetch(`${endpoint.url}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: bound
+    })
+    if (!res.ok) {
+      let detail = ''
+      try {
+        detail = ((await res.json()) as { error?: string }).error ?? ''
+      } catch {
+        /* non-json error body */
+      }
+      throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
     }
-    throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
+    return (await res.json()) as T
+  } catch (e) {
+    if (!signal && bound.aborted) reportError('roadmap', `${path}: no complete answer within ${timeoutMs} ms`, e)
+    throw e
   }
-  return (await res.json()) as T
 }
 
 /** Operator writes are attributed to the reserved 'deck' author. */
@@ -297,6 +323,7 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
         : undefined,
     deleted_at: nullableStr(r.deleted_at),
     queue: queuePos(r.queue),
+    lot_id: typeof r.lot_id === 'string' && r.lot_id ? r.lot_id : null,
     locked: r.locked === true,
     locked_by: nullableStr(r.locked_by),
     locked_at: nullableStr(r.locked_at),
@@ -368,12 +395,15 @@ function sanitizeOne(raw: unknown, route: string): RoadmapItem {
 export async function listRoadmap(
   endpoint: BrokerEndpoint,
   projectKey: string,
-  filters: RoadmapListFilters = {}
+  filters: RoadmapListFilters = {},
+  signal?: AbortSignal
 ): Promise<RoadmapItem[]> {
-  const res = await roadmapPost<RoadmapListResponse>(endpoint, '/roadmap/list', {
-    project_key: projectKey,
-    ...filters
-  })
+  const res = await roadmapPost<RoadmapListResponse>(
+    endpoint,
+    '/roadmap/list',
+    { project_key: projectKey, ...filters },
+    signal
+  )
   return sanitizeList(res?.items, '/roadmap/list')
 }
 
@@ -575,14 +605,17 @@ function atomicOutcome(raw: Record<string, unknown>, operationId: string, member
   return null
 }
 
+const ATOMIC_DISPATCH_TIMEOUT_MS = 10_000
+
 /**
- * POST /roadmap/dispatch-atomic. A lost, unreadable or failed-after-the-fact
+ * POST /roadmap/dispatch-atomic. A lost, late, unreadable or failed-after-the-fact
  * answer is `unknown`, never a refusal: the broker may have committed. A
  * refusal that proves no effect (bad request, capacity, unsigned) throws.
  */
 export async function postAtomicDispatch(
   endpoint: BrokerEndpoint,
-  request: { action: 'execute' | 'resolve'; intent: AtomicDispatchIntent; groupSecretHash: string | null }
+  request: { action: 'execute' | 'resolve'; intent: AtomicDispatchIntent; groupSecretHash: string | null },
+  timeoutMs = ATOMIC_DISPATCH_TIMEOUT_MS
 ): Promise<AtomicDispatchDelivery> {
   const operationId = request.intent.operation_id
   const unknown = (reason: 'transport' | 'invalid-response' | 'expired' | 'broker-mismatch'): AtomicDispatchDelivery => ({
@@ -601,7 +634,13 @@ export async function postAtomicDispatch(
   })
   let res: Response
   try {
-    res = await fetch(`${endpoint.url}${path}`, { method: 'POST', headers, body: JSON.stringify(body) })
+    // The signal also bounds the body read below.
+    res = await fetch(`${endpoint.url}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
   } catch (e) {
     reportError('roadmap', `atomic dispatch ${request.action} lost its answer`, e)
     return unknown('transport')
@@ -642,6 +681,127 @@ export async function postAtomicDispatch(
   }
   const detail = typeof parsed?.error === 'string' ? parsed.error : ''
   throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
+}
+
+const isText = (v: unknown): v is string => typeof v === 'string' && v !== ''
+const isCount = (v: unknown, min: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= min
+const isTextOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string'
+
+function recordOf(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+}
+
+/** null as soon as one entry is unusable: a subset would pass for the whole list. */
+function wholeList<T>(raw: unknown, read: (entry: Record<string, unknown>) => T | null): T[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: T[] = []
+  for (const value of raw) {
+    const entry = recordOf(value)
+    const clean = entry ? read(entry) : null
+    if (clean === null) return null
+    out.push(clean)
+  }
+  return out
+}
+
+function lotExecutionView(raw: unknown): RoadmapLotExecutionView | null {
+  const e = recordOf(raw)
+  if (
+    !e ||
+    !isCount(e.epoch, 1) ||
+    (e.state !== 'running' && e.state !== 'interrupted') ||
+    !isText(e.group_id) ||
+    !isText(e.controller_peer_id) ||
+    !isText(e.started_at) ||
+    !isTextOrNull(e.interrupted_at) ||
+    !isTextOrNull(e.interrupted_reason) ||
+    typeof e.own !== 'boolean'
+  ) {
+    return null
+  }
+  return {
+    epoch: e.epoch,
+    state: e.state,
+    group_id: e.group_id,
+    controller_peer_id: e.controller_peer_id,
+    started_at: e.started_at,
+    interrupted_at: e.interrupted_at,
+    interrupted_reason: e.interrupted_reason,
+    own: e.own
+  }
+}
+
+function lotOpenSend(s: Record<string, unknown>): RoadmapLotOpenSend | null {
+  if (
+    !isText(s.card_id) ||
+    !isCount(s.epoch, 0) ||
+    (s.mode !== 'wave' && s.mode !== 'assign') ||
+    !isText(s.target_peer_id) ||
+    !isText(s.sent_at) ||
+    !isTextOrNull(s.claimed_at) ||
+    typeof s.own !== 'boolean'
+  ) {
+    return null
+  }
+  return {
+    card_id: s.card_id,
+    epoch: s.epoch,
+    mode: s.mode,
+    target_peer_id: s.target_peer_id,
+    sent_at: s.sent_at,
+    claimed_at: s.claimed_at,
+    own: s.own
+  }
+}
+
+function lotQueuedCard(q: Record<string, unknown>): RoadmapLotQueuedCard | null {
+  if (
+    !isText(q.card_id) ||
+    !isCount(q.queue, 1) ||
+    !isCount(q.content_rev, 0) ||
+    typeof q.dispatch_state_tag !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(q.dispatch_state_tag)
+  ) {
+    return null
+  }
+  return {
+    card_id: q.card_id,
+    queue: q.queue,
+    content_rev: q.content_rev,
+    dispatch_state_tag: q.dispatch_state_tag
+  }
+}
+
+/** What the broker's send register and execution say of one lot; an answer that is not wholly readable throws. */
+export async function fetchLotExecutionState(
+  endpoint: BrokerEndpoint,
+  projectKey: string,
+  lotId: string,
+  signal?: AbortSignal
+): Promise<RoadmapLotExecutionStateResponse> {
+  const path = '/roadmap/lot/execution/state'
+  const res = recordOf(
+    await roadmapPost<unknown>(
+      endpoint,
+      path,
+      await signedAsOperator({ by: DECK_AUTHOR, project_key: projectKey, lot_id: lotId }),
+      signal
+    )
+  )
+  const execution = res && res.execution !== null ? lotExecutionView(res.execution) : null
+  const openSends = res ? wholeList(res.open_sends, lotOpenSend) : null
+  const queue = res ? wholeList(res.queue, lotQueuedCard) : null
+  if (
+    !res ||
+    res.lot_id !== lotId ||
+    !isCount(res.closed_epoch, 0) ||
+    (res.execution !== null && !execution) ||
+    !openSends ||
+    !queue
+  ) {
+    throw new Error(`${path}: the answer for lot "${lotId}" is not readable`)
+  }
+  return { lot_id: lotId, closed_epoch: res.closed_epoch, execution, open_sends: openSends, queue }
 }
 
 export async function appendRoadmapContext(

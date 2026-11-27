@@ -1,6 +1,6 @@
 // Membership is independent of the queue rank: a dispatched card leaves the queue and stays in its lot.
 
-import type { RoadmapItem } from "./types.ts";
+import type { AtomicDispatchIntent, RoadmapItem } from "./types.ts";
 
 /**
  * Lot of the queue that carries no name. A real id and never null, because
@@ -100,7 +100,7 @@ export interface RoadmapLotOpenSend {
   card_id: string;
   /** 0 on the default queue. */
   epoch: number;
-  mode: string;
+  mode: AtomicDispatchIntent["mode"];
   target_peer_id: string;
   sent_at: string;
   claimed_at: string | null;
