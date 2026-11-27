@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   atomicOperationId,
+  brokerAtomicPort,
+  overlayLotQueue,
   autoDispatchHold,
   canAutoDispatchNext,
   composeAssignText,
@@ -75,7 +77,7 @@ import type {
   DispatchRequest,
   DispatchRequestOutcome
 } from "../shared/types";
-import type { RoadmapLotOpenSend } from "../shared/roadmap-lot";
+import type { RoadmapLotExecutionStateResponse, RoadmapLotOpenSend } from "../shared/roadmap-lot";
 
 function item(over: Partial<RoadmapItem>): RoadmapItem {
   return {
@@ -1826,12 +1828,17 @@ const unknownOf = (intent: AtomicDispatchIntent, reason: "transport" | "expired"
 
 let operationSeq = 0;
 
+const noLotState = async (): Promise<never> => {
+  throw new Error("no lot state expected for a default card");
+};
+
 function scriptedPort(answers: Answer[]): { port: AtomicPort; posted: { action: string; intent: AtomicDispatchIntent }[] } {
   const posted: { action: string; intent: AtomicDispatchIntent }[] = [];
   const port: AtomicPort = {
     capability: CAPABILITY,
     projectKey: "k",
     groupId: "group-1",
+    runRef: null,
     newOperationId: () => `1000:op-${++operationSeq}`,
     post: async (action, intent) => {
       posted.push({ action, intent });
@@ -2328,6 +2335,7 @@ function harness(over: HarnessOver = {}, queue: RoadmapItem[] = [A, B]) {
             calls.push("list");
             return queue;
           },
+          state: noLotState,
           directives: {
             markDone: async () => {
               calls.push("markDone");
@@ -2471,6 +2479,7 @@ function assignerHarness(readPort: () => Promise<AtomicPort | null>) {
   const assign = createAssigner({
     openRun: async () => ({
       port: await readPort(),
+      state: noLotState,
       read: async (id) => [A, B].find((i) => i.id === id) ?? null,
       announce: async () => {
         calls.push("announce");
@@ -2603,7 +2612,8 @@ test("assign: while an assignment is unconfirmed the card is not read again befo
         return A;
       },
       announce: async () => 1,
-      write: async () => ({ written: true, item: A })
+      write: async () => ({ written: true, item: A }),
+      state: noLotState
     }),
     journal: () => {},
     warn: () => {},
@@ -2631,6 +2641,7 @@ test("dispatch: one run opens one context, and the first list, the reread and th
           used.push(`${run}:list`);
           return [A, B, directive];
         },
+        state: noLotState,
         directives: {
           markDone: async () => {
             used.push(`${run}:markDone`);
@@ -2660,6 +2671,7 @@ test("dispatch: the previous-order effects of a run come from the run that read 
       return {
         port: null,
         list: async () => [A, B],
+        state: noLotState,
         directives: { markDone: async () => undefined, execute: async (d) => ({ id: d.id, title: d.title, directive: "clear", injected: [], unreached: [] }), journal: () => {}, reportError: () => {}, noteUnresolved: async () => {} },
         legacy: {
           announce: async () => {
@@ -2700,7 +2712,8 @@ test("assign: one assignment opens one context, and the read, the retry read, th
         write: async () => {
           used.push(`${run}:write`);
           return { written: true, item: A };
-        }
+        },
+        state: noLotState
       };
     },
     journal: () => {},
@@ -2728,7 +2741,8 @@ test("assign: one assignment opens one context, and the read, the retry read, th
         write: async () => {
           used.push(`${run}:write`);
           return { written: true, item: A };
-        }
+        },
+        state: noLotState
       };
     },
     journal: () => {},
@@ -2749,4 +2763,269 @@ test("SOURCE SCAN (weak): the dispatcher and the assigner resolve the broker end
     const body = src.slice(open, findMatchingClose(src, open, "{", "}", true));
     expect([anchor, body.split("resolveBrokerEndpoint(").length - 1]).toEqual([anchor, 1]);
   }
+});
+
+const LOT = "lot-release";
+const RUN = "99999999-aaaa-4bbb-8ccc-000000000001";
+const DIRECTIVE_ID = "cccccccc-0000-0000-0000-00000000000c";
+
+/** A port of a broker that takes lot sends, for a window that holds a run. */
+function lotPort(answers: Answer[], over: Partial<AtomicPort> = {}) {
+  const scripted = scriptedPort(answers);
+  return { ...scripted, port: { ...scripted.port, capability: { ...CAPABILITY, lots: 1 as const }, runRef: RUN, ...over } };
+}
+
+const rankOf = (card: RoadmapItem, queue: number, content_rev = 8) => ({
+  card_id: card.id,
+  queue,
+  content_rev,
+  dispatch_state_tag: "b".repeat(64)
+});
+
+const openExecution = (epoch: number) => ({
+  epoch,
+  state: "running" as const,
+  group_id: "group-1",
+  controller_peer_id: "lead-1",
+  started_at: "2026-11-27T09:00:00.000Z",
+  interrupted_at: null,
+  interrupted_reason: null,
+  own: true
+});
+
+const lotState = (over: Partial<RoadmapLotExecutionStateResponse> = {}): RoadmapLotExecutionStateResponse => ({
+  lot_id: LOT,
+  closed_epoch: 3,
+  execution: null,
+  open_sends: [],
+  queue: [rankOf(NAMED_FIRST, 1), rankOf(NAMED_SECOND, 2)],
+  ...over
+});
+
+// As the broker lists them: a named lot's rank reads as null.
+const NAMED_FIRST = tokened({ id: "dddddddd-0000-0000-0000-00000000000d", title: "Named first", queue: null, lot_id: LOT });
+const NAMED_SECOND = tokened({ id: "eeeeeeee-0000-0000-0000-00000000000e", title: "Named second", queue: null, lot_id: LOT });
+const NAMED_DIRECTIVE = tokened({ id: DIRECTIVE_ID, title: "Named directive", queue: null, lot_id: LOT, kind: "directive", directive: "clear" });
+
+function lotDispatch(port: AtomicPort | null | (() => AtomicPort | null), state = lotState(), cards = [A, NAMED_FIRST, NAMED_SECOND]) {
+  const h = { tracked: [] as string[], journal: [] as string[], calls: [] as string[], states: [] as string[] };
+  const dispatcher = createDispatcher({
+    openRun: async () => ({
+      port: typeof port === "function" ? port() : port,
+      list: async () => cards.map((c) => ({ ...c })),
+      state: async (lotId) => {
+        h.states.push(lotId);
+        return state;
+      },
+      directives: {
+        markDone: async () => void h.calls.push("markDone"),
+        execute: async (d) => {
+          h.calls.push("execute-directive");
+          return { id: d.id, title: d.title, directive: "clear", injected: [], unreached: [] };
+        },
+        journal: () => {},
+        reportError: () => {},
+        noteUnresolved: async () => {}
+      },
+      legacy: {
+        announce: async () => {
+          h.calls.push("announce");
+          return 1;
+        },
+        upsert: async () => void h.calls.push("upsert"),
+        warn: () => {}
+      }
+    }),
+    target: () => ({ peerId: "lead-1", kind: "lead" }),
+    track: (members) => h.tracked.push(...members.map((m) => m.id)),
+    journal: (l) => h.journal.push(l),
+    warn: () => {},
+    trace: () => {},
+    reportError: (m) => h.journal.push(`error: ${m}`)
+  });
+  return { dispatcher, ...h };
+}
+
+test("overlayLotQueue takes ranks and tokens from the lot state and unqueues every other card", () => {
+  const listed = [tokened({ id: A.id, queue: 1 }), NAMED_FIRST, NAMED_SECOND];
+  const overlaid = overlayLotQueue(listed, [rankOf(NAMED_SECOND, 4, 11)]);
+  expect(overlaid.map((i) => [i.id, i.queue, i.content_rev, i.dispatch_state_tag])).toEqual([
+    [A.id, null, A.content_rev, A.dispatch_state_tag],
+    [NAMED_FIRST.id, null, NAMED_FIRST.content_rev, NAMED_FIRST.dispatch_state_tag],
+    [NAMED_SECOND.id, 4, 11, "b".repeat(64)]
+  ]);
+});
+
+test.each<[string, { runRef: string; groupId: string } | null, string | null]>([
+  ["the run published for this group", { runRef: RUN, groupId: "group-1" }, RUN],
+  ["a run published for another scope", { runRef: RUN, groupId: "group-2" }, null],
+  ["no published run", null, null]
+])("brokerAtomicPort signs lot sends with %s", (_name, run, expected) => {
+  const port = brokerAtomicPort({ endpoint: EP, capability: CAPABILITY, projectKey: "k", groupId: "group-1", groupSecretHash: null, run });
+  expect(port.runRef).toBe(expected);
+});
+
+test("a manual dispatch of a lot with no execution starts it on the lot's own head, signing the last closed epoch", async () => {
+  const { port, posted } = lotPort([(_a, i) => sentOf(i)]);
+  const h = lotDispatch(port);
+  const result = await h.dispatcher.dispatch(true, LOT);
+  expect(result).toMatchObject({ sent: true, delivery: "sent", dispatched: [{ id: NAMED_FIRST.id }] });
+  expect(posted.map((p) => [p.intent.mode, p.intent.target_kind, p.intent.lot])).toEqual([
+    ["wave", "lead", { lot_id: LOT, epoch: null, closed_epoch: 3 }]
+  ]);
+  expect(posted[0]!.intent.members).toEqual([
+    { id: NAMED_FIRST.id, expected_content_rev: 8, expected_dispatch_state_tag: "b".repeat(64) }
+  ]);
+  expect(h.states).toEqual([LOT]);
+  expect(h.tracked).toEqual([]);
+});
+
+test.each([true, false])("a dispatch of a lot under execution (manual: %p) sends under its open epoch", async (manual) => {
+  const { port, posted } = lotPort([(_a, i) => sentOf(i)]);
+  const h = lotDispatch(port, lotState({ execution: openExecution(4) }));
+  await h.dispatcher.dispatch(manual, LOT);
+  expect(posted.map((p) => p.intent.lot)).toEqual([{ lot_id: LOT, epoch: 4 }]);
+});
+
+test("an automatic dispatch never starts a lot", async () => {
+  const { port, posted } = lotPort([]);
+  const h = lotDispatch(port);
+  expect(await h.dispatcher.dispatch(false, LOT)).toEqual({ sent: false, delivery: "not-sent", reason: "lot_execution_not_started" });
+  expect(posted).toEqual([]);
+  expect(h.journal).toEqual([`lot "${LOT}" not sent: only the operator starts a lot`]);
+});
+
+test.each<[string, () => AtomicPort | null, string]>([
+  ["no atomic dispatch", () => null, "lot_execution_not_started"],
+  ["no lot support", () => lotPort([], { capability: CAPABILITY }).port, "lot_execution_not_started"],
+  ["no run for its scope", () => lotPort([], { runRef: null }).port, "lot_execution_unproven"]
+])("a lot dispatch with %s sends nothing, not even in the previous order", async (_name, port, reason) => {
+  const h = lotDispatch(port);
+  expect(await h.dispatcher.dispatch(true, LOT)).toEqual({ sent: false, delivery: "not-sent", reason: reason as never });
+  expect(h.calls).toEqual([]);
+  expect(h.states).toEqual([]);
+});
+
+test("a lot head wave holding a directive is neither sent nor executed, and the journal names it", async () => {
+  const { port, posted } = lotPort([]);
+  const h = lotDispatch(
+    port,
+    lotState({ queue: [rankOf(NAMED_FIRST, 1), rankOf(NAMED_DIRECTIVE, 1)] }),
+    [NAMED_FIRST, NAMED_DIRECTIVE]
+  );
+  const result = await h.dispatcher.dispatch(true, LOT);
+  expect(result).toMatchObject({ sent: false, delivery: "not-sent", reason: "ineligible" });
+  expect(result.notSent?.map((m) => m.id).sort()).toEqual([DIRECTIVE_ID, NAMED_FIRST.id].sort());
+  expect([posted, h.calls]).toEqual([[], []]);
+  expect(h.journal.join("\n")).toContain('"Named directive"');
+});
+
+test("a lot with nothing queued sends nothing", async () => {
+  const h = lotDispatch(lotPort([]).port, lotState({ queue: [] }));
+  expect(await h.dispatcher.dispatch(true, LOT)).toEqual({ sent: false, reason: "empty-queue" });
+});
+
+test("a lot send refused for a changed card is retried once under the same lot field, on a fresh lot state", async () => {
+  const { port, posted } = lotPort([(_a, i) => notSentOf(i, "card-changed", [NAMED_FIRST.id]), (_a, i) => sentOf(i)]);
+  const h = lotDispatch(port, lotState({ execution: openExecution(2) }));
+  expect(await h.dispatcher.dispatch(true, LOT)).toMatchObject({ sent: true });
+  expect(posted.map((p) => p.intent.lot)).toEqual([{ lot_id: LOT, epoch: 2 }, { lot_id: LOT, epoch: 2 }]);
+  expect(h.states).toEqual([LOT, LOT]);
+});
+
+test("an unconfirmed delivery of one lot holds that lot alone", async () => {
+  const unknown = lotPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const other = lotPort([(_a, i) => sentOf(i)]);
+  const again = lotPort([(_a, i) => unknownOf(i)]);
+  const ports = [unknown.port, other.port, again.port];
+  const h = lotDispatch(() => ports.shift() ?? null);
+  expect(await h.dispatcher.dispatch(true, LOT)).toMatchObject({ delivery: "unknown" });
+  await h.dispatcher.dispatch(false);
+  expect(other.posted.map((p) => [p.action, p.intent.lot])).toEqual([["execute", undefined]]);
+  expect(await h.dispatcher.dispatch(true, LOT)).toMatchObject({ delivery: "unknown" });
+  expect(again.posted.map((p) => p.action)).toEqual(["resolve"]);
+});
+
+test("a lot delivery that resolve confirms is reported and never tracked", async () => {
+  const first = lotPort([(_a, i) => unknownOf(i), (_a, i) => unknownOf(i)]);
+  const second = lotPort([(_a, i) => sentOf(i)]);
+  const ports = [first.port, second.port];
+  const h = lotDispatch(() => ports.shift() ?? null);
+  await h.dispatcher.dispatch(true, LOT);
+  expect(await h.dispatcher.dispatch(true, LOT)).toMatchObject({ sent: true, delivery: "sent" });
+  expect(h.tracked).toEqual([]);
+});
+
+test("each lot has its own run: a lot in flight neither answers nor blocks the default queue", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const named = lotPort([]);
+  named.port.post = async (_action, intent) => {
+    if (intent.lot) await held;
+    return sentOf(intent);
+  };
+  const h = lotDispatch(named.port);
+  const lot = h.dispatcher.dispatch(true, LOT);
+  expect([h.dispatcher.inFlight(LOT), h.dispatcher.inFlight()]).toEqual([true, false]);
+  const fallback = await reachedWithin(h.dispatcher.dispatch(false), "the default dispatch");
+  expect(fallback).toMatchObject({ dispatched: [{ id: A.id }] });
+  release();
+  expect(await lot).toMatchObject({ dispatched: [{ id: NAMED_FIRST.id }] });
+  expect(h.dispatcher.inFlight(LOT)).toBe(false);
+  expect(h.tracked).toEqual([A.id]);
+});
+
+function lotAssign(port: AtomicPort | null, card: RoadmapItem, state = lotState({ execution: openExecution(5) })) {
+  const h = { calls: [] as string[], journal: [] as string[], states: [] as string[] };
+  const assign = createAssigner({
+    openRun: async () => ({
+      port,
+      read: async () => card,
+      announce: async () => {
+        h.calls.push("announce");
+        return 1;
+      },
+      write: async () => {
+        h.calls.push("write");
+        return { written: true, item: card };
+      },
+      state: async (lotId) => {
+        h.states.push(lotId);
+        return state;
+      }
+    }),
+    journal: (l) => h.journal.push(l),
+    warn: () => {},
+    reportError: (m) => h.journal.push(`error: ${m}`),
+    trace: () => {}
+  });
+  return { assign, ...h };
+}
+
+test("assigning a card of a named lot sends it under the lot's open epoch", async () => {
+  const { port, posted } = lotPort([(_a, i) => sentOf(i)]);
+  const h = lotAssign(port, NAMED_FIRST);
+  expect(await h.assign(NAMED_FIRST.id, "lead-1")).toEqual({ sent: true, delivery: "sent" });
+  expect(posted.map((p) => [p.intent.mode, p.intent.lot])).toEqual([["assign", { lot_id: LOT, epoch: 5 }]]);
+  expect(h.states).toEqual([LOT]);
+});
+
+test.each<[string, () => AtomicPort | null, RoadmapLotExecutionStateResponse]>([
+  ["no atomic dispatch", () => null, lotState({ execution: openExecution(5) })],
+  ["no lot support", () => lotPort([], { capability: CAPABILITY }).port, lotState({ execution: openExecution(5) })],
+  ["no run for its scope", () => lotPort([], { runRef: null }).port, lotState({ execution: openExecution(5) })],
+  ["no open execution", () => lotPort([]).port, lotState()]
+])("assigning a card of a named lot with %s sends nothing", async (_name, port, state) => {
+  const h = lotAssign(port(), NAMED_FIRST, state);
+  expect(await h.assign(NAMED_FIRST.id, "lead-1")).toEqual({ sent: false, delivery: "not-sent", reason: "lot_execution_not_started" });
+  expect(h.calls).toEqual([]);
+  expect(h.journal).toHaveLength(1);
+});
+
+test.each([null, "default"])("assigning a card of lot %p carries no lot and reads no lot state", async (lot_id) => {
+  const { port, posted } = lotPort([(_a, i) => sentOf(i)], { runRef: null });
+  const h = lotAssign(port, tokened({ id: A.id, title: "Card A", lot_id }));
+  expect(await h.assign(A.id, "worker-9")).toMatchObject({ sent: true });
+  expect(posted[0]!.intent.lot).toBeUndefined();
+  expect(h.states).toEqual([]);
 });

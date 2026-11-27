@@ -24,16 +24,21 @@ import type {
   AtomicDispatchCapability,
   AtomicDispatchDelivery,
   AtomicDispatchIntent,
+  AtomicDispatchLot,
   AtomicDispatchMember,
+  AtomicDispatchRefusal,
   DispatchedCard,
   DispatchRequest,
   DispatchRequestOutcome
 } from '../../../shared/types'
 import {
   DEFAULT_ROADMAP_LOT_ID,
+  isNamedRoadmapLot,
   type RoadmapLotExecutionStateResponse,
-  type RoadmapLotOpenSend
+  type RoadmapLotOpenSend,
+  type RoadmapLotQueuedCard
 } from '../../../shared/roadmap-lot'
+import { randomUUID } from 'node:crypto'
 import { queuedItems, resolveDependency, wavesOf } from '../shared/workflow'
 import {
   composeAssignText,
@@ -41,7 +46,7 @@ import {
   composeMultiDispatchText
 } from '../../../shared/roadmap-dispatch-message'
 import { ATOMIC_OPERATION_MARGIN_MS, fetchAtomicDispatchCapability, type BrokerEndpoint } from './broker-client'
-import { fetchLotExecutionState, listRoadmap } from './roadmap-service'
+import { fetchLotExecutionState, listRoadmap, postAtomicDispatch } from './roadmap-service'
 import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
@@ -206,6 +211,8 @@ export interface AtomicPort {
   capability: AtomicDispatchCapability
   projectKey: string
   groupId: string
+  /** This window's live run for the group, signed with a send of a named lot; null: none can be sent. */
+  runRef: string | null
   /** A fresh id per attempt; only an unknown answer is settled under the id it was sent with. */
   newOperationId: () => string
   /** Signs and posts. A lost or unreadable answer is `unknown`, never a throw. */
@@ -215,6 +222,30 @@ export interface AtomicPort {
 export function atomicOperationId(nowMs: number, uuid: string, capability: AtomicDispatchCapability): string {
   const lifetime = Math.min(OPERATION_LIFETIME_MS, capability.max_operation_ms - ATOMIC_OPERATION_MARGIN_MS)
   return `${nowMs + lifetime}:${uuid}`
+}
+
+export interface AtomicPortHost {
+  endpoint: BrokerEndpoint
+  capability: AtomicDispatchCapability
+  projectKey: string
+  groupId: string
+  groupSecretHash: string | null
+  /** The run the window has published, with the group it was published for. */
+  run: { runRef: string; groupId: string } | null
+}
+
+export function brokerAtomicPort(host: AtomicPortHost): AtomicPort {
+  const { endpoint, capability, projectKey, groupId, groupSecretHash, run } = host
+  // A run published for another group would bind the lot to a window that does not lead this one.
+  const runRef = run && run.groupId === groupId ? run.runRef : null
+  return {
+    capability,
+    projectKey,
+    groupId,
+    runRef,
+    newOperationId: () => atomicOperationId(Date.now(), randomUUID(), capability),
+    post: (action, intent) => postAtomicDispatch(endpoint, { action, intent, groupSecretHash, runRef })
+  }
 }
 
 const toMember = (item: RoadmapItem): DispatchedWaveMember => ({ id: item.id, title: item.title, kind: item.kind })
@@ -249,7 +280,8 @@ async function attemptAtomic(
   mode: AtomicDispatchIntent['mode'],
   targetKind: AtomicDispatchIntent['target_kind'],
   toPeerId: string,
-  items: RoadmapItem[]
+  items: RoadmapItem[],
+  lot?: AtomicDispatchLot
 ): Promise<{ delivery: AtomicDispatchDelivery; intent: AtomicDispatchIntent }> {
   if (items.length > port.capability.max_members) {
     throw new Error(`${items.length} cards exceed the ${port.capability.max_members} the broker accepts in one dispatch`)
@@ -262,7 +294,8 @@ async function attemptAtomic(
     mode,
     target_kind: targetKind,
     to_peer_id: toPeerId,
-    members: items.map(tokensOf)
+    members: items.map(tokensOf),
+    ...(lot ? { lot } : {})
   }
   const first = checkedAnswer(intent, await port.post('execute', intent))
   if (first.delivery !== 'unknown') return { delivery: first, intent }
@@ -283,6 +316,8 @@ export interface AtomicWaveDeps {
   reread: () => Promise<RoadmapItem[]>
   journal: (line: string) => void
   warn: (line: string) => void
+  /** Absent for the default queue; kept as is on the retry. */
+  lot?: AtomicDispatchLot
 }
 
 export interface WaveOutcome {
@@ -311,7 +346,7 @@ export async function dispatchWaveAtomic(normal: RoadmapItem[], deps: AtomicWave
   let members = normal
   let left: DispatchedWaveMember[] = []
   for (let attempt = 0; ; attempt++) {
-    const { delivery, intent } = await attemptAtomic(deps.port, 'wave', target.kind, target.peerId, members)
+    const { delivery, intent } = await attemptAtomic(deps.port, 'wave', target.kind, target.peerId, members, deps.lot)
     if (delivery.delivery === 'sent') {
       const dispatched = members
       deps.journal(
@@ -931,6 +966,8 @@ export interface AssignDeps {
   atomic?: AtomicPort | null
   /** Settles an assignment left unknown before another one of the same card may start. */
   gate?: AssignGate
+  /** Read for a card of a named lot alone. */
+  lotState?: DispatchRun['state']
 }
 
 export interface AssignGate {
@@ -970,10 +1007,16 @@ export function createAssignGate(journal: AssignDeps['journal']): AssignGate {
   }
 }
 
-async function assignAtomic(item: RoadmapItem, target: string, port: AtomicPort, deps: AssignDeps): Promise<AssignResult> {
+async function assignAtomic(
+  item: RoadmapItem,
+  target: string,
+  port: AtomicPort,
+  deps: AssignDeps,
+  lot?: AtomicDispatchLot
+): Promise<AssignResult> {
   let current = item
   for (let attempt = 0; ; attempt++) {
-    const { delivery, intent } = await attemptAtomic(port, 'assign', 'assignee', target, [current])
+    const { delivery, intent } = await attemptAtomic(port, 'assign', 'assignee', target, [current], lot)
     if (delivery.delivery === 'sent') {
       deps.journal(`item "${current.title}" assigned to "${target}"`)
       return { sent: true, delivery: 'sent' }
@@ -994,6 +1037,14 @@ async function assignAtomic(item: RoadmapItem, target: string, port: AtomicPort,
   }
 }
 
+/** An assignment never starts a lot: it needs the lot support, this window's run and an open execution. */
+async function openLotSend(lotId: string, deps: AssignDeps): Promise<AtomicDispatchLot | null> {
+  const port = deps.atomic
+  if (port?.capability.lots !== 1 || port.runRef === null || !deps.lotState) return null
+  const { execution } = await deps.lotState(lotId)
+  return execution ? { lot_id: lotId, epoch: execution.epoch } : null
+}
+
 /**
  * Without the atomic route the peer hears the order before the card moves, so a
  * skipped write leaves a peer holding an order for a changed card: sent stays
@@ -1009,7 +1060,16 @@ export async function runAssign(id: string, peerId: string, deps: AssignDeps): P
     }
     const item = await deps.read(id)
     if (!item) return { sent: false }
-    if (deps.atomic) return await assignAtomic(item, target, deps.atomic, deps)
+    let lot: AtomicDispatchLot | undefined
+    if (item.lot_id && isNamedRoadmapLot(item.lot_id)) {
+      const open = await openLotSend(item.lot_id, deps)
+      if (!open) {
+        deps.journal(`item "${item.title}" not assigned: this window has no open execution of its lot to send it under`)
+        return { sent: false, delivery: 'not-sent', reason: 'lot_execution_not_started' }
+      }
+      lot = open
+    }
+    if (deps.atomic) return await assignAtomic(item, target, deps.atomic, deps, lot)
     if ((await deps.announce(item, target)) === 0) return { sent: false }
     if (!(await deps.write(item)).written) {
       deps.warn(
@@ -1087,11 +1147,24 @@ function headNormalMembers(items: RoadmapItem[]): RoadmapItem[] {
   return splitWave(ids.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)).normal
 }
 
+/** The cards as one named lot's queue reads them: ranks and tokens come from the lot state, every other card is unqueued. */
+export function overlayLotQueue(items: RoadmapItem[], queue: RoadmapLotQueuedCard[]): RoadmapItem[] {
+  const ranked = new Map(queue.map((q) => [q.card_id, q]))
+  return items.map((item) => {
+    const entry = ranked.get(item.id)
+    if (!entry) return { ...item, queue: null }
+    const { queue: rank, content_rev, dispatch_state_tag } = entry
+    return { ...item, queue: rank, content_rev, dispatch_state_tag }
+  })
+}
+
 /** What one dispatch run uses: all derived from a single endpoint and project key, resolved once. */
 export interface DispatchRun {
   /** The broker's atomic capability as a port; null on a broker that certainly has none. */
   port: AtomicPort | null
   list: () => Promise<RoadmapItem[]>
+  /** Read for a named lot alone. */
+  state: (lotId: string) => Promise<RoadmapLotExecutionStateResponse>
   directives: DirectiveWaveDeps
   legacy: DispatchWaveDeps
 }
@@ -1109,20 +1182,72 @@ export interface DispatcherDeps {
 }
 
 export interface Dispatcher {
-  /** `manual` is the operator's own button: the only caller that may give up on an unconfirmed delivery. */
-  dispatch: (manual: boolean) => Promise<DispatchResult>
-  inFlight: () => boolean
+  /**
+   * `manual` is the operator's own button: the only caller that may give up on an
+   * unconfirmed delivery, and the only one that starts a named lot.
+   */
+  dispatch: (manual: boolean, lotId?: string) => Promise<DispatchResult>
+  inFlight: (lotId?: string) => boolean
 }
 
 /**
  * The whole sequence of one dispatch with only its effects injected: capability
  * first, the unconfirmed delivery before any read or send, directives, then the
- * wave. Overlapping calls share one run, since two runs could double-inject a
- * directive.
+ * wave. Overlapping calls for one lot share one run, since two runs could
+ * double-inject a directive. Each lot has its own run and unconfirmed delivery.
  */
 export function createDispatcher(deps: DispatcherDeps): Dispatcher {
-  const gate = createUnconfirmedGate(deps.journal)
-  let running: Promise<DispatchResult> | null = null
+  const gates = new Map<string, UnconfirmedGate>()
+  const gateOf = (lotId: string): UnconfirmedGate => {
+    const gate = gates.get(lotId) ?? createUnconfirmedGate(deps.journal)
+    gates.set(lotId, gate)
+    return gate
+  }
+  const running = new Map<string, Promise<DispatchResult>>()
+
+  const onceNamed = async (lotId: string, manual: boolean): Promise<DispatchResult> => {
+    const refuse = (reason: AtomicDispatchRefusal, why: string, notSent?: DispatchedWaveMember[]): DispatchResult => {
+      deps.journal(`lot "${lotId}" not sent: ${why}`)
+      return { sent: false, delivery: 'not-sent', reason, ...(notSent ? { notSent } : {}) }
+    }
+    try {
+      const run = await deps.openRun()
+      const port = run.port
+      const gate = gateOf(lotId)
+      // A named send is never tracked: the watcher's barrier waits on the default queue alone.
+      const early = await gate.beforeDispatch(port, manual, () => {})
+      if (early) return early
+      if (port?.capability.lots !== 1) return refuse('lot_execution_not_started', 'this broker takes no lot send')
+      if (port.runRef === null) return refuse('lot_execution_unproven', 'this window has no live run for its group')
+      const state = await run.state(lotId)
+      if (!state.execution && !manual) return refuse('lot_execution_not_started', 'only the operator starts a lot')
+      const lot: AtomicDispatchLot = state.execution
+        ? { lot_id: lotId, epoch: state.execution.epoch }
+        : { lot_id: lotId, epoch: null, closed_epoch: state.closed_epoch }
+      const items = overlayLotQueue(await run.list(), state.queue)
+      const byId = new Map(items.map((i) => [i.id, i]))
+      const wave = (wavesOf(queuedItems(items))[0] ?? []).map((id) => byId.get(id)!)
+      if (wave.length === 0) return { sent: false, reason: 'empty-queue' }
+      const { directives, normal } = splitWave(wave)
+      if (directives.length > 0) {
+        const named = directives.map((d) => `"${d.title}"`).join(', ')
+        return refuse('ineligible', `its head wave holds a directive card (${named}), which a lot send does not carry`, wave.map(toMember))
+      }
+      const { result, pending } = await dispatchWaveAtomic(normal, {
+        port,
+        lot,
+        target: deps.target,
+        reread: async () => headNormalMembers(overlayLotQueue(await run.list(), (await run.state(lotId)).queue)),
+        journal: deps.journal,
+        warn: deps.warn
+      })
+      gate.remember(pending)
+      return result
+    } catch (e) {
+      deps.reportError(`dispatch of lot "${lotId}" failed`, e)
+      return { sent: false, reason: 'error' }
+    }
+  }
 
   const once = async (manual: boolean): Promise<DispatchResult> => {
     const executedDirectives: DirectiveDispatch[] = []
@@ -1137,6 +1262,7 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
     try {
       const run = await deps.openRun()
       const port = run.port
+      const gate = gateOf(DEFAULT_ROADMAP_LOT_ID)
       const early = await gate.beforeDispatch(port, manual, deps.track)
       if (early) return withReports(early)
       // Directive-only waves drain first; the guard bounds the loop should a done-write fail to advance it.
@@ -1180,14 +1306,16 @@ export function createDispatcher(deps: DispatcherDeps): Dispatcher {
   }
 
   return {
-    dispatch: (manual) => {
-      if (running) return running
-      running = once(manual).finally(() => {
-        running = null
+    dispatch: (manual, lotId = DEFAULT_ROADMAP_LOT_ID) => {
+      const current = running.get(lotId)
+      if (current) return current
+      const started = (isNamedRoadmapLot(lotId) ? onceNamed(lotId, manual) : once(manual)).finally(() => {
+        running.delete(lotId)
       })
-      return running
+      running.set(lotId, started)
+      return started
     },
-    inFlight: () => running !== null
+    inFlight: (lotId = DEFAULT_ROADMAP_LOT_ID) => running.has(lotId)
   }
 }
 
@@ -1197,6 +1325,7 @@ export interface AssignRun {
   read: AssignDeps['read']
   announce: AssignDeps['announce']
   write: AssignDeps['write']
+  state: DispatchRun['state']
 }
 
 export interface AssignerDeps {
@@ -1224,6 +1353,7 @@ export function createAssigner(deps: AssignerDeps): (id: string, peerId: string)
       read: run.read,
       announce: run.announce,
       write: run.write,
+      lotState: run.state,
       atomic: run.port,
       gate,
       journal: deps.journal,

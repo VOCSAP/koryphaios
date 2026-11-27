@@ -149,13 +149,13 @@ import {
   fetchRoadmapSyncStatus,
   invalidateRoadmapSigner,
   listRoadmap,
-  postAtomicDispatch,
+  fetchLotExecutionState,
   RoadmapRequestError,
   upsertRoadmap
 } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import {
-  atomicOperationId,
+  brokerAtomicPort,
   composeAssignText,
   composeStopText,
   createAssigner,
@@ -2374,14 +2374,14 @@ const warnDispatch = (line: string): void => {
 const resolveAtomicPort = async (endpoint: BrokerEndpoint, key: string): Promise<AtomicPort | null> => {
   const capability = await fetchAtomicDispatchCapability(endpoint)
   if (!capability) return null
-  const groupSecretHash = computeGroupSecretHash(activeScope.secret)
-  return {
+  return brokerAtomicPort({
+    endpoint,
     capability,
     projectKey: key,
     groupId: activeScope.groupId,
-    newOperationId: () => atomicOperationId(Date.now(), randomUUID(), capability),
-    post: (action, intent) => postAtomicDispatch(endpoint, { action, intent, groupSecretHash })
-  }
+    groupSecretHash: computeGroupSecretHash(activeScope.secret),
+    run: approvals.inboxRun()
+  })
 }
 
 const dispatcher = createDispatcher({
@@ -2392,6 +2392,7 @@ const dispatcher = createDispatcher({
     return {
       port: await resolveAtomicPort(endpoint, key),
       list: () => listRoadmap(endpoint, key, {}),
+      state: (lotId) => fetchLotExecutionState(endpoint, key, lotId),
       directives: {
         markDone: async (item) => ((await markDirectiveDone(item, io)).written ? undefined : 'skipped'),
         execute: executeDirective,
@@ -2472,7 +2473,8 @@ const assignRoadmapItem = createAssigner({
             { endpoint }
           )
         ).sent,
-      write: (item) => assignInProgress(item, guardedWriteIo(endpoint, key))
+      write: (item) => assignInProgress(item, guardedWriteIo(endpoint, key)),
+      state: (lotId) => fetchLotExecutionState(endpoint, key, lotId)
     }
   },
   journal: (line) => journal.add('dispatch', line),

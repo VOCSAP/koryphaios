@@ -18,7 +18,9 @@ import type {
   RoadmapLotExecutionStateResponse,
   RoadmapLotExecutionView,
   RoadmapLotOpenSend,
-  RoadmapLotQueuedCard
+  RoadmapLotQueuedCard,
+  RoadmapLotRemoveSendResponse,
+  RoadmapLotResumeResponse
 } from '../../../shared/roadmap-lot'
 import type {
   RoadmapArchiveResponse,
@@ -165,7 +167,9 @@ export class RoadmapRequestError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly path: string
+    readonly path: string,
+    /** The refusal's parsed answer; undefined when it carried no JSON. */
+    readonly body?: unknown
   ) {
     super(message)
     this.name = 'RoadmapRequestError'
@@ -198,12 +202,14 @@ async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unkn
     })
     if (!res.ok) {
       let detail = ''
+      let refusal: unknown
       try {
-        detail = ((await res.json()) as { error?: string }).error ?? ''
+        refusal = await res.json()
+        detail = (refusal as { error?: string }).error ?? ''
       } catch {
         /* non-json error body */
       }
-      throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
+      throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path, refusal)
     }
     return (await res.json()) as T
   } catch (e) {
@@ -614,7 +620,13 @@ const ATOMIC_DISPATCH_TIMEOUT_MS = 10_000
  */
 export async function postAtomicDispatch(
   endpoint: BrokerEndpoint,
-  request: { action: 'execute' | 'resolve'; intent: AtomicDispatchIntent; groupSecretHash: string | null },
+  request: {
+    action: 'execute' | 'resolve'
+    intent: AtomicDispatchIntent
+    groupSecretHash: string | null
+    /** Signed with a send of a named lot alone. */
+    runRef?: string | null
+  },
   timeoutMs = ATOMIC_DISPATCH_TIMEOUT_MS
 ): Promise<AtomicDispatchDelivery> {
   const operationId = request.intent.operation_id
@@ -630,7 +642,8 @@ export async function postAtomicDispatch(
     by: DECK_AUTHOR,
     action: request.action,
     intent: request.intent,
-    group_secret_hash: request.groupSecretHash
+    group_secret_hash: request.groupSecretHash,
+    ...(request.intent.lot && request.runRef ? { run_ref: request.runRef } : {})
   })
   let res: Response
   try {
@@ -802,6 +815,99 @@ export async function fetchLotExecutionState(
     throw new Error(`${path}: the answer for lot "${lotId}" is not readable`)
   }
   return { lot_id: lotId, closed_epoch: res.closed_epoch, execution, open_sends: openSends, queue }
+}
+
+/** One operator-signed gesture on a lot's execution; an answer about another lot throws. */
+async function lotGesture<T>(
+  endpoint: BrokerEndpoint,
+  path: string,
+  lotId: string,
+  fields: Record<string, unknown>,
+  read: (answer: Record<string, unknown>) => T | null
+): Promise<T> {
+  const res = recordOf(
+    await roadmapPost<unknown>(endpoint, path, await signedAsOperator({ by: DECK_AUTHOR, lot_id: lotId, ...fields }))
+  )
+  const clean = res && res.lot_id === lotId ? read(res) : null
+  if (clean === null) throw new Error(`${path}: the answer for lot "${lotId}" is not readable`)
+  return clean
+}
+
+export async function resumeLotExecution(
+  endpoint: BrokerEndpoint,
+  request: {
+    projectKey: string
+    lotId: string
+    /** The interrupted epoch the operator read. */
+    expectedEpoch: number
+    toPeerId: string
+    groupId: string
+    groupSecretHash: string | null
+    runRef: string
+  }
+): Promise<RoadmapLotResumeResponse> {
+  return lotGesture(
+    endpoint,
+    '/roadmap/lot/execution/resume',
+    request.lotId,
+    {
+      project_key: request.projectKey,
+      expected_epoch: request.expectedEpoch,
+      to_peer_id: request.toPeerId,
+      group_id: request.groupId,
+      group_secret_hash: request.groupSecretHash,
+      run_ref: request.runRef
+    },
+    (res) => (isCount(res.epoch, 1) ? { lot_id: request.lotId, epoch: res.epoch } : null)
+  )
+}
+
+/** Not closed: the broker named the cards whose send is open, and a confirmation is asked. */
+export type LotCloseOutcome = { closed: true; settled: string[] } | { closed: false; openCardIds: string[] }
+
+const cardIds = (v: unknown): string[] | null => (Array.isArray(v) && v.every(isText) ? v : null)
+
+export async function closeLotExecution(
+  endpoint: BrokerEndpoint,
+  request: { projectKey: string; lotId: string; expectedEpoch: number; confirmOpenSends?: boolean }
+): Promise<LotCloseOutcome> {
+  try {
+    return await lotGesture<LotCloseOutcome>(
+      endpoint,
+      '/roadmap/lot/execution/close',
+      request.lotId,
+      {
+        project_key: request.projectKey,
+        expected_epoch: request.expectedEpoch,
+        ...(request.confirmOpenSends === undefined ? {} : { confirm_open_sends: request.confirmOpenSends })
+      },
+      (res) => {
+        const settled = cardIds(res.settled)
+        return settled ? { closed: true, settled } : null
+      }
+    )
+  } catch (e) {
+    const open = e instanceof RoadmapRequestError && e.status === 409 ? cardIds(recordOf(e.body)?.open_card_ids) : null
+    if (open) return { closed: false, openCardIds: open }
+    throw e
+  }
+}
+
+/** Sets one card's open send aside; the default queue takes it at epoch 0. */
+export async function removeLotSend(
+  endpoint: BrokerEndpoint,
+  request: { projectKey: string; lotId: string; expectedEpoch: number; cardId: string }
+): Promise<RoadmapLotRemoveSendResponse> {
+  return lotGesture(
+    endpoint,
+    '/roadmap/lot/execution/remove-send',
+    request.lotId,
+    { project_key: request.projectKey, expected_epoch: request.expectedEpoch, card_id: request.cardId },
+    (res) =>
+      res.card_id === request.cardId && isCount(res.settled, 1)
+        ? { lot_id: request.lotId, card_id: request.cardId, settled: res.settled }
+        : null
+  )
 }
 
 export async function appendRoadmapContext(

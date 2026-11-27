@@ -18,6 +18,10 @@ import {
   sha256Hex,
   startBroker,
   stopBroker,
+  createNamedLot,
+  FIXTURE_OPERATOR,
+  mintRunCredential,
+  registerAttestedInstance,
   type TestBroker
 } from "./_helper.ts";
 import { reachedWithin } from "./_bounded-await.ts";
@@ -25,6 +29,8 @@ import { onDeckError } from "../desktop/src/main/log.ts";
 import { fetchAtomicDispatchCapability } from "../desktop/src/main/broker-client.ts";
 import {
   atomicOperationId,
+  brokerAtomicPort,
+  createAssigner,
   createDispatcher,
   createDispatchWatcher,
   deckWatcherDeps,
@@ -42,6 +48,9 @@ import {
   appendRoadmapContext,
   computeDeckProjectKey,
   configureRoadmapSigner,
+  closeLotExecution,
+  removeLotSend,
+  resumeLotExecution,
   setRoadmapRequestTimeout,
   fetchLotExecutionState,
   invalidateRoadmapSigner,
@@ -76,18 +85,22 @@ const tmpDirs: string[] = [];
 // round-trip below proves the Deck half and the broker half agree on the proof.
 const deckOperator = generateCredential();
 
-beforeAll(async () => {
-  broker = await startBroker({}, { trustedOperators: [deckOperator.publicKey] });
+function signAs(operator: ReturnType<typeof generateCredential>): void {
   configureRoadmapSigner(() => (payload) => {
-    const signed = { ...payload, public_key: deckOperator.publicKey };
+    const signed = { ...payload, public_key: operator.publicKey };
     return {
-      public_key: deckOperator.publicKey,
-      auth: buildAuthProof(deckOperator.privateKey, signed, {
+      public_key: operator.publicKey,
+      auth: buildAuthProof(operator.privateKey, signed, {
         kind: "operator",
-        operator_id: deriveOperatorId(deckOperator.publicKey)
+        operator_id: deriveOperatorId(operator.publicKey)
       })
     };
   });
+}
+
+beforeAll(async () => {
+  broker = await startBroker({}, { trustedOperators: [deckOperator.publicKey, FIXTURE_OPERATOR.publicKey] });
+  signAs(deckOperator);
 });
 
 afterAll(async () => {
@@ -767,6 +780,7 @@ async function atomicScenario() {
     capability,
     projectKey: project,
     groupId: group.id,
+    runRef: null,
     newOperationId: () => atomicOperationId(Date.now(), randomUUID(), capability),
     post: (action, intent) => {
       posted.push({ action, operationId: intent.operation_id });
@@ -1050,6 +1064,7 @@ test.each(stalled)("a dispatch whose post gets %s ends unknown at the deadline a
         capability: { version: 1, broker_id: POST_INTENT.broker_id, max_operation_ms: 600_000, max_members: 5, registry_capacity: 5 },
         projectKey: POST_INTENT.project_key,
         groupId: POST_INTENT.group_id,
+        runRef: null,
         newOperationId: () => POST_OP,
         post: (action, intent) => {
           posted.push(action);
@@ -1057,6 +1072,7 @@ test.each(stalled)("a dispatch whose post gets %s ends unknown at the deadline a
         }
       },
       list: async () => [{ id: "a", title: "A", kind: "feature", status: "planned", queue: 1, content_rev: 1, dispatch_state_tag: "a".repeat(64) } as RoadmapItem],
+      state: undefined as never,
       directives: undefined as never,
       legacy: undefined as never
     }),
@@ -1354,6 +1370,7 @@ test("a dispatch whose roadmap read hangs ends at the default deadline and frees
     openRun: async () => ({
       port: null,
       list: () => listRoadmap({ url: `http://127.0.0.1:${stub.port}`, token: null }, "p", {}),
+      state: undefined as never,
       directives: undefined as never,
       legacy: undefined as never
     }),
@@ -1405,4 +1422,181 @@ test("a call that is given its own signal is aborted by it and traces nothing it
     onDeckError(() => {});
     stub.stop(true);
   }
+});
+
+/** The Deck's own ports and routes against a real broker, as the operator whose run the lead is bound to. */
+async function deckOnALot() {
+  atomicSeq += 1;
+  const secret = `lot-deck-${atomicSeq}-${broker.port}`;
+  const group = { id: await groupId(secret), hash: await sha256Hex(secret) };
+  const project = `github.com/vocsap/lot-deck-${atomicSeq}-${broker.port}`;
+  const endpoint = { url: broker.url, token: null };
+  const capability = (await fetchAtomicDispatchCapability(endpoint))!;
+  const writeDb = (sql: string, ...params: (string | number)[]) => {
+    const db = openBrokerDb(broker.dbPath);
+    try {
+      db.run(sql, params);
+    } finally {
+      db.close();
+    }
+  };
+  /** A Deck window: its run, and the lead tile bound to it. */
+  const openWindow = async (name: string) => {
+    const run = await mintRunCredential(broker, group, project);
+    const res = await registerAttestedInstance(broker, run, name, `/lot-deck/${name}${atomicSeq}`, { project_key: project });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const lead = res.body;
+    const port = () =>
+      brokerAtomicPort({
+        endpoint,
+        capability,
+        projectKey: project,
+        groupId: group.id,
+        groupSecretHash: group.hash,
+        run: { runRef: run.run, groupId: group.id }
+      });
+    const list = () => listRoadmap(endpoint, project, {});
+    const state = (lotId: string) => fetchLotExecutionState(endpoint, project, lotId);
+    const dispatcher = createDispatcher({
+      openRun: async () => ({ port: port(), list, state, directives: undefined as never, legacy: undefined as never }),
+      target: () => ({ peerId: lead.peer_id, kind: "lead" }),
+      track: () => {
+        throw new Error("a named send is never tracked");
+      },
+      journal: () => {},
+      warn: () => {},
+      trace: () => {},
+      reportError: (message, error) => {
+        throw new Error(`${message}: ${(error as Error).message}`);
+      }
+    });
+    const assign = createAssigner({
+      openRun: async () => ({
+        port: port(),
+        read: async (id) => (await list()).find((i) => i.id === id) ?? null,
+        announce: async () => 0,
+        write: async () => {
+          throw new Error("legacy write must not run");
+        },
+        state
+      }),
+      journal: () => {},
+      warn: () => {},
+      reportError: () => {},
+      trace: () => {}
+    });
+    return { run, lead, dispatcher, assign };
+  };
+  return { group, project, endpoint, state: (lotId: string) => fetchLotExecutionState(endpoint, project, lotId), writeDb, openWindow };
+}
+
+test("the Deck starts, continues, assigns, resumes, empties and closes a named lot on a real broker", async () => {
+  signAs(FIXTURE_OPERATOR);
+  try {
+    const s = await deckOnALot();
+    const lot = await createNamedLot(broker, s.project, "release", [
+      { title: "first" },
+      { title: "second" },
+      { title: "third" },
+      { title: "fourth" }
+    ]);
+    const [first, second, third, fourth] = lot.ids as [string, string, string, string];
+    const rank = (id: string, queue: number) => s.writeDb("UPDATE roadmap_items SET queue = ? WHERE id = ?", queue, id);
+    rank(first, 1);
+    rank(second, 2);
+    const one = await s.openWindow("one");
+
+    expect(await one.dispatcher.dispatch(false, lot.lotId)).toMatchObject({ reason: "lot_execution_not_started" });
+    expect((await s.state(lot.lotId)).execution).toBeNull();
+
+    expect(await one.dispatcher.dispatch(true, lot.lotId)).toMatchObject({ sent: true, dispatched: [{ id: first }] });
+    expect(await one.dispatcher.dispatch(false, lot.lotId)).toMatchObject({ sent: true, dispatched: [{ id: second }] });
+    expect(await one.assign(third, one.lead.peer_id)).toEqual({ sent: true, delivery: "sent" });
+    const running = await s.state(lot.lotId);
+    expect(running.execution).toMatchObject({ epoch: 1, state: "running", controller_peer_id: one.lead.peer_id, own: true });
+    expect(running.open_sends.map((x) => [x.card_id, x.epoch, x.mode]).sort()).toEqual(
+      [
+        [first, 1, "wave"],
+        [second, 1, "wave"],
+        [third, 1, "assign"]
+      ].sort()
+    );
+
+    const two = await s.openWindow("two");
+    const resume = (expectedEpoch: number) =>
+      resumeLotExecution(s.endpoint, {
+        projectKey: s.project,
+        lotId: lot.lotId,
+        expectedEpoch,
+        toPeerId: two.lead.peer_id,
+        groupId: s.group.id,
+        groupSecretHash: s.group.hash,
+        runRef: two.run.run
+      });
+    await expect(resume(1)).rejects.toThrow("is processed by");
+    s.writeDb("UPDATE approval_session_tokens SET revoked_at = ? WHERE run_ref = ?", new Date().toISOString(), one.run.run);
+    rank(fourth, 3);
+    expect(await two.dispatcher.dispatch(true, lot.lotId)).toMatchObject({ reason: "lot_execution_interrupted" });
+    expect(await resume(1)).toEqual({ lot_id: lot.lotId, epoch: 2 });
+
+    const target = { projectKey: s.project, lotId: lot.lotId, expectedEpoch: 2 };
+    const refused = await closeLotExecution(s.endpoint, target);
+    expect(refused.closed).toBe(false);
+    expect(refused.closed === false && [...refused.openCardIds].sort()).toEqual([first, second, third].sort());
+    expect(await removeLotSend(s.endpoint, { ...target, cardId: first })).toEqual({ lot_id: lot.lotId, card_id: first, settled: 1 });
+    const closed = await closeLotExecution(s.endpoint, { ...target, confirmOpenSends: true });
+    expect(closed.closed && [...closed.settled].sort()).toEqual([second, third].sort());
+    expect((await s.state(lot.lotId)).execution).toBeNull();
+
+    expect(await two.dispatcher.dispatch(true, lot.lotId)).toMatchObject({ sent: true, dispatched: [{ id: fourth }] });
+    const reopened = await s.state(lot.lotId);
+    expect([reopened.closed_epoch, reopened.execution?.epoch]).toEqual([2, 3]);
+  } finally {
+    signAs(deckOperator);
+  }
+});
+
+const gestures: [string, (endpoint: { url: string; token: null }) => Promise<unknown>, Record<string, unknown>][] = [
+  [
+    "resume",
+    (e) => resumeLotExecution(e, { projectKey: "p", lotId: "lot-1", expectedEpoch: 1, toPeerId: "lead", groupId: "g", groupSecretHash: null, runRef: RUN_REF }),
+    { lot_id: "lot-1", epoch: 2 }
+  ],
+  ["close", (e) => closeLotExecution(e, { projectKey: "p", lotId: "lot-1", expectedEpoch: 1 }), { lot_id: "lot-1", settled: [] }],
+  [
+    "remove-send",
+    (e) => removeLotSend(e, { projectKey: "p", lotId: "lot-1", expectedEpoch: 1, cardId: "card-1" }),
+    { lot_id: "lot-1", card_id: "card-1", settled: 1 }
+  ]
+];
+const RUN_REF = "99999999-aaaa-4bbb-8ccc-000000000001";
+
+async function against<T>(respond: () => Response, run: (endpoint: { url: string; token: null }) => Promise<T>) {
+  const stub = Bun.serve({ port: 0, fetch: respond });
+  try {
+    return await run({ url: `http://127.0.0.1:${stub.port}`, token: null }).catch((e: Error) => e);
+  } finally {
+    stub.stop(true);
+  }
+}
+
+test.each(gestures)("the lot %s gesture rejects an answer about another lot or with a missing field", async (_name, run, good) => {
+  expect(await against(() => Response.json(good), run)).not.toBeInstanceOf(Error);
+  for (const key of Object.keys(good)) {
+    const answer = await against(() => Response.json({ ...good, [key]: undefined }), run);
+    expect([key, (answer as Error).message]).toEqual([key, expect.stringContaining("is not readable")]);
+  }
+  const other = await against(() => Response.json({ ...good, lot_id: "lot-2" }), run);
+  expect((other as Error).message).toContain("is not readable");
+});
+
+test.each<[string, Record<string, unknown>]>([
+  ["no card list", { error: "open sends" }],
+  ["a card list that is not one of ids", { error: "open sends", open_card_ids: ["a", 3] }]
+])("a close refused with %s is thrown, not read as a confirmation to ask", async (_name, body) => {
+  const answer = await against(
+    () => Response.json(body, { status: 409 }),
+    (e) => closeLotExecution(e, { projectKey: "p", lotId: "lot-1", expectedEpoch: 1 })
+  );
+  expect(answer).toBeInstanceOf(RoadmapRequestError);
 });

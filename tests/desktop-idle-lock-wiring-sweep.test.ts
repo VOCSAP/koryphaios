@@ -115,8 +115,8 @@ test("the status-write sites of index.ts call their orchestration and guarded wr
   const src = readFileSync(INDEX_PATH, "utf-8");
   const dispatcher = /const\s+dispatcher\s*=\s*createDispatcher\(\{/;
   const sites: [string, RegExp, RegExp[]][] = [
-    ["dispatcher", dispatcher, [/markDone:\s*async\s*\(item\)\s*=>\s*\(\(await markDirectiveDone\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /upsert:\s*async\s*\(item\)\s*=>\s*\(\(await unqueueDispatched\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /warn:\s*warnDispatch\b/, /^ {2}track: \(members\) => dispatchWatcher\.track\(members\),\r?$/m]],
-    ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*createAssigner\(\{/, [/write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)/, /warn:\s*warnDispatch\b/]],
+    ["dispatcher", dispatcher, [/markDone:\s*async\s*\(item\)\s*=>\s*\(\(await markDirectiveDone\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /upsert:\s*async\s*\(item\)\s*=>\s*\(\(await unqueueDispatched\(item,\s*io\)\)\.written\s*\?\s*undefined\s*:\s*'skipped'\)/, /warn:\s*warnDispatch\b/, /^ {2}track: \(members\) => dispatchWatcher\.track\(members\),\r?$/m, /^ {6}state: \(lotId\) => fetchLotExecutionState\(endpoint, key, lotId\),\r?$/m]],
+    ["assignRoadmapItem", /const\s+assignRoadmapItem\s*=\s*createAssigner\(\{/, [/write:\s*\(item\)\s*=>\s*assignInProgress\(item,\s*guardedWriteIo\(endpoint,\s*key\)\)/, /^ {6}state: \(lotId\) => fetchLotExecutionState\(endpoint, key, lotId\)\r?$/m, /warn:\s*warnDispatch\b/]],
     ["stopRoadmapItem", /const\s+stopRoadmapItem\s*=\s*async\s*\([^)]*\)\s*:\s*Promise<StopResult>\s*=>\s*\{/, [/runStop\(id,/, /write:\s*\(item\)\s*=>\s*requestOperatorStop\(item,\s*guardedWriteIo\(endpoint\(\),\s*key\(\)\)\),/]],
     ["warnDispatch", /const\s+warnDispatch\s*=\s*\(line:\s*string\)\s*:\s*void\s*=>\s*\{/, [/logWarn\('dispatch',\s*line\)/, /journal\.add\('dispatch',/]],
   ];
@@ -143,6 +143,23 @@ test("index.ts hands the watcher its broker endpoint, project, automatic dispatc
   ]);
   expect(src.match(/^const dispatchNext = .*$/gm)).toEqual([
     "const dispatchNext = (): Promise<DispatchResult> => dispatcher.dispatch(false)"
+  ]);
+});
+
+test("index.ts builds the atomic port from the live scope and the window's published run", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8").replace(/\r\n/g, "\n");
+  const body = bodyOf(src, /const resolveAtomicPort = async \(endpoint: BrokerEndpoint, key: string\): Promise<AtomicPort \| null> => \{/);
+  expect(body.split("\n").map((l) => l.trim()).filter(Boolean)).toEqual([
+    "const capability = await fetchAtomicDispatchCapability(endpoint)",
+    "if (!capability) return null",
+    "return brokerAtomicPort({",
+    "endpoint,",
+    "capability,",
+    "projectKey: key,",
+    "groupId: activeScope.groupId,",
+    "groupSecretHash: computeGroupSecretHash(activeScope.secret),",
+    "run: approvals.inboxRun()",
+    "})"
   ]);
 });
 
