@@ -8577,6 +8577,8 @@ function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
     deleted_at: item.deleted_at,
     queue: item.queue,
     lot_id: item.lot_id,
+    // `queue` means the default lot's rank, so a named lot's travels beside it.
+    ...(isNamedRoadmapLot(row.lot_id) ? { lot_rank: row.queue } : {}),
     directive: item.directive,
     target_peer_ids: item.target_peer_ids,
     locked: item.locked,
@@ -8621,6 +8623,18 @@ function handleRoadmapSyncPull(
     .all(DEFAULT_ROADMAP_LOT_ID) as { project_key: string; rev: number }[]) {
     queue_revs[state.project_key] = state.rev;
   }
+  const lot_queue_revs: Record<string, Record<string, number>> = {};
+  for (const state of db
+    .query("SELECT project_key, lot_id, rev FROM roadmap_queue_state")
+    .all() as { project_key: string; lot_id: string; rev: number }[]) {
+    (lot_queue_revs[state.project_key] ??= {})[state.lot_id] = state.rev;
+  }
+  // Columns named one by one, for the reason rowToSyncRow picks its own.
+  const lots = db
+    .query(
+      "SELECT project_key, id, name, created_by, created_at, closed_at, color FROM roadmap_lots ORDER BY project_key, created_at, id"
+    )
+    .all() as RoadmapLot[];
   const rows = db
     .query("SELECT * FROM roadmap_items WHERE rev > ? ORDER BY rev LIMIT ?")
     .all(since, limit) as RoadmapRow[];
@@ -8628,7 +8642,7 @@ function handleRoadmapSyncPull(
   // The last row of an ORDER BY rev page carries the greatest rev; an empty
   // page leaves the cursor where it was.
   const next_rev = items.length > 0 ? items[items.length - 1]!.rev : since;
-  return { items, next_rev, queue_revs };
+  return { items, next_rev, queue_revs, lot_protocol: 2, lot_queue_revs, lots };
 }
 
 type SyncPushResult =
@@ -9824,8 +9838,10 @@ function handleRoadmapSyncConflicts(
   for (const row of rows) {
     const remote = parseSyncRemote(row.id, row.sync_remote);
     if (!remote) continue;
+    // Read by this replica's own clients, which are handed no named lot's rank.
+    const { lot_rank: _, ...local } = rowToSyncRow(row);
     items.push({
-      local: rowToSyncRow(row),
+      local,
       remote: maskNamedLotRank(remote),
       base: readSyncBase(row.id, row.sync_base),
     });

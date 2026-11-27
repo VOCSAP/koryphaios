@@ -1,6 +1,7 @@
 import type { DelegationPolicy, DelegationTaskAction, DelegationTaskStatus } from "./delegated-task.ts";
 import type { PeerTelemetrySnapshot } from "./peer-telemetry.ts";
 import type { LotQueueDeltaOp, LotQueueRev, QueueDeltaOp } from "./roadmap-queue-delta.ts";
+import type { RoadmapLot } from "./roadmap-lot.ts";
 
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
@@ -728,6 +729,8 @@ export type RoadmapSyncContent = Pick<RoadmapItem, RoadmapSyncContentField>;
 export type RoadmapSyncRow = Omit<RoadmapItem, "operator_id" | "dispatch_state_tag"> & {
   rev: number;
   content_rev: number;
+  /** Rank inside a named lot, whose `queue` is null; absent on every other card. */
+  lot_rank?: number | null;
 };
 
 export interface RoadmapSyncPullRequest {
@@ -747,6 +750,12 @@ export interface RoadmapSyncPullResponse {
    * as `expected_queue_rev`. Absent from an upstream that predates the delta.
    */
   queue_revs?: Record<string, number>;
+  /** 2 from an upstream that takes the multi-lot queue delta; absent from one that predates it. */
+  lot_protocol?: 2;
+  /** Revision of every lot's queue, default included, by project then lot id. */
+  lot_queue_revs?: Record<string, Record<string, number>>;
+  /** Every lot of every project, closed ones included, to be read only. */
+  lots?: RoadmapLot[];
 }
 
 /**

@@ -5402,6 +5402,7 @@ test("a replica serves a named lot's card without a rank, in a conflict too", as
     locked: false,
     lot_id: "lot-newer",
     queue: 4,
+    lot_rank: 4,
   };
   db.run("UPDATE roadmap_items SET lot_id = 'lot-newer', queue = 3, sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
     JSON.stringify(remote),
@@ -5412,6 +5413,7 @@ test("a replica serves a named lot's card without a rank, in a conflict too", as
     const conflicts = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, { project_key: PK });
     const conflict = conflicts.body.items.find((item) => item.local.id === card.id);
     expect([conflict?.local.queue, conflict?.remote.queue]).toEqual([null, null]);
+    expect([conflict!.local, conflict!.remote].map((side) => "lot_rank" in side)).toEqual([false, false]);
     expect((await itemOn(replica, card.id))?.queue).toBeNull();
   } finally {
     sqlOn(replica, "DELETE FROM roadmap_items WHERE id = ?", card.id);

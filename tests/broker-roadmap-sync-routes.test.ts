@@ -3062,23 +3062,77 @@ test("pull, push replies and a replayed delta serve a named lot's card without i
     cursor = page.next_rev;
     seen = page.items.find((item) => item.id === id);
   }
-  expect([seen.lot_id, seen.queue]).toEqual(["lot-m", null]);
+  expect([seen.lot_id, seen.queue, seen.lot_rank]).toEqual(["lot-m", null, 7]);
 
   const push = (expected_content_rev: number | null, title: string) =>
-    post<{ item: { queue: number | null } }>(`${b.url}/roadmap/sync/push`, {
+    post<{ item: { queue: number | null; lot_rank?: number | null } }>(`${b.url}/roadmap/sync/push`, {
       replica_id: R1,
       item: pushItem({ id, project_key: project, title, queue: undefined }),
       expected_content_rev,
     });
   const refused = await push(null, "stale base");
   const accepted = await push(seen.content_rev, "accepted");
-  expect([refused.status, refused.body.item.queue]).toEqual([409, null]);
-  expect([accepted.status, accepted.body.item.queue]).toEqual([200, null]);
+  expect([refused.status, refused.body.item.queue, refused.body.item.lot_rank]).toEqual([409, null, 7]);
+  expect([accepted.status, accepted.body.item.queue, accepted.body.item.lot_rank]).toEqual([200, null, 7]);
 
   const replayed = await sendDelta(b, project, expected, ops, { mutation_id: mutation });
   expect(replayed.body.replayed).toBe(true);
-  expect(replayed.body.items?.find((item) => item.id === id)?.queue).toBeNull();
+  const replayedCard = replayed.body.items?.find((item) => item.id === id);
+  expect([replayedCard?.queue, replayedCard?.lot_rank]).toEqual([null, 7]);
   expect(placeIn(b, id)).toMatchObject({ lot_id: "lot-m", queue: 7 });
+}, 30_000);
+
+test("a pull announces every project's lots and lot revisions, and a rank travels beside a masked queue", async () => {
+  const b = shared;
+  const projects = { open: queueProject("announce-open"), closed: queueProject("announce-closed") };
+  const createdAt = "2026-01-01T00:00:00.000Z";
+  const lotRow = (project: string, name: string, closed_at: string | null, color: number | null) =>
+    lotSql(
+      b,
+      "INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color) VALUES (?, 'announce-lot', ?, 'deck', ?, ?, ?)",
+      project, name, createdAt, closed_at, color
+    );
+  lotRow(projects.open, "open one", null, 3);
+  lotRow(projects.closed, "closed one", createdAt, null);
+  const [ranked, queued, loose, unranked] = ["an-ranked", "an-default", "an-loose", "an-unranked"];
+  await seedQueue(b, projects.open, [[queued, 1], [ranked, null], [loose, null]]);
+  await seedQueue(b, projects.closed, [[unranked, null]]);
+  // A different number of writes per queue, so that no two revisions can be mistaken for each other.
+  for (const rank of [1, 2, 5, 4, 3]) lotSql(b, "UPDATE roadmap_items SET lot_id = 'announce-lot', queue = ? WHERE id = ?", rank, ranked);
+  for (const rank of [2, 1]) lotSql(b, "UPDATE roadmap_items SET queue = ? WHERE id = ?", rank, queued);
+  lotSql(b, "UPDATE roadmap_items SET lot_id = 'announce-lot' WHERE id = ?", unranked);
+
+  const wanted = new Set([ranked, queued, loose, unranked]);
+  const rows = new Map<string, RoadmapSyncRow>();
+  let page = (await pull(b, 0, 500)).body;
+  for (;;) {
+    for (const item of page.items) if (wanted.has(item.id)) rows.set(item.id, item);
+    if (rows.size === wanted.size) break;
+    expect(page.items.length, "every seeded card is on some page").toBeGreaterThan(0);
+    page = (await pull(b, page.next_rev, 500)).body;
+  }
+
+  expect(page.lot_protocol).toBe(2);
+  const revs = [lotRev(b, projects.open, "announce-lot"), lotRev(b, projects.closed, "announce-lot"), lotRev(b, projects.open, "default")];
+  expect(new Set(revs).size, "non-vacuity: the three revisions differ").toBe(3);
+  expect(page.lot_queue_revs?.[projects.open]).toEqual({ "announce-lot": revs[0]!, default: revs[2]! });
+  expect(page.lot_queue_revs?.[projects.closed]).toEqual({ "announce-lot": revs[1]! });
+  expect([page.queue_revs?.[projects.open], page.queue_revs?.[projects.closed]]).toEqual([revs[2]!, undefined]);
+  expect(Object.values(page.queue_revs ?? {}).every((rev) => typeof rev === "number")).toBe(true);
+  expect(page.lots?.filter((lot) => lot.id === "announce-lot")).toEqual([
+    { project_key: projects.closed, id: "announce-lot", name: "closed one", created_by: "deck", created_at: createdAt, closed_at: createdAt, color: null },
+    { project_key: projects.open, id: "announce-lot", name: "open one", created_by: "deck", created_at: createdAt, closed_at: null, color: 3 },
+  ]);
+  const place = (id: string) => {
+    const row = rows.get(id)!;
+    return [row.queue, "lot_rank" in row ? row.lot_rank : "absent"];
+  };
+  expect([place(ranked), place(unranked), place(queued), place(loose)]).toEqual([
+    [null, 3],
+    [null, null],
+    [1, "absent"],
+    [null, "absent"],
+  ]);
 }, 30_000);
 
 // ----- /roadmap/sync/queue-delta, version 2 -----
@@ -3210,9 +3264,9 @@ test("queue-delta v2: a transfer writes lot and rank together, or neither", asyn
     [card("y"), lot.a, 1],
     [card("z"), lot.b, 1],
   ]);
-  expect(moved.body.items?.map((row) => [row.id, row.lot_id, row.queue]).sort()).toEqual([
-    [card("x"), lot.b, null],
-    [card("y"), lot.a, null],
+  expect(moved.body.items?.map((row) => [row.id, row.lot_id, row.queue, row.lot_rank]).sort()).toEqual([
+    [card("x"), lot.b, null, 2],
+    [card("y"), lot.a, null, 1],
   ]);
 }, 30_000);
 
