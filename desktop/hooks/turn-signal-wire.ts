@@ -1,4 +1,5 @@
-export const TURN_SIGNAL_LIMITS = { bodyBytes: 4096, id: 128, command: 128, args: 256, label: 32, backgroundTasks: 1024 } as const;
+/** `backgroundSubagents` sub-agent ids of the longest accepted form still fit in `bodyBytes`. */
+export const TURN_SIGNAL_LIMITS = { bodyBytes: 4096, id: 128, command: 128, args: 256, label: 32, backgroundTasks: 1024, backgroundSubagents: 24 } as const;
 
 export const TURN_COMPLETE_REASONS = ["answer", "aborted", "refusal", "error"] as const;
 export const SESSION_END_REASONS = ["clear", "resume", "logout", "prompt_input_exit", "other"] as const;
@@ -18,7 +19,11 @@ export type TurnSignal =
       isAborted: boolean;
       agentId?: string;
       backgroundTasks?: number;
+      backgroundShells?: number;
+      backgroundSubagents?: string[];
     }
+  | { kind: "subagent.start"; seq: number; agentId: string }
+  | { kind: "subagent.stop"; seq: number; agentId: string }
   | { kind: "session.compact:resolved"; seq: number }
   | { kind: "session.end"; seq: number; reason: SessionEndReason };
 
@@ -42,6 +47,8 @@ type Rule =
   | { type: "seq" }
   | { type: "bool" }
   | { type: "count"; max: number }
+  | { type: "subagent-id" }
+  | { type: "subagent-ids"; max: number }
   | { type: "enum"; values: readonly string[] }
   | { type: "text"; max: number; empty?: true };
 
@@ -56,6 +63,8 @@ const COMMAND: Rule = { type: "text", max: TURN_SIGNAL_LIMITS.command };
 const LABEL: Rule = { type: "text", max: TURN_SIGNAL_LIMITS.label };
 const ARGS: Rule = { type: "text", max: TURN_SIGNAL_LIMITS.args, empty: true };
 const COUNT: Rule = { type: "count", max: TURN_SIGNAL_LIMITS.backgroundTasks };
+const SUBAGENT_ID: Rule = { type: "subagent-id" };
+const SUBAGENT_IDS: Rule = { type: "subagent-ids", max: TURN_SIGNAL_LIMITS.backgroundSubagents };
 const TURN_REASON: Rule = { type: "enum", values: TURN_COMPLETE_REASONS };
 const END_REASON: Rule = { type: "enum", values: SESSION_END_REASONS };
 const NONE = {} as const;
@@ -66,8 +75,10 @@ const SHAPES: Readonly<Record<TurnSignal["kind"], Shape>> = {
   "turn.start": { required: { seq: SEQ, turnId: ID }, optional: { agentId: ID, commandSeq: SEQ } },
   "turn.complete": {
     required: { seq: SEQ, turnId: ID, reason: TURN_REASON, isAborted: { type: "bool" } },
-    optional: { agentId: ID, backgroundTasks: COUNT }
+    optional: { agentId: ID, backgroundTasks: COUNT, backgroundShells: COUNT, backgroundSubagents: SUBAGENT_IDS }
   },
+  "subagent.start": { required: { seq: SEQ, agentId: SUBAGENT_ID }, optional: NONE },
+  "subagent.stop": { required: { seq: SEQ, agentId: SUBAGENT_ID }, optional: NONE },
   "session.compact:resolved": { required: { seq: SEQ }, optional: NONE },
   "session.end": { required: { seq: SEQ, reason: END_REASON }, optional: NONE }
 };
@@ -83,6 +94,13 @@ export function isWireText(value: unknown, max: number): value is string {
   return isSafeText(value, max) && value.trim().length > 0;
 }
 
+/** ASCII only, so a full list of ids has a known size on the wire. */
+const SUBAGENT_ID_FORM = /^[A-Za-z0-9_-]+$/;
+
+export function isSubagentId(value: unknown): value is string {
+  return typeof value === "string" && value.length <= TURN_SIGNAL_LIMITS.id && SUBAGENT_ID_FORM.test(value);
+}
+
 function refusalOf(value: unknown, rule: Rule): TurnSignalRefusal | null {
   if (rule.type === "seq") {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? null : "bad-seq";
@@ -90,6 +108,11 @@ function refusalOf(value: unknown, rule: Rule): TurnSignalRefusal | null {
   if (rule.type === "bool") return typeof value === "boolean" ? null : "bad-flag";
   if (rule.type === "count") {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= rule.max ? null : "bad-count";
+  }
+  if (rule.type === "subagent-id") return isSubagentId(value) ? null : "bad-string";
+  if (rule.type === "subagent-ids") {
+    if (!Array.isArray(value) || value.length > rule.max) return "bad-count";
+    return value.every(isSubagentId) ? null : "bad-string";
   }
   if (rule.type === "enum") return typeof value === "string" && rule.values.includes(value) ? null : "bad-reason";
   return (rule.empty === true ? isSafeText(value, rule.max) : isWireText(value, rule.max)) ? null : "bad-string";

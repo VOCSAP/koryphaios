@@ -24,6 +24,7 @@ export const CONFIG_KEY_ACCESS = {
   locale: 'patch',
   palette: 'patch',
   glowColor: 'patch',
+  countBadgeStyle: 'patch',
   rememberScopeSecrets: 'patch',
   autoResumeQuota: 'patch',
   leadPattern: 'file',

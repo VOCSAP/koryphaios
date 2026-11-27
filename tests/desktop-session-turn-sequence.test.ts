@@ -71,6 +71,7 @@ function signals(first = 100) {
       }
     },
     compacted: (): TurnSignal => ({ kind: 'session.compact:resolved', seq: ++seq }),
+    subagent: (kind: 'subagent.start' | 'subagent.stop', agentId: string): TurnSignal => ({ kind, seq: ++seq, agentId }) as TurnSignal,
     ended: (reason: 'clear' | 'resume' | 'logout' | 'prompt_input_exit' | 'other'): TurnSignal => ({ kind: 'session.end', seq: ++seq, reason })
   }
 }
@@ -213,6 +214,24 @@ describe('a skill step', () => {
     expect(run.state.status, 'a sub-agent complete with the same turnId is not ours').toBe('running')
     run.signal(s.completed('SUB', { agentId: 'agent-1', backgroundTasks: 0 }))
     expect(run.state.status).toBe('running')
+    run.signal(s.completed('T1', { backgroundTasks: 0 }))
+    expect(run.state).toEqual({ status: 'done' })
+  })
+
+  test('a sub-agent start and stop spend their seq and change nothing else, in any phase', () => {
+    const run = drive(plan([skillA]))
+    const s = signals()
+    const around = (): void => {
+      run.signal(s.subagent('subagent.start', 'agent-1'))
+      run.signal(s.subagent('subagent.stop', 'agent-1'))
+    }
+    run.send({ type: 'submitted', step: 0 })
+    around()
+    run.signal(s.enter(START, stepArgs(skillA)))
+    around()
+    run.signal(s.started('T1'))
+    around()
+    expect(stopped(run)).toBeNull()
     run.signal(s.completed('T1', { backgroundTasks: 0 }))
     expect(run.state).toEqual({ status: 'done' })
   })

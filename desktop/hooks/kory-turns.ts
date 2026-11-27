@@ -1,5 +1,5 @@
 import type { HttpFetchInit, On } from './claude-code-types.ts'
-import { SESSION_END_REASONS, type TurnSignal } from './turn-signal-wire.ts'
+import { isSubagentId, SESSION_END_REASONS, TURN_SIGNAL_LIMITS, type TurnSignal } from './turn-signal-wire.ts'
 
 export interface TurnsHost {
   env: { get(name: string): Promise<string | undefined> }
@@ -18,8 +18,15 @@ interface TurnState {
   failures: number
   /** Seq of the latest command.run:enter that no main turn.start has claimed yet. */
   pendingCommandSeq: number | null
-  /** Count of the classic.Stop of the running turn; null once the turn.complete took it. */
-  stoppedBackground: number | null
+  /** Snapshot of the classic.Stop of the running turn; null once the turn.complete took it. */
+  stoppedBackground: Background | null
+}
+
+interface Background {
+  tasks: number
+  shells: number
+  /** Null when there are more ids than one signal carries: a cut list would drop running sub-agents. */
+  subagents: string[] | null
 }
 
 function draw(): string {
@@ -78,6 +85,48 @@ function withoutStepToken(args: string): string {
   return args.replace(STEP_TOKEN_TAIL, '')
 }
 
+const SHELL_TASK_TYPES: readonly unknown[] = ['shell', 'monitor']
+
+function taskField(task: unknown, field: 'type' | 'id'): unknown {
+  return typeof task === 'object' && task !== null ? (task as Record<string, unknown>)[field] : undefined
+}
+
+function backgroundOf(tasks: unknown[]): Background {
+  const subagents = tasks
+    .filter((task) => taskField(task, 'type') === 'subagent')
+    .map((task) => taskField(task, 'id'))
+    .filter(isSubagentId)
+  return {
+    tasks: tasks.length,
+    shells: tasks.filter((task) => SHELL_TASK_TYPES.includes(taskField(task, 'type'))).length,
+    subagents: carried(subagents)
+  }
+}
+
+function carried(subagents: string[]): string[] | null {
+  return subagents.length > TURN_SIGNAL_LIMITS.backgroundSubagents ? null : subagents
+}
+
+function completeCounts({ tasks, shells, subagents }: Background): { backgroundTasks: number; backgroundShells: number; backgroundSubagents?: string[] } {
+  const counts = { backgroundTasks: tasks, backgroundShells: shells }
+  return subagents === null ? counts : { ...counts, backgroundSubagents: subagents }
+}
+
+/** The pending Stop snapshot leaves after this signal and replaces the Deck's ids, so it has to agree with it. */
+function amendStopped(kind: 'subagent.start' | 'subagent.stop', agentId: string): void {
+  const stopped = state.stoppedBackground
+  if (!stopped?.subagents) return
+  const others = stopped.subagents.filter((id) => id !== agentId)
+  state.stoppedBackground = { ...stopped, subagents: carried(kind === 'subagent.start' ? [...others, agentId] : others) }
+}
+
+/** An id the Deck parser would refuse is not sent: a refused signal stops a running Skills sequence. */
+function sendSubagent($: TurnsHost, kind: 'subagent.start' | 'subagent.stop', agentId: unknown): void {
+  if (!isSubagentId(agentId)) return
+  amendStopped(kind, agentId)
+  send($, { kind, agentId })
+}
+
 /** Called by the session.compact hook that also reports telemetry: the loader takes one registration per event. */
 export function reportCompacted($: TurnsHost): void {
   send($, { kind: 'session.compact:resolved' })
@@ -113,18 +162,30 @@ export function register(on: On): void {
   })
 
   on('classic.Stop', async (_$, e, next) => {
-    state.stoppedBackground = Array.isArray(e.background_tasks) ? e.background_tasks.length : null
+    const tasks = e.background_tasks
+    state.stoppedBackground = Array.isArray(tasks) ? backgroundOf(tasks) : null
+    return next(e)
+  })
+
+  on('classic.SubagentStart', async ($, e, next) => {
+    sendSubagent($, 'subagent.start', e.agent_id)
+    return next(e)
+  })
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    sendSubagent($, 'subagent.stop', e.agent_id)
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const complete = { kind: 'turn.complete', turnId: e.turnId, reason: e.reason, isAborted: e.isAborted } as const
     if (e.agentId !== undefined) {
+      if (isSubagentId(e.agentId)) amendStopped('subagent.stop', e.agentId)
       send($, { ...complete, agentId: e.agentId })
     } else {
-      const backgroundTasks = state.stoppedBackground
+      const stopped = state.stoppedBackground
       state.stoppedBackground = null
-      send($, backgroundTasks === null ? complete : { ...complete, backgroundTasks })
+      send($, stopped === null ? complete : { ...complete, ...completeCounts(stopped) })
     }
     return next(e)
   })

@@ -488,6 +488,18 @@ export function SettingsView(): React.JSX.Element {
                     ))}
                   </select>
                 </label>
+
+                <label className="field">
+                  <span>{t('settings.countBadgeStyle')}</span>
+                  <select
+                    value={config.countBadgeStyle}
+                    onChange={(e) => set('countBadgeStyle', e.target.value as AppConfig['countBadgeStyle'])}
+                  >
+                    <option value="glyph">{t('settings.countBadgeGlyph')}</option>
+                    <option value="pill">{t('settings.countBadgePill')}</option>
+                  </select>
+                  <small>{t('settings.countBadgeHelp')}</small>
+                </label>
               </div>
 
               <div className="field">

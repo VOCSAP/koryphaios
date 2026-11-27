@@ -158,6 +158,29 @@ test("the notification sound switch follows the stored choice and saves its oppo
   expect(updateConfigCalls.at(-1)).toEqual({ notifySound: true });
 });
 
+test("the appearance page shows the stored look of the row counts and saves the other one", async () => {
+  await mount(DEFAULT_CONFIG.enabledMods, []);
+  const item = [...container.querySelectorAll(".settings-tree-item")].find((b) => b.textContent === "settings.catAppearance");
+  await act(async () => {
+    (item as HTMLButtonElement).click();
+  });
+  const select = () =>
+    [...container.querySelectorAll("label.field")].find((l) => l.querySelector("span")?.textContent === "settings.countBadgeStyle")
+      ?.querySelector("select") as HTMLSelectElement | undefined;
+  expect(select(), "the count look must be offered under Appearance").not.toBeUndefined();
+  expect(select()!.value, "the tinted glyph is the default").toBe("glyph");
+  expect([...select()!.options].map((o) => o.value)).toEqual(["glyph", "pill"]);
+  await act(async () => {
+    select()!.value = "pill";
+    select()!.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(updateConfigCalls).toEqual([{ countBadgeStyle: "pill" }]);
+  await act(async () => {
+    fakeUseDeck.setState({ config: { ...DEFAULT_CONFIG, countBadgeStyle: "pill" } });
+  });
+  expect(select()!.value, "a stored pill reads back as pill").toBe("pill");
+});
+
 test("with the default configuration every offered mod is shown unchecked", async () => {
   await mount(DEFAULT_CONFIG.enabledMods, ["alpha", "beta"]);
   expect(modCheckbox("alpha"), "alpha must be offered as a switch").not.toBeUndefined();

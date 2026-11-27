@@ -26,6 +26,12 @@ test("the notification sound switch is a patchable key that lands without a trac
   expect(reports).toEqual([]);
 });
 
+test("the look of the row counts is a patchable key that lands without a trace", () => {
+  const { kept, reports } = restrict({ countBadgeStyle: "pill" });
+  expect(kept).toEqual({ countBadgeStyle: "pill" });
+  expect(reports).toEqual([]);
+});
+
 test("a key outside the config is dropped and traced, the rest of the patch lands", () => {
   const { kept, reports } = restrict({ shellHook: "x", theme: "light" });
   expect(kept).toEqual({ theme: "light" });

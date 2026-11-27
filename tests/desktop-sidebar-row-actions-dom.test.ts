@@ -22,7 +22,7 @@ import { join } from "node:path";
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
 interface FakeDeckState {
-  config: { autoResumeQuota: boolean };
+  config: { autoResumeQuota: boolean; countBadgeStyle?: string };
   selectedId: string | null;
   maximizedId: string | null;
   dict: Record<string, string>;
@@ -652,6 +652,32 @@ test("a running or waiting sequence greys the three entries and names the step o
   }
 });
 
+test("a folded row's right-click selects that row and opens the same menu as an unfolded one", () => {
+  const selected: string[] = [];
+  fakeUseDeck.setState({ setSelected: (id: string) => void selected.push(id) });
+  const menuState = (): unknown => ({
+    shape: menuShape(),
+    disabled: [...container.querySelectorAll<HTMLButtonElement>('.context-menu [role="menuitem"]')].map((b) => b.disabled),
+    hints: hints()
+  });
+  renderRow(session(ELIGIBLE_LEAD));
+  openMenu();
+  const unfolded = menuState();
+  closeMenu();
+  selected.length = 0;
+  renderRow(session(ELIGIBLE_LEAD), true);
+  openMenu();
+  expect(selected, "the right-clicked row becomes the selection").toEqual(["tile-a"]);
+  expect(container.querySelector(".context-menu") !== null, "the rail must open the menu too").toBe(true);
+  expect(menuState(), "folding the sidebar must not trim or grey the menu").toEqual(unfolded);
+  const inherited = [...container.querySelectorAll('.context-menu [role="menuitem"]')].map(
+    (b) => b.closest("[title]")?.getAttribute("title") ?? null
+  );
+  expect(inherited, "no menu entry may inherit the row's name tooltip").not.toContain("worker");
+  closeMenu();
+  expect(row().getAttribute("title"), "menu closed, the folded row names itself again").toBe("worker");
+});
+
 test("a menu opened near the bottom-right corner is pulled back inside the viewport", () => {
   const proto = HTMLElement.prototype;
   const original = proto.getBoundingClientRect;
@@ -782,4 +808,62 @@ test("a folded row drops the pill: the rail has no width for it", () => {
   withSequence("running");
   renderRow(session(), true);
   expect(seqPill() === null).toBe(true);
+});
+
+const COUNT_DICT = {
+  "sidebar.subagentCount": "{count} active subagent(s)",
+  "sidebar.shellCount": "{count} background process(es)"
+};
+
+function counts(): { kind: string; label: string | null; text: string; glyph: boolean }[] {
+  return [...row().querySelectorAll(".row-counts > .row-count")].map((b) => ({
+    kind: b.classList.contains("row-count-subagent") ? "subagent" : b.classList.contains("row-count-shell") ? "shell" : "?",
+    label: b.getAttribute("role") === "img" ? b.getAttribute("aria-label") : null,
+    text: b.textContent ?? "",
+    glyph: b.querySelector("svg.glyph") !== null
+  }));
+}
+
+test("a row without a count source shows no count badge, whether the field is null or missing", () => {
+  renderRow(session({ backgroundCounts: null }));
+  expect(row().querySelector(".row-counts"), "null source").toBeNull();
+  renderRow(session());
+  expect(row().querySelector(".row-counts"), "a runtime from before the field existed").toBeNull();
+});
+
+test("a zero count has no badge and the other count keeps its own", () => {
+  act(() => fakeUseDeck.setState({ dict: COUNT_DICT }));
+  renderRow(session({ backgroundCounts: { subagents: 0, shells: 3 } }));
+  expect(counts().map((c) => c.kind)).toEqual(["shell"]);
+  renderRow(session({ backgroundCounts: { subagents: 0, shells: 0 } }));
+  expect(row().querySelector(".row-counts"), "two zeros leave no empty group behind").toBeNull();
+});
+
+test("each count is one image whose spoken label carries its number, glyph shown unfolded", () => {
+  act(() => fakeUseDeck.setState({ dict: COUNT_DICT }));
+  renderRow(session({ backgroundCounts: { subagents: 2, shells: 12 } }));
+  expect(counts()).toEqual([
+    { kind: "subagent", label: "2 active subagent(s)", text: "2", glyph: true },
+    { kind: "shell", label: "12 background process(es)", text: "12", glyph: true }
+  ]);
+  expect(row().querySelector(".row-counts")!.className, "the default look is the tinted glyph").toBe("row-counts");
+});
+
+test("a folded row keeps both counts and their labels, numbers only", () => {
+  act(() => fakeUseDeck.setState({ dict: COUNT_DICT }));
+  renderRow(session({ backgroundCounts: { subagents: 1, shells: 2 } }), true);
+  expect(counts()).toEqual([
+    { kind: "subagent", label: "1 active subagent(s)", text: "1", glyph: false },
+    { kind: "shell", label: "2 background process(es)", text: "2", glyph: false }
+  ]);
+});
+
+test("the pill setting switches the look of the counts and nothing else", () => {
+  act(() => fakeUseDeck.setState({ dict: COUNT_DICT, config: { autoResumeQuota: false, countBadgeStyle: "pill" } }));
+  renderRow(session({ backgroundCounts: { subagents: 2, shells: 1 } }));
+  expect(row().querySelector(".row-counts")!.className).toBe("row-counts row-counts-pill");
+  expect(counts().map((c) => c.label)).toEqual(["2 active subagent(s)", "1 background process(es)"]);
+  act(() => fakeUseDeck.setState({ config: { autoResumeQuota: false, countBadgeStyle: "glyph" } }));
+  renderRow(session({ backgroundCounts: { subagents: 2, shells: 1 } }));
+  expect(row().querySelector(".row-counts")!.className).toBe("row-counts");
 });

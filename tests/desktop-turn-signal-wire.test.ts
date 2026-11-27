@@ -21,7 +21,11 @@ const VALID: TurnSignal[] = [
   { kind: "session.end", seq: 8, reason: "clear" },
   { kind: "turn.complete", seq: 9, turnId: "turn-3", reason: "aborted", isAborted: true },
   { kind: "turn.complete", seq: 10, turnId: "turn-4", reason: "answer", isAborted: false, backgroundTasks: 0 },
-  { kind: "turn.complete", seq: 11, turnId: "turn-5", reason: "answer", isAborted: false, backgroundTasks: 2 }
+  { kind: "turn.complete", seq: 11, turnId: "turn-5", reason: "answer", isAborted: false, backgroundTasks: 2 },
+  { kind: "turn.complete", seq: 12, turnId: "turn-6", reason: "answer", isAborted: false, backgroundTasks: 2, backgroundShells: 1 },
+  { kind: "subagent.start", seq: 13, agentId: "agent-1" },
+  { kind: "subagent.stop", seq: 14, agentId: "agent-1" },
+  { kind: "turn.complete", seq: 15, turnId: "turn-7", reason: "answer", isAborted: false, backgroundSubagents: ["agent-1"] }
 ];
 
 const parse = (value: unknown): TurnSignal | null => {
@@ -76,7 +80,8 @@ describe("parseTurnSignal shapes", () => {
 
   test("a required key that is missing is refused on every kind", () => {
     for (const signal of VALID) {
-      for (const key of Object.keys(signal).filter((name) => !["kind", "agentId", "backgroundTasks", "commandSeq"].includes(name))) {
+      const optional = ["kind", "backgroundTasks", "backgroundShells", "backgroundSubagents", "commandSeq", ...(signal.kind.startsWith("subagent.") ? [] : ["agentId"])];
+      for (const key of Object.keys(signal).filter((name) => !optional.includes(name))) {
         const { [key]: _removed, ...rest } = signal as Record<string, unknown>;
         expect(refusal(rest), `${signal.kind} without ${key}`).toBe("missing-key");
       }
@@ -160,6 +165,30 @@ describe("parseTurnSignal backgroundTasks", () => {
   test("only a turn.complete carries the count", () => {
     expect(refusal({ kind: "turn.start", seq: 1, turnId: "t", backgroundTasks: 0 })).toBe("unknown-key");
     expect(refusal({ kind: "session.end", seq: 1, reason: "clear", backgroundTasks: 0 })).toBe("unknown-key");
+  });
+
+  test("the shell count follows the same bounds, on a turn.complete only", () => {
+    const shells = (backgroundShells: unknown) => ({ ...complete(0), backgroundShells });
+    expect(refusal(shells(TURN_SIGNAL_LIMITS.backgroundTasks))).toBe("accepted");
+    for (const bad of [-1, "1", TURN_SIGNAL_LIMITS.backgroundTasks + 1]) expect(refusal(shells(bad)), String(bad)).toBe("bad-count");
+    expect(refusal({ kind: "subagent.stop", seq: 1, agentId: "a", backgroundShells: 0 })).toBe("unknown-key");
+  });
+
+  test("the sub-agent ids are a bounded list of usable ids, and a full list fits in one body", () => {
+    const listed = (backgroundSubagents: unknown) => ({ ...complete(0), backgroundSubagents });
+    const full = Array.from({ length: TURN_SIGNAL_LIMITS.backgroundSubagents }, () => "x".repeat(TURN_SIGNAL_LIMITS.id));
+    expect(refusal(listed([]))).toBe("accepted");
+    const widest = { ...listed(full), turnId: "é".repeat(TURN_SIGNAL_LIMITS.id) };
+    expect(refusal(widest), "the largest list the module can send, with the widest turnId").toBe("accepted");
+    expect(refusal(listed([...full.map(() => "a"), "a"])), "one id over the cap").toBe("bad-count");
+    expect(refusal(listed("a"))).toBe("bad-count");
+    for (const bad of [7, "", " ", "x".repeat(TURN_SIGNAL_LIMITS.id + 1), `a${ESC}b`, "é", "a b", 'a"b', "a.b"]) {
+      expect(refusal(listed(["ok", bad])), JSON.stringify(bad)).toBe("bad-string");
+      for (const kind of ["subagent.start", "subagent.stop"]) {
+        expect(refusal({ kind, seq: 1, agentId: bad }), `${kind} ${JSON.stringify(bad)}`).toBe("bad-string");
+      }
+    }
+    expect(refusal({ kind: "subagent.start", seq: 1, agentId: "A_z-0".repeat(2) })).toBe("accepted");
   });
 });
 

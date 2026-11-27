@@ -8,6 +8,7 @@ import {
   type SessionDef
 } from '@shared/types'
 import { writeFileAtomic } from './atomic-write'
+import { normalizeCountBadgeStyle } from './count-badge-style'
 import { sanitizeGlowColor } from '@shared/palette'
 import {
   DEFAULT_HELP_TARGET,
@@ -87,6 +88,7 @@ export function loadConfig(): AppConfig {
   if (!JOIN_ANNOUNCE_LEVELS.includes(cfg.joinAnnounceLevel)) {
     cfg.joinAnnounceLevel = 'off'
   }
+  cfg.countBadgeStyle = normalizeCountBadgeStyle(cfg.countBadgeStyle)
   // Hand-edited file: a non-hex glow value becomes a CSS variable, so clamp.
   cfg.glowColor = sanitizeGlowColor(cfg.glowColor)
   // Whether Kory spawns a process is not decided by a stray string in the file.

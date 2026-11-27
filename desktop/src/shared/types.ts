@@ -185,6 +185,15 @@ export interface SessionRuntime extends SessionDef {
   skillEligibility: SkillEligibility
   /** Counts the spawns of this tile id in this app run; a restore that keeps the id steps it. Never persisted. */
   spawnGeneration: number
+  /** Work running behind the tile's turns; null when nothing can report it (unserved or exited tile). Never persisted. */
+  backgroundCounts: SessionBackgroundCounts | null
+}
+
+export interface SessionBackgroundCounts {
+  /** Sub-agents started and not yet stopped, replaced by the list of each main turn that ends with a Stop. */
+  subagents: number
+  /** Background shell and monitor tasks listed by the last main turn that ended with a Stop. */
+  shells: number
 }
 
 /** One statusLine report, validated main-side before it reaches the renderer. */
@@ -262,6 +271,12 @@ export const SUPERVISOR_SPAWN_MODES: SupervisorSpawnMode[] = [
 export type JoinAnnounceLevel = 'off' | 'lead' | 'all'
 
 export const JOIN_ANNOUNCE_LEVELS: JoinAnnounceLevel[] = ['off', 'lead', 'all']
+
+/** Look of a sidebar row's background-work counts: 'glyph' tints the glyph
+ *  and the number, 'pill' fills a pill. */
+export type CountBadgeStyle = 'glyph' | 'pill'
+
+export const COUNT_BADGE_STYLES: CountBadgeStyle[] = ['glyph', 'pill']
 
 /**
  * Hand-kept mirror of Approval and ApprovalOrigin from repo-root
@@ -475,6 +490,8 @@ export interface AppConfig {
   palette: string[]
   /** Attention-glow colour (hex) of the rail glyphs; '' = theme default (gold). */
   glowColor: string
+  /** Look of the subagent and background-shell counts on a sidebar row. */
+  countBadgeStyle: CountBadgeStyle
   /** Remember custom (shared) scope secrets on this machine, encrypted (D8). */
   rememberScopeSecrets: boolean
   /**

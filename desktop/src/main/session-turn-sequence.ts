@@ -212,7 +212,9 @@ function onSignal(state: Running, signal: TurnSignal): Transition {
     return stop(seen, 'session-ended')
   }
 
-  if (signal.agentId !== undefined) return { state: seen, effects: [] }
+  if (signal.kind === 'subagent.start' || signal.kind === 'subagent.stop' || signal.agentId !== undefined) {
+    return { state: seen, effects: [] }
+  }
 
   if (signal.kind === 'turn.start') {
     if (phase.kind === 'quiescence') return { state: seen, effects: [] }

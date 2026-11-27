@@ -717,6 +717,34 @@ test("the operator's out-of-turn stop ends a running sequence before it types", 
   });
 });
 
+test("background counts are null for an unserved tile, follow the signals of a served one, and start empty on a new PTY", async () => {
+  const unserved = setup({ hostTelemetry: true });
+  unserved.svc.setTurnSignalUrl(TURN_URL);
+  unserved.svc.setTurnSignalSubscribe(signalServer().subscribe);
+  expect(unserved.svc.create({}).backgroundCounts, "no plugin loaded: nothing can report").toBeNull();
+
+  const served = servedTile();
+  const countsOf = (list: ReturnType<typeof served.svc.list>) => list.find((s) => s.id === served.tile.id)!.backgroundCounts;
+  expect(countsOf(served.svc.list())).toEqual({ subagents: 0, shells: 0 });
+  const announced: unknown[] = [];
+  served.svc.on("changed", (list) => announced.push(countsOf(list)));
+  const send = signalsOf(served);
+
+  send({ kind: "turn.start", turnId: "t" });
+  expect(announced, "a signal that changes no count announces nothing").toEqual([]);
+  send({ kind: "subagent.start", agentId: "a" });
+  send({ kind: "turn.complete", turnId: "t", reason: "answer", isAborted: false, backgroundTasks: 1, backgroundShells: 1 });
+  expect(announced).toEqual([
+    { subagents: 1, shells: 0 },
+    { subagents: 1, shells: 1 },
+  ]);
+
+  spawned.at(-1)!.exit(1);
+  expect(countsOf(served.svc.list()), "an exited tile reports nothing").toBeNull();
+  await served.svc.restart(served.tile.id);
+  expect(countsOf(served.svc.list()), "the counts of the previous PTY are not carried").toEqual({ subagents: 0, shells: 0 });
+});
+
 test("a sequence hears the signals of its own PTY generation only", async () => {
   const own = servedTile();
   spawned.at(-1)!.output("busy");

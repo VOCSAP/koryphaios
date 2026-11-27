@@ -9,6 +9,7 @@ import type {
   DirectiveOutcome,
   InjectRefusal,
   PeerStatus,
+  SessionBackgroundCounts,
   SessionDef,
   SessionLiveStatus,
   SequenceWaitingDirective,
@@ -739,8 +740,11 @@ export class SessionService extends EventEmitter {
     }
     try {
       entry.unsubscribe = subscribe(id, (event) => {
+        const before = this.backgroundCounts(id)
         entry.generation = event.generation
         entry.feed.feed(event)
+        const after = this.backgroundCounts(id)
+        if (before?.subagents !== after?.subagents || before?.shells !== after?.shells) this.broadcast()
       })
     } catch (e) {
       reportError('session', `no turn signal subscription for tile ${id}`, e)
@@ -748,6 +752,14 @@ export class SessionService extends EventEmitter {
     }
     this.tileFeeds.set(id, entry)
     return entry
+  }
+
+  private backgroundCounts(id: string): SessionBackgroundCounts | null {
+    if (!this.hasTurnSignalSource(id)) return null
+    const entry = this.tileFeeds.get(id)
+    // The feed empties only on the next event, so counts of an earlier PTY life are not read.
+    if (entry === undefined || entry.generation !== this.pty.life(id)) return { subagents: 0, shells: 0 }
+    return entry.feed.counts()
   }
 
   private dropTileFeed(id: string): void {
@@ -2114,7 +2126,8 @@ export class SessionService extends EventEmitter {
       liveStatus: r?.liveStatus ?? null,
       windowsPty: this.windowsPty,
       skillEligibility: this.skillEligibility(def),
-      spawnGeneration: this.spawnGenerations.get(def.id) ?? 0
+      spawnGeneration: this.spawnGenerations.get(def.id) ?? 0,
+      backgroundCounts: this.backgroundCounts(def.id)
     }
   }
 

@@ -196,7 +196,7 @@ export type TurnCompleteResult = {
   text?: string
 }
 
-/** `background_tasks` lists the async sub-agents and the background Bash tasks still running at the end of the turn. */
+/** `background_tasks` lists the work still in flight at the end of the turn; each entry has a `type` such as 'shell', 'monitor' or 'subagent'. */
 export type ClassicStopInput = {
   background_tasks?: unknown
 }
@@ -307,6 +307,16 @@ type ClassicStopHook = (
   next: Next<ClassicStopInput, ClassicStopResult>,
 ) => ClassicStopResult | Promise<ClassicStopResult>
 
+export type ClassicSubagentInput = {
+  agent_id?: unknown
+}
+
+type ClassicSubagentHook = (
+  host: TelemetryPluginHost,
+  event: Frozen<ClassicSubagentInput>,
+  next: Next<ClassicSubagentInput, ClassicStopResult>,
+) => ClassicStopResult | Promise<ClassicStopResult>
+
 type EventName =
   | 'session.start'
   | 'session.measure'
@@ -318,6 +328,8 @@ type EventName =
   | 'turn.start'
   | 'turn.complete'
   | 'classic.Stop'
+  | 'classic.SubagentStart'
+  | 'classic.SubagentStop'
 
 type HookFor<Event extends EventName> = Event extends 'session.start'
   ? SessionStartHook
@@ -337,6 +349,8 @@ type HookFor<Event extends EventName> = Event extends 'session.start'
                 ? TurnCompleteHook
                 : Event extends 'classic.Stop'
                   ? ClassicStopHook
-                  : ToolCallHook
+                  : Event extends 'classic.SubagentStart' | 'classic.SubagentStop'
+                    ? ClassicSubagentHook
+                    : ToolCallHook
 
 export type On = <Event extends EventName>(event: Event, hook: HookFor<Event>) => void

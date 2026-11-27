@@ -242,6 +242,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.glowReset': 'Default (gold)',
   'settings.glowHelp':
     'Luminous halo of the rail icons when an agent or the supervisor requires your attention.',
+  'settings.countBadgeStyle': 'Background work badges',
+  'settings.countBadgeGlyph': 'Tinted glyph and number',
+  'settings.countBadgePill': 'Filled pill',
+  'settings.countBadgeHelp': 'How a session row shows its active subagents and background processes.',
   'settings.palette': 'Session colour palette',
   'settings.paletteHelp':
     'Colours cycled through for new sessions. Each session can still be recoloured individually.',
@@ -447,6 +451,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.leadTitle':
     'Team-lead: targeted app notices (dispatch, integrations) go to this session',
   'sidebar.roleTitle': 'Role: {role}',
+  'sidebar.subagentCount': '{count} active subagent(s)',
+  'sidebar.shellCount': '{count} background process(es)',
   'create.lead': 'Team-lead of this window',
   'create.leadHelp':
     'Targeted app notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',

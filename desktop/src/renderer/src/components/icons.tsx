@@ -758,6 +758,17 @@ const IconCheckboxOn = (
   </Svg>
 )
 
+/** Lychnos, the oil lamp left burning: a session's background shells. Drawn
+ *  for 11px, so the bowl, the foot and the flame carry it. No dot for the
+ *  filling hole: at that size it read as an eye and the lamp as a fish. */
+const IconLychnos = (
+  <Svg>
+    <path d="M3.5 14.5c0-2 2.6-3.5 6.7-3.5h4.3l5-2-2.3 5c-.9 2-3.4 3.5-7.2 3.5-4 0-6.5-1.2-6.5-3Z" />
+    <path d="M19.5 7c-1.6-1.1-1.7-3 0-5 1.7 2 1.6 3.9 0 5Z" />
+    <path d="M8.5 17.5 8 20h6l-.5-2.5" />
+  </Svg>
+)
+
 // ----- Provider sigils (ModelPicker + graph-chat nodes) -----
 // Abstract, monochrome marks -- deliberately NOT brand logos (same reasoning
 // as the notification-channel glyphs above), redrawn as stroke glyphs so
@@ -1058,7 +1069,8 @@ export const GLYPH_BADGES = {
   checkboxOff: IconCheckboxOff,
   talaria: IconTalaria,
   salpinx: IconSalpinx,
-  beacon: IconBeacon
+  beacon: IconBeacon,
+  lychnos: IconLychnos
 }
 
 /** Action icons, keyed by intent; view destinations stay in GLYPHS. */

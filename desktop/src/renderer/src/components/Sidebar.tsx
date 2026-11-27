@@ -138,6 +138,9 @@ export function SessionRow({
   const ineligible = eligibility && !eligibility.eligible ? eligibility.reason : null
   const skillsShown = !!eligibility && ineligible !== 'not-claude'
   const sequenceActive = sequence?.phase === 'running' || sequence?.phase === 'waiting-background'
+  // Optional chaining: a runtime built before the count source existed has no field at all.
+  const subagentCount = session.backgroundCounts?.subagents ?? 0
+  const shellCount = session.backgroundCounts?.shells ?? 0
   const sequenceBlock = !skillsShown
     ? null
     : sequenceActive
@@ -212,8 +215,9 @@ export function SessionRow({
   return (
     <li
       className={className}
-      // Folded, the name is gone from the strip, so the row itself carries it.
-      title={collapsed ? session.name : undefined}
+      // Folded, the name is gone from the strip, so the row itself carries it --
+      // except while its menu is open: the menu is a child and would inherit it.
+      title={collapsed && !menuPos ? session.name : undefined}
       // Draggable to reorder; disabled while renaming so the text input keeps
       // its normal selection/caret behaviour.
       draggable={!editing && !collapsed}
@@ -226,12 +230,8 @@ export function SessionRow({
       onDrop={(e) => dnd.onDrop(e, session.id)}
       onDragEnd={dnd.onDragEnd}
       onClick={() => setSelected(session.id)}
-      // Folded, the row is a signal strip, not a command surface: the menu it
-      // would open acts on things the rail cannot show (rename, peer table,
-      // diff), so it stays behind the unfold.
       onContextMenu={(e) => {
         e.preventDefault()
-        if (collapsed) return
         setSelected(session.id)
         setMenuPos({ x: e.clientX, y: e.clientY })
       }}
@@ -367,6 +367,34 @@ export function SessionRow({
           aria-label={t('sidebar.peerDormant')}
         >
           {GLYPH_BADGES.torchOut}
+        </span>
+      )}
+      {/* Folded, the numbers go without their glyph: the rail has no width for
+          them, and the colour still tells the two counts apart. */}
+      {(subagentCount > 0 || shellCount > 0) && (
+        <span className={config.countBadgeStyle === 'pill' ? 'row-counts row-counts-pill' : 'row-counts'}>
+          {subagentCount > 0 && (
+            <span
+              className="row-count row-count-subagent"
+              role="img"
+              title={t('sidebar.subagentCount', { count: String(subagentCount) })}
+              aria-label={t('sidebar.subagentCount', { count: String(subagentCount) })}
+            >
+              {!collapsed && GLYPHS.agents}
+              {subagentCount}
+            </span>
+          )}
+          {shellCount > 0 && (
+            <span
+              className="row-count row-count-shell"
+              role="img"
+              title={t('sidebar.shellCount', { count: String(shellCount) })}
+              aria-label={t('sidebar.shellCount', { count: String(shellCount) })}
+            >
+              {!collapsed && GLYPH_BADGES.lychnos}
+              {shellCount}
+            </span>
+          )}
         </span>
       )}
       {!collapsed && sequenceActive && (

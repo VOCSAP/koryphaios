@@ -362,7 +362,8 @@ test("MINOR (mutation review): toRuntime leans claude (true) for claudeLaunch wh
     runtime: new Map<string, { claudeLaunch: boolean }>(), // no entry for "missing"
     pty: { isAlive: () => false, pid: () => null },
     spawnGenerations: new Map<string, number>(),
-    skillEligibility: () => ({ eligible: false, reason: "not-claude" })
+    skillEligibility: () => ({ eligible: false, reason: "not-claude" }),
+    backgroundCounts: () => null
   };
   const result = fn.call(self, { id: "missing" });
   expect(result.claudeLaunch).toBe(true);

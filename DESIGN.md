@@ -31,6 +31,8 @@ use the variables so both themes keep working.
 | `--action-expand` | `#a06bff` | `#7c3aed` | Violet — "maximize / restore a tile" |
 | `--locked`     | `#e0b341` | `#9a6700` | Amber: "held, agents may not act on it"  |
 | `--recommend`  | `#ffb26b` | `#b45309` | Light orange: "recommended by the agent" |
+| `--count-subagent` | `#e08a3c` | `#a84f17` | Orange: active subagents of a session row |
+| `--count-shell` | `#3ec46d` | `#1f7a45` | Green: background shells of a session row |
 | `--select-arrow` | data URI | data URI | Chevron drawn for `<select>` (see §4)  |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
@@ -95,6 +97,18 @@ Colour is meaning. Do not repurpose these:
   ring (`.context-ring-unknown`); no report at all is the track crossed by a
   diagonal bar at opacity 0.55 (`.context-ring-unavailable`), never an empty
   track, which would read as 0%. A non-Claude tile shows no ring.
+- **Background work counts** (`.row-counts`, sidebar session row): orange
+  `var(--count-subagent)` counts active subagents (theatre-mask glyph), green
+  `var(--count-shell)` counts background shells (lychnos glyph). A zero count
+  shows no badge; a session with no count source shows none either. Not
+  `--accent`: blue is already the identity of the row (laurel, branch). Two
+  looks share these tokens, picked in Settings (`countBadgeStyle`): tinted
+  glyph and number (default), or a filled pill whose text is `--bg-2`. Contrast
+  on `--selected`, the darkest surface of the row: 4.23 / 5.01 dark, 4.40 /
+  4.25 light. Unfolded, the two badges stack in one column; a row under 300px
+  then drops the model pill and the padlock together, in one rule (the ring
+  keeps the model, the frame keeps the lock). Folded, they
+  take a second line of their row, numbers only.
 - **Banner red `#a03030`** — full-width outage banner (state, not event).
 - **Gold `var(--glow)`** — the "enchanted glyph" attention halo (§5). User-
   configurable (AppConfig.glowColor); never reuse it for anything but
@@ -448,7 +462,10 @@ hand drew it):
    arithmetic**: `svg.glyph { width: 1em }` (`styles.css`) wins, and `:root` is
    fixed at 13px, so a glyph renders **13x13** and an `.icon-btn` holding one
    measures 33px border-box (13 + padding 9+9 + border 1+1). Reading the
-   attribute instead inflates every rail sum by 7px.
+   attribute instead inflates every rail sum by 7px. One sanctioned exception:
+   the sidebar row counts (`.row-count`) draw their glyph at 11px, and 10px in
+   the filled pill, because at 13px the pair no longer fits a 260px row that
+   also wears the laurel, a role and the lock.
 2. **Stroke-only.** The single allowed fill is the small `Dot` accent
    (constellation stars, ellipsis). Never hardcode a colour — `currentColor`
    is what makes the dim/active/hover states and the glow work for free.

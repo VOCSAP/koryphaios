@@ -28,6 +28,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   locale: '',
   palette: DEFAULT_PALETTE,
   glowColor: '',
+  countBadgeStyle: 'glyph',
   rememberScopeSecrets: true,
   autoResumeQuota: false,
   leadPattern: 'team-lead',

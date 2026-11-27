@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test'
 import { register as registerModule } from '../desktop/hooks/kory-module.ts'
 import type { TurnsHost } from '../desktop/hooks/kory-turns.ts'
-import { parseTurnSignal } from '../desktop/hooks/turn-signal-wire.ts'
+import { parseTurnSignal, TURN_SIGNAL_LIMITS } from '../desktop/hooks/turn-signal-wire.ts'
 import { startSequence, stepArgs } from '../desktop/src/main/session-turn-sequence.ts'
+import { createTileTurnFeed } from '../desktop/src/main/tile-turn-feed.ts'
 
 const SERVER_URL = 'http://127.0.0.1:4242/signal'
 const LOAD_ID = /^[A-Za-z0-9_-]{8,64}$/
@@ -106,7 +107,7 @@ test('a skill turn is sent in the wire shapes the Deck parser accepts, with cons
     { kind: 'command.run:enter', seq: 1, command: 'turnspy:probe', args: 'plan N1', origin: 'composer' },
     { kind: 'command.run:resolved', seq: 2, command: 'turnspy:probe' },
     { kind: 'turn.start', seq: 3, turnId: 't1', commandSeq: 1 },
-    { kind: 'turn.complete', seq: 4, turnId: 't1', reason: 'answer', isAborted: false, backgroundTasks: 0 }
+    { kind: 'turn.complete', seq: 4, turnId: 't1', reason: 'answer', isAborted: false, backgroundTasks: 0, backgroundShells: 0, backgroundSubagents: [] }
   ])
   for (const request of probe.sent) {
     const parsed = parseTurnSignal(request.body)
@@ -204,6 +205,163 @@ test('a sub-agent turn.complete carries its agentId, no count, and leaves the ma
   const [sub, main] = bodies(probe)
   expect(sub).toEqual({ kind: 'turn.complete', seq: 1, turnId: 'sub', reason: 'answer', isAborted: false, agentId: 'agent-1' })
   expect(main!.backgroundTasks).toBe(1)
+})
+
+test('the shell count of a Stop covers shell and monitor tasks only', async () => {
+  const probe = host()
+  const tasks = [
+    { id: 'a', type: 'shell' },
+    { id: 'b', type: 'monitor' },
+    { id: 'c', type: 'subagent' },
+    { id: 'd', type: 'workflow' },
+    { id: 'e' },
+    'shell',
+    null
+  ]
+  await skillTurn(handlers(), probe, tasks)
+  await idle()
+
+  const complete = bodies(probe).find((body) => body.kind === 'turn.complete')!
+  expect(complete.backgroundShells, 'one shell and one monitor').toBe(2)
+  expect(complete.backgroundTasks, 'the Skills sequences still wait on every task').toBe(tasks.length)
+  expect(parseTurnSignal(probe.sent.at(-1)!.body).ok).toBe(true)
+})
+
+test('the turn.complete lists the usable ids of the sub-agents of the Stop, or no list when one signal cannot carry them', async () => {
+  const probe = host()
+  const h = handlers()
+  const subagent = (id: unknown) => ({ type: 'subagent', id })
+  await skillTurn(h, probe, [subagent('a'), subagent(''), subagent(7), subagent('é'), { type: 'shell', id: 's' }, subagent('b')])
+  const atCap = Array.from({ length: TURN_SIGNAL_LIMITS.backgroundSubagents }, (_, i) => `agent-${i}`)
+  await skillTurn(h, probe, atCap.map(subagent))
+  await skillTurn(h, probe, [...atCap, 'one-more'].map(subagent))
+  await idle()
+
+  const completes = bodies(probe).filter((body) => body.kind === 'turn.complete')
+  expect(completes[0]!.backgroundSubagents).toEqual(['a', 'b'])
+  expect(completes[1]!.backgroundSubagents).toEqual(atCap)
+  expect('backgroundSubagents' in completes[2]!, 'a cut list would drop running sub-agents').toBe(false)
+  expect(completes[2]!.backgroundShells, 'the other counts still travel').toBe(0)
+  for (const request of probe.sent) expect(parseTurnSignal(request.body).ok, request.body).toBe(true)
+})
+
+/** Runs the module against a real feed: a send answered with an error never reaches it, as on the wire. */
+function moduleAndFeed(refused: (body: Record<string, unknown>) => boolean = () => false) {
+  const feed = createTileTurnFeed(() => {})
+  const generation = {}
+  let delivered = 0
+  const probe: Probe = host({
+    reply: async () => {
+      const request = probe.sent.at(-1)!
+      const parsed = parseTurnSignal(request.body)
+      if (!parsed.ok || refused(parsed.signal)) return { status: 500 }
+      delivered += 1
+      feed.feed({ type: 'signal', signal: parsed.signal, loadId: 'load-1', generation })
+      return { status: 204 }
+    }
+  })
+  return { probe, feed, delivered: () => delivered }
+}
+
+test('a main Stop clears a sub-agent whose end was never reported, with no hole in the seq', async () => {
+  const { probe, feed, delivered } = moduleAndFeed()
+  const h = handlers()
+  await h.get('classic.SubagentStart')!(probe.value, { agent_id: 'agent-1' }, answer())
+  await idle()
+  expect(feed.counts().subagents).toBe(1)
+
+  await skillTurn(h, probe, [])
+  await idle()
+  expect(delivered(), 'every signal arrived').toBe(probe.sent.length)
+  expect(feed.counts().subagents).toBe(0)
+})
+
+test('a lost final subagent.stop is gone from the count after the next main Stop', async () => {
+  const { probe, feed } = moduleAndFeed((body) => body.kind === 'subagent.stop')
+  const h = handlers()
+  await h.get('classic.SubagentStart')!(probe.value, { agent_id: 'agent-1' }, answer())
+  await h.get('classic.SubagentStop')!(probe.value, { agent_id: 'agent-1' }, answer())
+  await idle()
+  expect(feed.counts().subagents, 'nothing came after the lost send yet').toBe(1)
+
+  await skillTurn(h, probe, [])
+  await idle()
+  expect(feed.counts().subagents).toBe(0)
+})
+
+/** A main turn whose sub-agent events fire after its Stop and before its turn.complete. */
+async function lateEvents(h: Map<string, Handler>, probe: Probe, listed: string[], events: Array<['Start' | 'Stop', string]>): Promise<void> {
+  const $ = probe.value
+  await h.get('turn.start')!($, { turnId: 't1' }, answer())
+  await h.get('classic.Stop')!($, { background_tasks: listed.map((id) => ({ type: 'subagent', id })) }, answer())
+  for (const [kind, agent_id] of events) await h.get(`classic.Subagent${kind}`)!($, { agent_id }, answer())
+  await h.get('turn.complete')!($, { turnId: 't1', reason: 'answer', isAborted: false }, answer())
+  await idle()
+}
+
+test('a sub-agent that stops between the Stop and the turn.complete is not brought back', async () => {
+  const { probe, feed } = moduleAndFeed()
+  const h = handlers()
+  await h.get('classic.SubagentStart')!(probe.value, { agent_id: 'agent-1' }, answer())
+  await lateEvents(h, probe, ['agent-1'], [['Stop', 'agent-1']])
+  expect(feed.counts().subagents).toBe(0)
+})
+
+test('a sub-agent that starts between the Stop and the turn.complete stays counted, once', async () => {
+  const { probe, feed } = moduleAndFeed()
+  await lateEvents(handlers(), probe, ['agent-1'], [['Start', 'agent-2'], ['Start', 'agent-1']])
+  expect(bodies(probe).at(-1)!.backgroundSubagents).toEqual(['agent-2', 'agent-1'])
+  expect(feed.counts().subagents).toBe(2)
+})
+
+test('a sub-agent whose turn ends between the Stop and the turn.complete, with no stop event, is not brought back', async () => {
+  const { probe, feed } = moduleAndFeed()
+  const h = handlers()
+  const $ = probe.value
+  await h.get('classic.SubagentStart')!($, { agent_id: 'agent-1' }, answer())
+  await h.get('classic.Stop')!($, { background_tasks: [{ type: 'subagent', id: 'agent-1' }] }, answer())
+  await h.get('turn.complete')!($, { turnId: 'sub', agentId: 'agent-1', reason: 'aborted', isAborted: true }, answer())
+  await h.get('turn.complete')!($, { turnId: 't1', reason: 'answer', isAborted: false }, answer())
+  await idle()
+  expect(feed.counts().subagents).toBe(0)
+})
+
+test('a late start past the cap drops the list instead of cutting it', async () => {
+  const { probe } = moduleAndFeed()
+  const atCap = Array.from({ length: TURN_SIGNAL_LIMITS.backgroundSubagents }, (_, i) => `agent-${i}`)
+  await lateEvents(handlers(), probe, atCap, [['Start', 'one-more'], ['Stop', 'agent-0']])
+  expect('backgroundSubagents' in bodies(probe).at(-1)!).toBe(false)
+})
+
+test('a sub-agent start and stop are sent by agent id alone, and both events are passed on', async () => {
+  const probe = host()
+  const h = handlers()
+  const $ = probe.value
+  const event = { agent_id: 'agent-1', agent_type: 'general-purpose', background_tasks: [{ type: 'shell' }] }
+  const started = await h.get('classic.SubagentStart')!($, event, answer({ kept: 'start' }))
+  const stopped = await h.get('classic.SubagentStop')!($, event, answer({ kept: 'stop' }))
+  await idle()
+
+  expect([started, stopped]).toEqual([{ kept: 'start' }, { kept: 'stop' }])
+  expect(bodies(probe), 'no shell count: a sub-agent snapshot can list a shell that dies with it').toEqual([
+    { kind: 'subagent.start', seq: 1, agentId: 'agent-1' },
+    { kind: 'subagent.stop', seq: 2, agentId: 'agent-1' }
+  ])
+  for (const request of probe.sent) expect(parseTurnSignal(request.body).ok, request.body).toBe(true)
+})
+
+test('a sub-agent event without a usable id sends nothing and takes no seq', async () => {
+  const probe = host()
+  const h = handlers()
+  const $ = probe.value
+  for (const agent_id of [undefined, 7, '', '  ', 'x'.repeat(129), 'a\u0007b', 'agent-é', 'a b', 'a"b']) {
+    await h.get('classic.SubagentStart')!($, { agent_id }, answer())
+    await h.get('classic.SubagentStop')!($, { agent_id }, answer())
+  }
+  await h.get('classic.SubagentStart')!($, { agent_id: 'agent-1' }, answer())
+  await idle()
+
+  expect(bodies(probe), 'a refused body would stop a running Skills sequence').toEqual([{ kind: 'subagent.start', seq: 1, agentId: 'agent-1' }])
 })
 
 test('no prompt or answer text leaves the module', async () => {
