@@ -141,6 +141,7 @@ import {
 import {
   DEFAULT_ROADMAP_LOT_ID,
   allocateLotColor,
+  ROADMAP_LOT_COLOR_COUNT,
   isNamedRoadmapLot,
   lotForRank,
   moveLotMembers,
@@ -1472,12 +1473,28 @@ db.run(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
-db.run(`
-  CREATE TABLE IF NOT EXISTS roadmap_queue_upstream (
-    project_key TEXT PRIMARY KEY,
-    rev INTEGER NOT NULL
-  )
-`);
+// A table keyed by project alone moves to the default lot. The column default
+// serves an older broker on this database: its insert names no lot.
+const queueUpstreamColumns = db.query("PRAGMA table_info(roadmap_queue_upstream)").all() as { name: string }[];
+const queueUpstreamHasNoLot = queueUpstreamColumns.length > 0 && !queueUpstreamColumns.some((c) => c.name === "lot_id");
+db.transaction(() => {
+  if (queueUpstreamHasNoLot) db.run("ALTER TABLE roadmap_queue_upstream RENAME TO roadmap_queue_upstream_by_project");
+  db.run(`
+    CREATE TABLE IF NOT EXISTS roadmap_queue_upstream (
+      project_key TEXT NOT NULL,
+      lot_id TEXT NOT NULL DEFAULT 'default',
+      rev INTEGER NOT NULL,
+      PRIMARY KEY (project_key, lot_id)
+    )
+  `);
+  if (queueUpstreamHasNoLot) {
+    db.run(
+      `INSERT INTO roadmap_queue_upstream (project_key, rev)
+       SELECT project_key, rev FROM roadmap_queue_upstream_by_project`
+    );
+    db.run("DROP TABLE roadmap_queue_upstream_by_project");
+  }
+})();
 
 const BUMP_QUEUE_REV = (projectKey: string, lotId: string, when = "1"): string =>
   `INSERT INTO roadmap_queue_state (project_key, lot_id, rev)
@@ -10286,6 +10303,37 @@ function keepLocalAgainstSweep(remote: RoadmapSyncRow): void {
  */
 const pushedQueueEcho = new Map<string, number | null>();
 
+/** The rank the upstream holds for a card: `queue` in the default lot, `lot_rank` in a named one. */
+function upstreamRank(row: RoadmapSyncRow): number | null {
+  return isNamedRoadmapLot(row.lot_id) ? row.lot_rank ?? null : row.queue;
+}
+
+/**
+ * Why the first row with a missing or unreadable lot field refuses the whole
+ * answer it came in, or null: read as null, it would move a card out of its lot
+ * or drop its rank for good. An upstream that announces the lot protocol writes
+ * `lot_rank` on every named-lot card, null included; without that announcement
+ * an absent field passes.
+ */
+function lotFieldsRefusal(rows: readonly RoadmapSyncRow[], lotsAnnounced: boolean): string | null {
+  for (const row of rows) {
+    const lot: unknown = row.lot_id ?? null;
+    const rank: unknown = row.lot_rank ?? null;
+    const fault =
+      lot !== null && (typeof lot !== "string" || !ROADMAP_ID_REGEX.test(lot))
+        ? "unreadable lot_id"
+        : rank !== null && !isValidQueueRank(rank)
+          ? "unreadable lot_rank"
+          : lotsAnnounced && isNamedRoadmapLot(row.lot_id) && !("lot_rank" in row)
+            ? "missing lot_rank"
+            : null;
+    if (fault !== null) {
+      return `${fault} for card ${JSON.stringify(row.id).slice(0, 100)}, nothing of this answer is applied`;
+    }
+  }
+  return null;
+}
+
 /**
  * Applies one pulled row. Returns true when a local queue position was
  * replaced, so the pass can report how much local ordering the upstream order
@@ -10327,7 +10375,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     const lockedRemotely = remote.locked && remote.locked_by !== null;
     const insertFrozen = queueFrozenProjects.has(remote.project_key);
     if (insertFrozen) withholdPulledRank(remote.project_key, remote.id, remote.queue);
-    const insertRank = insertFrozen ? null : remote.queue;
+    const insertRank = insertFrozen && !isNamedRoadmapLot(remoteLot) ? null : upstreamRank(remote);
     db.run(
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
@@ -10353,7 +10401,8 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     return false;
   }
 
-  const queueReplaced = local.queue !== null && local.queue !== remote.queue;
+  const remoteRank = upstreamRank(remote);
+  const queueReplaced = local.queue !== null && local.queue !== remoteRank;
   const syncBaseContent = local.sync_base === null ? null : parseSyncContent(local.sync_base);
   const dirty =
     local.sync_dirty === 1 &&
@@ -10361,16 +10410,23 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const echoedQueue = pushedQueueEcho.get(remote.id);
   pushedQueueEcho.delete(remote.id);
   const queuePending =
-    echoedQueue !== undefined && echoedQueue === remote.queue && local.sync_base_rev === remote.content_rev;
+    echoedQueue !== undefined && echoedQueue === remoteRank && local.sync_base_rev === remote.content_rev;
   const queueFrozen = queueFrozenProjects.has(local.project_key);
   // An upstream that predates lots ranks this card in its single queue.
   const foreignRank = remote.lot_id === undefined && isNamedRoadmapLot(local.lot_id);
   if (foreignRank && remote.queue !== local.queue) warnForeignRank(remote.id);
   if (queueFrozen && !foreignRank) withholdPulledRank(local.project_key, remote.id, remote.queue);
   // A named lot's ranks never travel by this replica's queue mutations, so a
-  // lot-aware upstream's wins there even while the default queue is frozen.
-  const pulledQueue =
-    foreignRank || ((queuePending || queueFrozen) && !isNamedRoadmapLot(remoteLot)) ? local.queue : remote.queue;
+  // lot-aware upstream's wins there even while the default queue is frozen. A
+  // card that left a named lot holds no rank of the default queue to keep.
+  const keepsLocalRank = (queuePending || queueFrozen) && !isNamedRoadmapLot(remoteLot);
+  const pulledQueue = foreignRank
+    ? local.queue
+    : !keepsLocalRank
+      ? remoteRank
+      : isNamedRoadmapLot(local.lot_id)
+        ? null
+        : local.queue;
   const pulledLot = lotForRank(remoteLot, pulledQueue);
   // Hoisted: the clean branch below needs it too. heldLocally is a SCOPE
   // predicate (locked/lock_scope on this row), never a liveness check: a
@@ -10498,40 +10554,161 @@ function refuseQueueRevs(why: string): void {
   log.warn(`roadmap sync: pull queue_revs refused (${why}), upstream queue revisions left as they were`);
 }
 
+/** The revisions a pull page carries: by project and lot from an upstream that takes lots, by project otherwise. */
+function announcedQueueRevs(page: RoadmapSyncPullResponse): unknown {
+  return page.lot_protocol === 2 ? page.lot_queue_revs : page.queue_revs;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
  * Replaces the stored upstream queue revisions by the ones a FINAL pull page
  * carried: an earlier page would announce a revision whose ranks this replica
- * has not received yet. A project the upstream does not list has revision 0,
+ * has not received yet. A lot the upstream does not list has revision 0,
  * which `upstream_queue_revs_adopted` makes distinguishable from "never
  * adopted". Refused whole, not trimmed, on any malformed entry: a partial
- * table would read a missing project as 0.
+ * table would read a missing lot as 0.
  */
-function adoptUpstreamQueueRevs(queueRevs: unknown): void {
-  if (typeof queueRevs !== "object" || queueRevs === null || Array.isArray(queueRevs)) {
+function adoptUpstreamQueueRevs(queueRevs: unknown, byLot: boolean): void {
+  if (!isJsonObject(queueRevs)) {
     refuseQueueRevs("it is not an object");
     return;
   }
-  const entries = Object.entries(queueRevs);
-  for (const [projectKey, rev] of entries) {
+  const adopted: [string, string, number][] = [];
+  for (const [projectKey, value] of Object.entries(queueRevs)) {
     const keyCheck = validateProjectKey(projectKey);
     const keyRefusal = keyCheck.ok ? projectKeyCaseRefusal(projectKey) : `project_key is invalid (${keyCheck.reason})`;
-    if (keyRefusal || typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0) {
-      refuseQueueRevs(
-        `entry ${JSON.stringify(projectKey).slice(0, 200)}: ${keyRefusal ?? "the revision is not a non-negative integer"}`
-      );
+    const entry = `entry ${JSON.stringify(projectKey).slice(0, 200)}`;
+    const lots = byLot ? value : { [DEFAULT_ROADMAP_LOT_ID]: value };
+    if (keyRefusal || !isJsonObject(lots)) {
+      refuseQueueRevs(`${entry}: ${keyRefusal ?? "its revisions by lot are not an object"}`);
       return;
+    }
+    for (const [lotId, rev] of Object.entries(lots)) {
+      if (!ROADMAP_ID_REGEX.test(lotId) || typeof rev !== "number" || !Number.isSafeInteger(rev) || rev < 0) {
+        refuseQueueRevs(`${entry}: the revision is not a non-negative integer under a lot id`);
+        return;
+      }
+      adopted.push([projectKey, lotId, rev]);
     }
   }
   db.run("DELETE FROM roadmap_queue_upstream");
-  for (const [projectKey, rev] of entries) {
-    db.run("INSERT INTO roadmap_queue_upstream (project_key, rev) VALUES (?, ?)", [projectKey, rev as number]);
+  for (const row of adopted) {
+    db.run("INSERT INTO roadmap_queue_upstream (project_key, lot_id, rev) VALUES (?, ?, ?)", row);
   }
   syncMetaSet("upstream_queue_revs_adopted", "1");
   queueRevsRefusalLogged = false;
   queueRevStaleProjects.clear();
 }
 
-function applyPulledPage(items: RoadmapSyncRow[], nextRev: number, finalQueueRevs?: unknown): void {
+/** One lot of a pull page, rebuilt field by field; null when a field is not what a lot holds. */
+function readUpstreamLot(raw: unknown): RoadmapLot | null {
+  if (!isJsonObject(raw)) return null;
+  const { project_key, id, name, created_by, created_at, closed_at, color } = raw;
+  if (typeof project_key !== "string" || !validateProjectKey(project_key).ok || projectKeyCaseRefusal(project_key)) {
+    return null;
+  }
+  if (typeof id !== "string" || !ROADMAP_ID_REGEX.test(id)) return null;
+  if (typeof name !== "string" || !name || name.length > ROADMAP_LOT_NAME_MAX) return null;
+  if (typeof created_by !== "string" || typeof created_at !== "string") return null;
+  if (closed_at !== null && typeof closed_at !== "string") return null;
+  if (
+    color !== null &&
+    (typeof color !== "number" || !Number.isInteger(color) || color < 0 || color >= ROADMAP_LOT_COLOR_COUNT)
+  ) {
+    return null;
+  }
+  return { project_key, id, name, created_by, created_at, closed_at, color };
+}
+
+/** Said once per run of refused lists, as for the queue revisions. */
+let lotsRefusalLogged = false;
+
+function refuseLots(why: string): void {
+  if (lotsRefusalLogged) return;
+  lotsRefusalLogged = true;
+  log.warn(`roadmap sync: pull lots refused (${why}), the lots stored here are left as they were`);
+}
+
+/** Lots kept here that the upstream does not list, already named in the log. */
+const reportedLocalLots = new Set<string>();
+
+/**
+ * Adds or updates the upstream's lots, the upstream winning on a lot both hold.
+ * A lot it does not list stays: this database wrote it before being a replica.
+ * Refused whole on any malformed entry.
+ */
+function adoptUpstreamLots(lots: unknown): void {
+  if (!Array.isArray(lots)) {
+    refuseLots("it is not an array");
+    return;
+  }
+  const adopted = new Map<string, RoadmapLot>();
+  for (const raw of lots) {
+    const lot = readUpstreamLot(raw);
+    const key = lot && JSON.stringify([lot.project_key, lot.id]);
+    if (!lot || !key || adopted.has(key)) {
+      refuseLots(`entry ${JSON.stringify(raw).slice(0, 200)} is ${lot ? "listed twice" : "not a lot"}`);
+      return;
+    }
+    adopted.set(key, lot);
+  }
+  for (const lot of adopted.values()) {
+    db.run(
+      `INSERT INTO roadmap_lots (project_key, id, name, created_by, created_at, closed_at, color)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project_key, id) DO UPDATE SET name = excluded.name, created_by = excluded.created_by,
+           created_at = excluded.created_at, closed_at = excluded.closed_at, color = excluded.color`,
+      [lot.project_key, lot.id, lot.name, lot.created_by, lot.created_at, lot.closed_at, lot.color]
+    );
+  }
+  const held = db.query("SELECT project_key, id FROM roadmap_lots").all() as Pick<RoadmapLot, "project_key" | "id">[];
+  for (const { project_key, id } of held) {
+    const key = JSON.stringify([project_key, id]);
+    if (adopted.has(key) || reportedLocalLots.has(key)) continue;
+    reportedLocalLots.add(key);
+    log.warn(`roadmap sync: lot ${id} of ${project_key} is not listed by the upstream, it is kept here`);
+  }
+  lotsRefusalLogged = false;
+}
+
+/** What a final pull page says about the upstream beside its rows. Run in the transaction that moves the cursor. */
+function adoptUpstreamAnnouncement(page: RoadmapSyncPullResponse): void {
+  const takesLots = page.lot_protocol === 2;
+  const queueRevs = announcedQueueRevs(page);
+  if (queueRevs !== undefined) adoptUpstreamQueueRevs(queueRevs, takesLots);
+  if (takesLots && page.lots !== undefined) adoptUpstreamLots(page.lots);
+  // A row pulled before the upstream sent named ranks carries none here.
+  if (takesLots && syncMetaGet("upstream_lot_protocol") !== "2") restartUpstreamPull("the upstream takes lots");
+  syncMetaSet("upstream_lot_protocol", takesLots ? "2" : "1");
+}
+
+/** `upstream_lot_cursor` is the pull cursor as a broker that reads lot ranks last left it. */
+function setUpstreamCursor(value: string): void {
+  syncMetaSet("upstream_cursor", value);
+  syncMetaSet("upstream_lot_cursor", value);
+}
+
+/** An unchanged row is served again only to a pull that starts over. */
+function restartUpstreamPull(why: string): void {
+  setUpstreamCursor("0");
+  log.info(`roadmap sync: ${why}, pulling every card again`);
+}
+
+/** Said once per run of refused pull pages and re-armed by the next readable one. */
+let pageRefusalLogged = false;
+
+function applyPulledPage(page: RoadmapSyncPullResponse, nextRev: number, isFinal: boolean): void {
+  const { items } = page;
+  const refusal = lotFieldsRefusal(items, page.lot_protocol === 2);
+  if (refusal !== null) {
+    if (!pageRefusalLogged) log.warn(`roadmap sync: pull page refused, ${refusal}`);
+    pageRefusalLogged = true;
+    throw new Error(refusal);
+  }
+  pageRefusalLogged = false;
   withApplying(() => {
     loadQueueFrozenProjects();
     let queueReplaced = 0;
@@ -10540,8 +10717,8 @@ function applyPulledPage(items: RoadmapSyncRow[], nextRev: number, finalQueueRev
     }
     // The cursor advances in the same transaction as the rows it covers: a
     // crash between the two would otherwise skip a page for good.
-    syncMetaSet("upstream_cursor", String(nextRev));
-    if (finalQueueRevs !== undefined) adoptUpstreamQueueRevs(finalQueueRevs);
+    setUpstreamCursor(String(nextRev));
+    if (isFinal) adoptUpstreamAnnouncement(page);
     if (queueReplaced > 0) {
       syncQueueReplacedTotal += queueReplaced;
       log.info(
@@ -10597,6 +10774,13 @@ function resolveStaleConflicts(): void {
 }
 
 async function syncPullPass(): Promise<void> {
+  // A broker that does not read lot ranks pulled on this database in between.
+  if (
+    syncMetaGet("upstream_lot_protocol") === "2" &&
+    syncMetaGet("upstream_cursor") !== syncMetaGet("upstream_lot_cursor")
+  ) {
+    restartUpstreamPull("another broker moved the pull cursor");
+  }
   // Bounded so one pass cannot loop forever on a broker whose cursor never
   // advances; the next pass simply continues where this one stopped.
   for (let page = 0; page < 100; page++) {
@@ -10614,9 +10798,9 @@ async function syncPullPass(): Promise<void> {
     }
     const nextRev = typeof res.body.next_rev === "number" ? res.body.next_rev : since;
     const finalPage = res.body.items.length < SYNC_PULL_LIMIT_MAX;
-    applyPulledPage(res.body.items, nextRev, finalPage ? res.body.queue_revs : undefined);
+    applyPulledPage(res.body, nextRev, finalPage);
     if (finalPage) {
-      if (res.body.queue_revs === undefined) refuseQueueRevs("it is absent: the upstream predates queue-delta");
+      if (announcedQueueRevs(res.body) === undefined) refuseQueueRevs("it is absent: the upstream predates queue-delta");
       return;
     }
   }
@@ -10971,11 +11155,13 @@ function restoreRanks(ranks: WithheldRanks, skip: ReadonlySet<string>): number {
  * current revision (on a replay it is the one after the FIRST attempt).
  */
 function applyQueueDeltaAck(entry: QueueOutboxRow, response: RoadmapQueueDeltaResponse): void {
+  const refusal = lotFieldsRefusal(response.items, syncMetaGet("upstream_lot_protocol") === "2");
+  if (refusal !== null) throw new QueueDeliveryError(`queue-delta for mutation ${entry.mutation_id}: ${refusal}`, 200);
   withApplying(() => {
     const moved = new Set<string>();
     const upstreamAfter = parseWithheld(entry.withheld);
     for (const item of response.items) {
-      const rank = item.queue;
+      const rank = upstreamRank(item);
       if (typeof item.id !== "string" || (rank !== null && !isValidQueueRank(rank))) {
         log.warn(`roadmap sync: queue-delta ${entry.mutation_id} answered a card with an unreadable rank, skipped`);
         continue;
@@ -10987,9 +11173,12 @@ function applyQueueDeltaAck(entry: QueueOutboxRow, response: RoadmapQueueDeltaRe
         continue;
       }
       moved.add(item.id);
-      upstreamAfter[item.id] = rank;
-      if (row.queue !== rank) {
-        db.run("UPDATE roadmap_items SET queue = ?, lot_id = ? WHERE id = ?", [rank, lotForRank(row.lot_id, rank), item.id]);
+      const upstreamLot = item.lot_id === undefined ? row.lot_id : storedNullableText(item.lot_id);
+      // The kept ranks are the default queue's, which holds no named lot's card.
+      upstreamAfter[item.id] = isNamedRoadmapLot(upstreamLot) ? null : rank;
+      const lot = lotForRank(upstreamLot, rank);
+      if (row.queue !== rank || row.lot_id !== lot) {
+        db.run("UPDATE roadmap_items SET queue = ?, lot_id = ? WHERE id = ?", [rank, lot, item.id]);
       }
     }
     restoreRanks(parseWithheld(entry.withheld), moved);
@@ -11040,11 +11229,11 @@ function applyQueueDeltaRefusal(
   );
 }
 
-/** Revision to quote for a project: 0 for one the upstream does not list, null before any pull page adopted a revision. */
+/** Revision to quote for a project's default lot: 0 for one the upstream does not list, null before any pull page adopted a revision. */
 function adoptedUpstreamQueueRev(projectKey: string): number | null {
-  const row = db.query("SELECT rev FROM roadmap_queue_upstream WHERE project_key = ?").get(projectKey) as
-    | { rev: number }
-    | null;
+  const row = db
+    .query("SELECT rev FROM roadmap_queue_upstream WHERE project_key = ? AND lot_id = ?")
+    .get(projectKey, DEFAULT_ROADMAP_LOT_ID) as { rev: number } | null;
   if (row) return row.rev;
   return syncMetaGet("upstream_queue_revs_adopted") === "1" ? 0 : null;
 }

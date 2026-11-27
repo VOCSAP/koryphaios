@@ -164,8 +164,8 @@ function insertQueueOutbox(db: Database, projectKey: string, mutationId: string)
   );
 }
 
-function insertQueueUpstream(db: Database, projectKey: string, rev: number): void {
-  db.run("INSERT INTO roadmap_queue_upstream (project_key, rev) VALUES (?, ?)", [projectKey, rev]);
+function insertQueueUpstream(db: Database, projectKey: string, rev: number, lotId = "default"): void {
+  db.run("INSERT INTO roadmap_queue_upstream (project_key, lot_id, rev) VALUES (?, ?, ?)", [projectKey, lotId, rev]);
 }
 
 function insertDispatchRequest(db: Database, id: string, projectKey: string): void {
@@ -393,6 +393,7 @@ test("a journal entry and an adopted upstream revision move to the lowercase key
   const db = seededDb();
   insertQueueOutbox(db, "github.com/VOCSAP/koryphaios", "mutation-0001");
   insertQueueUpstream(db, "github.com/VOCSAP/koryphaios", 7);
+  insertQueueUpstream(db, "github.com/VOCSAP/koryphaios", 3, "lot-a");
   const outboxBefore = db
     .query("SELECT seq, mutation_id, ops, expected_queue_rev, sent_at, withheld, created_at FROM roadmap_queue_outbox")
     .get();
@@ -407,8 +408,9 @@ test("a journal entry and an adopted upstream revision move to the lowercase key
       .query("SELECT seq, mutation_id, ops, expected_queue_rev, sent_at, withheld, created_at FROM roadmap_queue_outbox")
       .get()
   ).toEqual(outboxBefore);
-  expect(db.query("SELECT project_key, rev FROM roadmap_queue_upstream").all()).toEqual([
-    { project_key: "github.com/vocsap/koryphaios", rev: 7 },
+  expect(db.query("SELECT project_key, lot_id, rev FROM roadmap_queue_upstream ORDER BY lot_id").all()).toEqual([
+    { project_key: "github.com/vocsap/koryphaios", lot_id: "default", rev: 7 },
+    { project_key: "github.com/vocsap/koryphaios", lot_id: "lot-a", rev: 3 },
   ]);
 });
 

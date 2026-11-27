@@ -396,6 +396,7 @@ test("a database written before lots restarts with its queue in the default lot,
         cards: db.query(untouched).all(),
         lots: db.query("SELECT title, lot_id FROM roadmap_items ORDER BY title").all(),
         state: db.query("SELECT * FROM roadmap_queue_state").all(),
+        upstream: db.query("SELECT * FROM roadmap_queue_upstream").all(),
       };
     } finally {
       db.close();
@@ -421,6 +422,9 @@ test("a database written before lots restarts with its queue in the default lot,
     db.run("DROP TABLE roadmap_queue_state");
     db.run("CREATE TABLE roadmap_queue_state (project_key TEXT PRIMARY KEY, rev INTEGER NOT NULL)");
     db.run("INSERT INTO roadmap_queue_state (project_key, rev) VALUES (?, 41)", [PK]);
+    db.run("DROP TABLE roadmap_queue_upstream");
+    db.run("CREATE TABLE roadmap_queue_upstream (project_key TEXT PRIMARY KEY, rev INTEGER NOT NULL)");
+    db.run("INSERT INTO roadmap_queue_upstream (project_key, rev) VALUES (?, 17)", [PK]);
     const before = db.query(untouched).all();
     db.close();
 
@@ -431,10 +435,21 @@ test("a database written before lots restarts with its queue in the default lot,
         { title: "b unqueued", lot_id: null },
       ],
       state: [{ project_key: PK, lot_id: "default", rev: 41 }],
+      upstream: [{ project_key: PK, lot_id: "default", rev: 17 }],
     };
     for (const run of ["first restart", "second restart"]) {
       await stopBroker(await boot());
       expect(snapshot(), run).toEqual(migrated);
+    }
+    const older = openBrokerDb(dbPath);
+    try {
+      older.run("INSERT INTO roadmap_queue_upstream (project_key, rev) VALUES ('github.com/vocsap/other', 2)");
+      expect(
+        older.query("SELECT lot_id FROM roadmap_queue_upstream WHERE project_key = 'github.com/vocsap/other'").get(),
+        "an older broker's insert names no lot"
+      ).toEqual({ lot_id: "default" });
+    } finally {
+      older.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

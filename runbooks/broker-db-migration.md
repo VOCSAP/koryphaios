@@ -367,6 +367,21 @@ pris avant migration sous l'ancienne forme.
 Rejouer le dry-run doit desormais montrer un compteur de cible a zero partout:
 le script est idempotent.
 
+### Replique: les revisions amont par lot
+
+Au demarrage, un broker replique re-cle seul `roadmap_queue_upstream` sur
+`(project_key, lot_id)`; les lignes existantes passent dans le lot `default` et
+le journal `roadmap_queue_outbox` est conserve. A la premiere page de pull d'un
+amont qui annonce les lots, la replique remet son curseur a zero et tire une
+fois toutes les cartes. Un broker plus ancien relance sur la meme base ecrit
+encore ses revisions (le lot par defaut vaut `default`). S'il a tire des pages,
+le broker recent le voit au curseur deplace a son retour et retire toutes les
+cartes. Un amont qui sert un `lot_id` ou un `lot_rank` illisible met la
+replique hors ligne, curseur inchange: la cause est dans `last_error`. Les lots
+de l'amont sont ajoutes ou mis a jour. Un lot cree sur cette base avant qu'elle
+soit une replique est garde et nomme dans le journal; ses cartes, elles, perdent
+leur lot au premier echange, l'amont ne le connaissant pas.
+
 ---
 
 ## 7. Sauvegarder la roadmap avant, c'est deux secondes
