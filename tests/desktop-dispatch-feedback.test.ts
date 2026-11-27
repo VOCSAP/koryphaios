@@ -35,6 +35,16 @@ import * as roadmapAppend from "../shared/roadmap-append.ts";
 
 const LOCALES = join(import.meta.dir, "..", "desktop", "locales");
 const member = (id: string) => ({ id, title: id, kind: "feature" });
+const LOT_REFUSALS = [
+  "lot_execution_held",
+  "lot_execution_interrupted",
+  "lot_execution_not_started",
+  "lot_execution_unproven",
+  "lot_execution_grantee",
+  "lot_execution_controller",
+  "lot_execution_stale",
+  "lot_execution_replica",
+];
 
 describe("selection", () => {
   const dispatchCases: Array<[string, DispatchResult, string, string, Record<string, number>?]> = [
@@ -80,6 +90,9 @@ describe("selection", () => {
     ],
     ["write-failed", { sent: false, delivery: "not-sent", reason: "write-failed" }, "toast.orderNotSent", "info"],
     ["cancelled-before-execution", { sent: false, delivery: "not-sent", reason: "cancelled-before-execution" }, "toast.orderNotSent", "info"],
+    ...LOT_REFUSALS.map(
+      (reason): [string, DispatchResult, string, string] => [reason, { sent: false, delivery: "not-sent", reason }, "toast.orderNotSent", "info"]
+    ),
     ["error", { sent: false, reason: "error" }, "toast.dispatchFailed", "info"],
     ["empty-queue", { sent: false, reason: "empty-queue" }, "toast.dispatchFailed", "info"],
     ["no-lead", { sent: false, reason: "no-lead" }, "toast.dispatchNoLead", "info"],
@@ -98,6 +111,9 @@ describe("selection", () => {
     ["pre-atomic, card closed after the announce", { sent: true, writeSkipped: true }, "toast.assignSkipped", "info"],
     ["write-failed", { sent: false, delivery: "not-sent", reason: "write-failed" }, "toast.orderNotSent", "info"],
     ["cancelled-before-execution", { sent: false, delivery: "not-sent", reason: "cancelled-before-execution" }, "toast.orderNotSent", "info"],
+    ...LOT_REFUSALS.map(
+      (reason): [string, AssignResult, string, string] => [reason, { sent: false, delivery: "not-sent", reason }, "toast.orderNotSent", "info"]
+    ),
     ["error", { sent: false, reason: "error" }, "toast.assignFailed", "info"],
   ];
   for (const [name, result, key, level] of assignCases) {

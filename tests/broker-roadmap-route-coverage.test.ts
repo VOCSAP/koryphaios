@@ -144,6 +144,10 @@ const OPERATOR_GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, 
   // The author is resolved before the intent is read, so an empty intent still
   // reaches the operator-privilege gate.
   "/roadmap/dispatch-atomic": (c) => ({ by: c.victimPeerId, action: "resolve", intent: {} }),
+  "/roadmap/lot/execution/state": (c) => ({ project_key: PK, by: c.victimPeerId, lot_id: "default" }),
+  "/roadmap/lot/execution/resume": (c) => ({ project_key: PK, by: c.victimPeerId, lot_id: "x" }),
+  "/roadmap/lot/execution/close": (c) => ({ project_key: PK, by: c.victimPeerId, lot_id: "x" }),
+  "/roadmap/lot/execution/remove-send": (c) => ({ project_key: PK, by: c.victimPeerId, lot_id: "default" }),
 };
 
 interface ProbeCtx {
@@ -184,7 +188,11 @@ const EXPECTED_ROUTES = [
   "/roadmap/lock-park",
   "/roadmap/lock-release",
   "/roadmap/lot/create",
+  "/roadmap/lot/execution/close",
   "/roadmap/lot/execution/grant",
+  "/roadmap/lot/execution/remove-send",
+  "/roadmap/lot/execution/resume",
+  "/roadmap/lot/execution/state",
   "/roadmap/lot/list",
   "/roadmap/lot/move",
   "/roadmap/reorder",
@@ -503,6 +511,11 @@ const READ_ONLY_INACTIVE_HANDLERS = new Set([
   "handleRoadmapLotCreate",
   // Grant writes the participant table, never a card.
   "handleRoadmapLotGrant",
+  // The execution routes write the execution and send tables, never a card.
+  "handleRoadmapLotExecutionClose",
+  "handleRoadmapLotExecutionRemoveSend",
+  "handleRoadmapLotExecutionResume",
+  "handleRoadmapLotExecutionState",
   "handleRoadmapLotList",
   "handleRoadmapSyncPull",
   "handleRoadmapSyncStatus",
@@ -536,6 +549,10 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
   "handleRoadmapLotCreate",
+  "handleRoadmapLotExecutionClose",
+  "handleRoadmapLotExecutionRemoveSend",
+  "handleRoadmapLotExecutionResume",
+  "handleRoadmapLotExecutionState",
   "handleRoadmapLotGrant",
   "handleRoadmapLotList",
   "handleRoadmapLotMove",
@@ -711,6 +728,7 @@ const LOT_GUARDED_HANDLERS: Record<string, string> = {
   handleRoadmapQueueDelta: "applyLotQueueMutation(",
   handleRoadmapSyncPush: "beginOrContinueExecution(",
   handleRoadmapSyncLock: "beginOrContinueExecution(",
+  handleRoadmapDispatchAtomic: "atomicDispatchDeps(",
 };
 
 /** The functions a guarded handler goes through to reach the door. */
@@ -718,7 +736,6 @@ const LOT_DOOR_RELAYS = ["lotRefusesLockedCards", "judgeLotQueueMutation"];
 
 /** Card writers outside the door, each with why it cannot act on a held lot. */
 const LOT_UNGUARDED_HANDLERS: Record<string, string> = {
-  handleRoadmapDispatchAtomic: "writes through handleRoadmapUpsert and refuses a named lot's card",
   handleRoadmapReorder: "refuses a named lot's card",
   handleRoadmapContextAppend: "text only",
   handleRoadmapContextDocumentDeport: "text only",
@@ -739,6 +756,9 @@ test("every card writer passes the lot execution door or says why not", () => {
     expect([name, stripComments(extractFunctionBody(source, name)).includes("beginOrContinueExecution(")]).toEqual([name, true]);
   }
   expect(stripComments(extractFunctionBody(source, "applyLotQueueMutation"))).toContain("judgeLotQueueMutation(");
+  // A dispatch starts executions, which the card door cannot: it is judged on its own path.
+  expect(stripComments(extractFunctionBody(source, "atomicDispatchDeps"))).toContain("admitNamedLotSend(");
+  expect(stripComments(extractFunctionBody(source, "admitNamedLotSend"))).toContain("judgeNamedLot(");
 });
 
 /** The SQL literal of every db.run/query/prepare call that names both the card table and the rank column. */
@@ -761,7 +781,7 @@ const RANK_STATEMENTS_WITHOUT_LOT: Record<string, string> = {
 };
 
 // A dropped extraction would hide a statement from the rule below.
-const EXPECTED_RANK_STATEMENTS = 32;
+const EXPECTED_RANK_STATEMENTS = 33;
 
 test("the rank statement extractor bites: it finds both quote styles and skips other tables", () => {
   const fixture = `

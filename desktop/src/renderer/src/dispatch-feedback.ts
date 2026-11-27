@@ -13,6 +13,8 @@ const CHANGED_REASONS = new Set(['card-changed', 'queue-changed', 'ineligible'])
 // The broker refused before writing anything; a manual dispatch leaves no journal line for these.
 const REFUSED_REASONS = new Set(['write-failed', 'cancelled-before-execution'])
 
+const isRefused = (reason: string): boolean => REFUSED_REASONS.has(reason) || reason.startsWith('lot_execution_')
+
 const isUnconfirmed = (r: { delivery?: string; reason?: string }): boolean =>
   r.delivery === 'unknown' || r.reason === 'unconfirmed'
 
@@ -30,7 +32,7 @@ export function dispatchFeedback(r: DispatchResult): ToastFeedback {
   }
   if (r.reason === 'no-lead') return { key: 'toast.dispatchNoLead', level: 'info' }
   if (r.reason && CHANGED_REASONS.has(r.reason)) return { key: 'toast.orderCardChanged', level: 'info' }
-  if (r.reason && REFUSED_REASONS.has(r.reason)) return { key: 'toast.orderNotSent', level: 'info' }
+  if (r.reason && isRefused(r.reason)) return { key: 'toast.orderNotSent', level: 'info' }
   return { key: 'toast.dispatchFailed', level: 'info' }
 }
 
@@ -42,7 +44,7 @@ export function assignFeedback(r: AssignResult): ToastFeedback {
     return { key: 'toast.assignSent', level: 'success' }
   }
   if (r.reason && CHANGED_REASONS.has(r.reason)) return { key: 'toast.orderCardChanged', level: 'info' }
-  if (r.reason && REFUSED_REASONS.has(r.reason)) return { key: 'toast.orderNotSent', level: 'info' }
+  if (r.reason && isRefused(r.reason)) return { key: 'toast.orderNotSent', level: 'info' }
   return { key: 'toast.assignFailed', level: 'info' }
 }
 

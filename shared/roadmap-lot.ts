@@ -75,6 +75,102 @@ export interface RoadmapLotGrantResponse {
   peer_id: string;
 }
 
+/** The execution routes take an operator-signed body; `lot_id` may name the default queue where noted. */
+export interface RoadmapLotExecutionStateRequest extends RoadmapLotAuthorFields {
+  project_key: string;
+  /** The default queue is accepted: it has sends and no execution. */
+  lot_id: string;
+}
+
+/** What an operator reads of an execution: no run, no instance digest. */
+export interface RoadmapLotExecutionView {
+  epoch: number;
+  state: "running" | "interrupted";
+  group_id: string;
+  controller_peer_id: string;
+  started_at: string;
+  interrupted_at: string | null;
+  interrupted_reason: string | null;
+  /** The signing operator holds it. */
+  own: boolean;
+}
+
+/** One send still waited on: its card is neither closed, sent again nor set aside. */
+export interface RoadmapLotOpenSend {
+  card_id: string;
+  /** 0 on the default queue. */
+  epoch: number;
+  mode: string;
+  target_peer_id: string;
+  sent_at: string;
+  claimed_at: string | null;
+  /** The signing operator sent it. */
+  own: boolean;
+}
+
+export interface RoadmapLotQueuedCard {
+  card_id: string;
+  queue: number;
+  content_rev: number;
+  dispatch_state_tag: string;
+}
+
+export interface RoadmapLotExecutionStateResponse {
+  lot_id: string;
+  /** What a start signs: the lot's last closed epoch, 0 when none. */
+  closed_epoch: number;
+  execution: RoadmapLotExecutionView | null;
+  open_sends: RoadmapLotOpenSend[];
+  queue: RoadmapLotQueuedCard[];
+}
+
+export interface RoadmapLotResumeRequest extends RoadmapLotAuthorFields {
+  project_key: string;
+  lot_id: string;
+  /** The interrupted epoch the operator read. */
+  expected_epoch: number;
+  /** The session of the signing run that takes the lot over. */
+  to_peer_id: string;
+  group_id: string;
+  group_secret_hash: string | null;
+  run_ref: string;
+}
+
+export interface RoadmapLotResumeResponse {
+  lot_id: string;
+  epoch: number;
+}
+
+export interface RoadmapLotCloseRequest extends RoadmapLotAuthorFields {
+  project_key: string;
+  lot_id: string;
+  expected_epoch: number;
+  /** Closes although sends are still open, and settles them. */
+  confirm_open_sends?: boolean;
+}
+
+export interface RoadmapLotCloseResponse {
+  lot_id: string;
+  epoch: number;
+  /** Cards whose send was still open. */
+  settled: string[];
+}
+
+export interface RoadmapLotRemoveSendRequest extends RoadmapLotAuthorFields {
+  project_key: string;
+  /** The default queue is accepted: the operator sets aside a send of its own. */
+  lot_id: string;
+  /** 0 on the default queue. */
+  expected_epoch: number;
+  card_id: string;
+}
+
+export interface RoadmapLotRemoveSendResponse {
+  lot_id: string;
+  card_id: string;
+  settled: number;
+}
+
 export interface RoadmapLotMoveRequest extends RoadmapLotAuthorFields, RoadmapLotMove {
   project_key: string;
 }

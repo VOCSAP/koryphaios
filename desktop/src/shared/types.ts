@@ -1250,7 +1250,8 @@ export interface DispatchResult {
   titles?: string[]
   /**
    * Why nothing was sent: 'empty-queue' | 'no-lead' | 'error', or the broker's refusal
-   * ('card-changed' | 'queue-changed' | 'ineligible' | 'write-failed' | 'cancelled-before-execution')
+   * ('card-changed' | 'queue-changed' | 'ineligible' | 'write-failed' | 'cancelled-before-execution'
+   * | a 'lot_execution_*' code for a named lot)
    * when `delivery` is 'not-sent', or 'unconfirmed' when it is 'unknown'.
    */
   reason?: string

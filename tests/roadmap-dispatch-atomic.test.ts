@@ -30,6 +30,7 @@ const PROJECT = "github.com/example/repo";
 const GROUP = "group-one";
 const OPERATOR = "operator-a";
 const START = 1_800_000_000_000;
+const LOT = "lot-aaaa-bbbb-0001";
 
 const isPeerId = (v: string): boolean => /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/.test(v);
 
@@ -133,6 +134,20 @@ describe("operation id and digest", () => {
     for (const patch of moved) expect(atomicDispatchDigest(intent(patch))).not.toBe(base);
   });
 
+  test("digest moves with the lot and its epoch, and an intent naming no lot keeps the digest it had", () => {
+    const digests = [
+      intent(),
+      intent({ lot: { lot_id: LOT, epoch: null, closed_epoch: 0 } }),
+      intent({ lot: { lot_id: LOT, epoch: null, closed_epoch: 1 } }),
+      intent({ lot: { lot_id: LOT, epoch: 1 } }),
+      intent({ lot: { lot_id: LOT, epoch: 2 } }),
+      intent({ lot: { lot_id: "lot-aaaa-bbbb-0002", epoch: 1 } }),
+    ].map(atomicDispatchDigest);
+    expect(new Set(digests).size).toBe(digests.length);
+    // A stored operation keeps this digest, so a replay across a broker upgrade still matches.
+    expect(digests[0]).toBe("ffccd5ed39374baa7baf2cbb3d2050090686e98f5514db52a2019fd4ff136b87");
+  });
+
   test("digest depends on member order", () => {
     const a = { id: "card-aaaa-0001", expected_content_rev: 1, expected_dispatch_state_tag: TAG_A };
     const b = { id: "card-aaaa-0002", expected_content_rev: 1, expected_dispatch_state_tag: TAG_A };
@@ -147,6 +162,44 @@ describe("validateAtomicDispatchIntent", () => {
   test("accepts a well-formed wave and assign intent", () => {
     expect(ok(intent())).toBe(true);
     expect(ok(intent({ mode: "assign", target_kind: "assignee" }))).toBe(true);
+  });
+
+  test("accepts a lot naming a start or an open epoch, and keeps it", () => {
+    for (const lot of [
+      { lot_id: LOT, epoch: null, closed_epoch: 0 },
+      { lot_id: LOT, epoch: null, closed_epoch: 4 },
+      { lot_id: LOT, epoch: 1 },
+      { lot_id: LOT, epoch: 7 },
+    ] as const) {
+      const checked = validateAtomicDispatchIntent(intent({ lot }), isPeerId);
+      expect(checked.ok && checked.intent.lot).toEqual(lot);
+    }
+  });
+
+  test("refuses a lot that is not a named lot with an epoch", () => {
+    const lots: [string, unknown][] = [
+      ["non-object", "x"],
+      ["null", null],
+      ["default lot", { lot_id: "default", epoch: null, closed_epoch: 0 }],
+      ["empty id", { lot_id: "", epoch: null, closed_epoch: 0 }],
+      ["numeric id", { lot_id: 7, epoch: null, closed_epoch: 0 }],
+      ["missing epoch", { lot_id: LOT }],
+      ["a start naming no closed epoch", { lot_id: LOT, epoch: null }],
+      ["an open epoch naming a closed one", { lot_id: LOT, epoch: 1, closed_epoch: 0 }],
+      ["negative closed epoch", { lot_id: LOT, epoch: null, closed_epoch: -1 }],
+      ["fractional closed epoch", { lot_id: LOT, epoch: null, closed_epoch: 0.5 }],
+      ["unsafe closed epoch", { lot_id: LOT, epoch: null, closed_epoch: 2 ** 60 }],
+      ["string closed epoch", { lot_id: LOT, epoch: null, closed_epoch: "0" }],
+      ["null closed epoch", { lot_id: LOT, epoch: null, closed_epoch: null }],
+      ["extra key", { lot_id: LOT, epoch: 1, force: true }],
+      ["epoch zero", { lot_id: LOT, epoch: 0 }],
+      ["negative epoch", { lot_id: LOT, epoch: -1 }],
+      ["fractional epoch", { lot_id: LOT, epoch: 1.5 }],
+      ["unsafe epoch", { lot_id: LOT, epoch: 2 ** 60 }],
+      ["NaN epoch", { lot_id: LOT, epoch: Number.NaN }],
+      ["string epoch", { lot_id: LOT, epoch: "1" }],
+    ];
+    for (const [name, lot] of lots) expect([name, ok({ ...clone(), lot })]).toEqual([name, false]);
   });
 
   test("refuses every closed-validation violation", () => {
@@ -232,12 +285,17 @@ interface World {
 
 function seed(db: Database): void {
   db.run(`CREATE TABLE cards (id TEXT PRIMARY KEY, project_key TEXT, kind TEXT, status TEXT, inactive INTEGER,
-    deleted_at TEXT, queue INTEGER, content_rev INTEGER, tag TEXT, title TEXT)`);
+    deleted_at TEXT, queue INTEGER, content_rev INTEGER, tag TEXT, title TEXT, lot_id TEXT)`);
   db.run(`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, to_token TEXT, group_id TEXT, text TEXT, sent_at TEXT)`);
+  // Stand-ins for what the broker writes through the lot dependencies, so a rollback is observable.
+  db.run("CREATE TABLE sends (card_id TEXT, lot_id TEXT, epoch INTEGER, operation_id TEXT, operator_id TEXT, mode TEXT, target_peer_id TEXT, sent_at TEXT)");
+  db.run("CREATE TABLE executions (lot_id TEXT)");
+  db.run("CREATE TABLE settled (lot_id TEXT)");
   for (const ddl of DISPATCH_OPERATIONS_DDL) db.run(ddl);
-  const add = (id: string, status: string, queue: number | null, extra: Partial<{ kind: string; inactive: number; project: string }> = {}): void => {
-    db.run("INSERT INTO cards VALUES (?, ?, ?, ?, ?, NULL, ?, 4, ?, ?)", [
+  const add = (id: string, status: string, queue: number | null, extra: Partial<{ kind: string; inactive: number; project: string; lot: string }> = {}): void => {
+    db.run("INSERT INTO cards VALUES (?, ?, ?, ?, ?, NULL, ?, 4, ?, ?, ?)", [
       id, extra.project ?? PROJECT, extra.kind ?? "feature", status, extra.inactive ?? 0, queue, `${"c".repeat(60)}${id.slice(-4)}`, `title ${id}`,
+      extra.lot ?? (queue === null ? null : "default"),
     ]);
   };
   add("card-aaaa-0001", "idea", 1);
@@ -247,6 +305,8 @@ function seed(db: Database): void {
   add("card-aaaa-0005", "planned", null, { inactive: 1 });
   add("card-aaaa-0006", "planned", null, { kind: "directive" });
   add("card-aaaa-0007", "planned", null, { project: "github.com/example/other" });
+  add("card-bbbb-0001", "planned", 1, { lot: LOT });
+  add("card-bbbb-0002", "planned", 2, { lot: LOT });
 }
 
 function world(db: Database = new Database(":memory:"), onPush?: AtomicDispatchDeps["push"]): World {
@@ -265,13 +325,13 @@ function world(db: Database = new Database(":memory:"), onPush?: AtomicDispatchD
       if (!r) return null;
       return {
         id: r.id, project_key: r.project_key, kind: r.kind, status: r.status, inactive: r.inactive === 1,
-        deleted_at: r.deleted_at, queue: r.queue, content_rev: r.content_rev, state_tag: r.tag,
+        deleted_at: r.deleted_at, queue: r.queue, lot_id: r.lot_id, content_rev: r.content_rev, state_tag: r.tag,
       } as AtomicDispatchMemberRow;
     },
-    headWaveIds: (project) => {
+    headWaveIds: (project, lotId) => {
       const rows = db
-        .query("SELECT id, queue FROM cards WHERE project_key = ? AND queue IS NOT NULL AND status NOT IN ('done','archived') ORDER BY queue, id")
-        .all(project) as { id: string; queue: number }[];
+        .query("SELECT id, queue FROM cards WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done','archived') ORDER BY queue, id")
+        .all(project, lotId) as { id: string; queue: number }[];
       const head = rows[0]?.queue;
       return rows.filter((r) => r.queue === head).map((r) => r.id);
     },
@@ -284,6 +344,16 @@ function world(db: Database = new Database(":memory:"), onPush?: AtomicDispatchD
     insertMessage: (token, group, text, at) => Number(db.run("INSERT INTO messages (to_token, group_id, text, sent_at) VALUES (?, ?, ?, ?)", [token, group, text, at]).lastInsertRowid),
     push: onPush ?? ((frame) => { pushes.push(frame); }),
     warn: (message) => { warns.push(message); },
+    settleLot: (_project, lotId) => { db.run("INSERT INTO settled VALUES (?)", [lotId]); },
+    admitLotSend: (i) => {
+      db.run("INSERT INTO executions VALUES (?)", [i.lot!.lot_id]);
+      return { epoch: i.lot!.epoch ?? 1 };
+    },
+    recordSends: (sends) => {
+      for (const s of sends) {
+        db.run("INSERT INTO sends VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [s.card_id, s.lot_id, s.epoch, s.operation_id, s.operator_id, s.mode, s.target_peer_id, s.sent_at]);
+      }
+    },
   };
   return {
     db, deps, clock, pushes, warns,
@@ -431,9 +501,9 @@ describe("runAtomicDispatch: execute", () => {
     const members = w.members(["card-aaaa-0001", "card-aaaa-0002"]);
     // The CAS inside the write loses on the second card only: the tag and revision pre-check passed.
     const realWrite = w.deps.writeMember;
-    w.deps.writeMember = (m, p, rev) => {
+    w.deps.writeMember = (m, p, rev, i) => {
       if (m.id === "card-aaaa-0002") return { ok: false, reason: "card-changed" };
-      return realWrite(m, p, rev);
+      return realWrite(m, p, rev, i);
     };
     const http = run(w, "execute", intent({ operation_id: opId(w.clock.now), members }));
     expect(outcome(http)).toMatchObject({ delivery: "not-sent", reason: "card-changed", card_ids: ["card-aaaa-0002"] });
@@ -468,7 +538,7 @@ describe("runAtomicDispatch: execute", () => {
   test("a directive that joined the head wave since the read refuses the wave as queue-changed", () => {
     const w = world();
     const i = wave(w, ["card-aaaa-0001", "card-aaaa-0002"]);
-    w.db.run("UPDATE cards SET queue = 1 WHERE id = 'card-aaaa-0006'");
+    w.db.run("UPDATE cards SET queue = 1, lot_id = 'default' WHERE id = 'card-aaaa-0006'");
     expect(outcome(run(w, "execute", i))).toMatchObject({ reason: "queue-changed" });
     expect(w.messageCount()).toBe(0);
   });
@@ -480,6 +550,104 @@ describe("runAtomicDispatch: execute", () => {
     i.members[1]!.expected_content_rev = 99;
     expect(outcome(run(w, "execute", i))).toMatchObject({ reason: "card-changed" });
     expect(JSON.stringify(w.cardRows())).toBe(before);
+  });
+});
+
+describe("runAtomicDispatch: lots and the send registry", () => {
+  const count = (w: World, table: "sends" | "executions" | "settled"): number =>
+    (w.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  const lotWave = (w: World, epoch: number | null, ids = ["card-bbbb-0001"], over: Partial<AtomicDispatchIntent> = {}) =>
+    wave(w, ids, { lot: epoch === null ? { lot_id: LOT, epoch, closed_epoch: 0 } : { lot_id: LOT, epoch }, ...over });
+
+  test("a default queue send is recorded per card under epoch 0, and judges no lot", () => {
+    const w = world();
+    const i = wave(w, ["card-aaaa-0001", "card-aaaa-0002"]);
+    expect(outcome(run(w, "execute", i)).delivery).toBe("sent");
+    const row = (card_id: string) => ({
+      card_id, lot_id: "default", epoch: 0, operation_id: i.operation_id, operator_id: OPERATOR, mode: "wave",
+      target_peer_id: "lead-1", sent_at: new Date(START).toISOString(),
+    });
+    expect(w.db.query("SELECT * FROM sends ORDER BY card_id").all()).toEqual([row("card-aaaa-0001"), row("card-aaaa-0002")]);
+    expect([count(w, "executions"), count(w, "settled")]).toEqual([0, 0]);
+  });
+
+  test("a named lot sends its own head wave under the admitted epoch, past the default queue", () => {
+    const w = world();
+    w.deps.admitLotSend = (_intent, token) => ({ epoch: token === "token-lead-1" ? 3 : 99 });
+    expect(outcome(run(w, "execute", lotWave(w, 3))).delivery).toBe("sent");
+    expect(w.db.query("SELECT card_id, lot_id, epoch FROM sends").all()).toEqual([{ card_id: "card-bbbb-0001", lot_id: LOT, epoch: 3 }]);
+    expect(w.db.query("SELECT queue FROM cards WHERE id = 'card-bbbb-0001'").get()).toEqual({ queue: null });
+  });
+
+  test("a lot's wave is its own head rank, and takes no card of another queue", () => {
+    const w = world();
+    expect(outcome(run(w, "execute", lotWave(w, 1, ["card-bbbb-0002"])))).toMatchObject({ reason: "queue-changed" });
+    expect(outcome(run(w, "execute", lotWave(w, 1, ["card-aaaa-0001"])))).toMatchObject({
+      reason: "ineligible", card_ids: ["card-aaaa-0001"],
+    });
+    expect(outcome(run(w, "execute", wave(w, ["card-bbbb-0001"])))).toMatchObject({ reason: "ineligible" });
+    expect([w.messageCount(), count(w, "sends"), count(w, "executions")]).toEqual([0, 0, 0]);
+  });
+
+  test("admission is asked before any write, and its refusal leaves nothing but the recorded outcome", () => {
+    const w = world();
+    const before = JSON.stringify(w.cardRows());
+    const seen: unknown[] = [];
+    w.deps.admitLotSend = () => {
+      seen.push([JSON.stringify(w.cardRows()) === before, w.messageCount(), count(w, "sends")]);
+      return { refusal: "lot_execution_held" };
+    };
+    const i = lotWave(w, 1);
+    const http = run(w, "execute", i);
+    expect(http.status).toBe(409);
+    expect(outcome(http)).toMatchObject({ delivery: "not-sent", reason: "lot_execution_held", card_ids: ["card-bbbb-0001"] });
+    expect(seen).toEqual([[true, 0, 0]]);
+    expect([JSON.stringify(w.cardRows()) === before, w.messageCount(), count(w, "sends"), w.opCount()]).toEqual([true, 0, 0, 1]);
+  });
+
+  test.each([
+    ["the only active session", { target_kind: "sole-active-fallback" as const }],
+    ["an assignee", { mode: "assign" as const, target_kind: "assignee" as const, to_peer_id: "worker-9" }],
+  ])("a start toward %s is refused before it is admitted", (_name, over) => {
+    const w = world();
+    expect(outcome(run(w, "execute", lotWave(w, null, ["card-bbbb-0001"], over)))).toMatchObject({
+      delivery: "not-sent", reason: "lot_execution_controller",
+    });
+    expect([w.messageCount(), count(w, "executions"), count(w, "sends")]).toEqual([0, 0, 0]);
+  });
+
+  test("an assignment on an open execution is left to the admission to judge", () => {
+    const w = world();
+    const over = { mode: "assign" as const, target_kind: "assignee" as const, to_peer_id: "worker-9" };
+    expect(outcome(run(w, "execute", lotWave(w, 2, ["card-bbbb-0001"], over))).delivery).toBe("sent");
+    expect(count(w, "executions")).toBe(1);
+  });
+
+  test("a fault on the message insert undoes what the admission opened and the send rows", () => {
+    const w = world();
+    w.db.run("CREATE TRIGGER inject BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected'); END");
+    expect(outcome(run(w, "execute", lotWave(w, null)))).toMatchObject({ reason: "write-failed" });
+    expect([count(w, "executions"), count(w, "sends"), w.messageCount()]).toEqual([0, 0, 0]);
+    expect(count(w, "settled"), "a due interruption stays recorded when the send fails").toBe(1);
+  });
+
+  test("a send that cannot be recorded is not delivered", () => {
+    const w = world();
+    const before = JSON.stringify(w.cardRows());
+    w.db.run("CREATE TRIGGER inject BEFORE INSERT ON sends BEGIN SELECT RAISE(ABORT, 'injected'); END");
+    expect(outcome(run(w, "execute", lotWave(w, null)))).toMatchObject({ reason: "write-failed" });
+    expect([JSON.stringify(w.cardRows()) === before, w.messageCount(), count(w, "executions")]).toEqual([true, 0, 0]);
+  });
+
+  test("the lot is settled outside the effects, and neither a resolve nor a replay settles or admits", () => {
+    const w = world();
+    w.deps.admitLotSend = () => ({ refusal: "lot_execution_interrupted" });
+    const refused = lotWave(w, 1);
+    run(w, "execute", refused);
+    expect(count(w, "settled")).toBe(1);
+    run(w, "execute", refused);
+    run(w, "resolve", lotWave(w, 1));
+    expect([count(w, "settled"), count(w, "executions")]).toEqual([1, 0]);
   });
 });
 

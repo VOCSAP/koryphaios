@@ -38,6 +38,7 @@ import {
   runAtomicDispatch,
   type AtomicDispatchDeps,
   type AtomicDispatchHttp,
+  type LotSendRecord,
 } from "./shared/roadmap-dispatch-atomic.ts";
 import {
   CONTEXT_DEPOSIT_MAX_BODY_BYTES,
@@ -155,6 +156,14 @@ import {
   type RoadmapLotListResponse,
   type RoadmapLotMoveRequest,
   type RoadmapLotMoveResponse,
+  type RoadmapLotCloseRequest,
+  type RoadmapLotCloseResponse,
+  type RoadmapLotExecutionStateRequest,
+  type RoadmapLotExecutionStateResponse,
+  type RoadmapLotRemoveSendRequest,
+  type RoadmapLotRemoveSendResponse,
+  type RoadmapLotResumeRequest,
+  type RoadmapLotResumeResponse,
 } from "./shared/roadmap-lot.ts";
 import {
   formatLotExecutionRefusal,
@@ -164,7 +173,9 @@ import {
   type LotExecution,
   type LotExecutionAct,
   type LotExecutionPresence,
+  type LotExecutionRefusal,
   type LotExecutionSubject,
+  type LotInstanceSubject,
 } from "./shared/roadmap-execution.ts";
 import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
@@ -259,6 +270,8 @@ import type {
   GroupStatsResponse,
   AnnounceRequest,
   AnnounceResponse,
+  AtomicDispatchIntent,
+  AtomicDispatchRefusal,
   RoadmapArchiveRequest,
   RoadmapArchiveResponse,
   RoadmapDirective,
@@ -1289,6 +1302,22 @@ db.run(`
     instance_ref TEXT NOT NULL,
     granted_at TEXT NOT NULL,
     PRIMARY KEY (project_key, lot_id, epoch, instance_ref)
+  )
+`);
+// Local state, never replicated: one row per card of each atomic send, written
+// in the send's transaction and never purged with the operation registry.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_lot_dispatched (
+    project_key TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    card_id TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    target_peer_id TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (operator_id, operation_id, card_id)
   )
 `);
 
@@ -2750,6 +2779,72 @@ function releaseStaleLocks(): void {
 }
 guardedInterval("releaseStaleLocks", releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
 
+// --- Lot send registry lifecycle ---
+
+migrateAddColumns("roadmap_lot_dispatched", ["claimed_at TEXT", "settled_at TEXT", "settled_as TEXT"]);
+db.run("CREATE INDEX IF NOT EXISTS idx_roadmap_lot_dispatched_lot ON roadmap_lot_dispatched(project_key, lot_id)");
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_lot_dispatched_open ON roadmap_lot_dispatched(card_id) WHERE settled_at IS NULL"
+);
+// A closed card settles its sends for good. A claimed card handed back settles
+// a default queue send always; a named lot's only while its epoch is running and
+// the lock sweep did not do it: past that, the operator decides card by card.
+// Only the write that releases counts: every upsert rewrites status and lock.
+db.run("DROP TRIGGER IF EXISTS roadmap_lot_dispatched_lifecycle");
+db.run(`
+  CREATE TRIGGER roadmap_lot_dispatched_lifecycle AFTER UPDATE OF status, locked ON roadmap_items
+  BEGIN
+    UPDATE roadmap_lot_dispatched SET claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE card_id = NEW.id AND settled_at IS NULL AND claimed_at IS NULL AND NEW.status = 'in_progress';
+    UPDATE roadmap_lot_dispatched
+       SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), settled_as = 'card_closed'
+     WHERE card_id = NEW.id AND settled_at IS NULL AND NEW.status IN ('done', 'archived');
+    UPDATE roadmap_lot_dispatched
+       SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), settled_as = 'abandoned'
+     WHERE card_id = NEW.id AND settled_at IS NULL AND claimed_at IS NOT NULL
+       AND NEW.status IN ('idea', 'planned') AND NEW.locked = 0 AND (OLD.status = 'in_progress' OR OLD.locked = 1)
+       AND (lot_id = '${DEFAULT_ROADMAP_LOT_ID}' OR (NEW.updated_by IS NOT 'lock-sweep' AND EXISTS (
+         SELECT 1 FROM roadmap_lot_executions e
+          WHERE e.project_key = roadmap_lot_dispatched.project_key AND e.lot_id = roadmap_lot_dispatched.lot_id
+            AND e.epoch = roadmap_lot_dispatched.epoch AND e.state = 'running')));
+  END
+`);
+
+/** The sends of one lot still waited on, oldest first. */
+function openLotSends(projectKey: string, lotId: string): LotSendRow[] {
+  return db
+    .query(
+      `SELECT s.* FROM roadmap_lot_dispatched s JOIN roadmap_items i ON i.id = s.card_id
+        WHERE s.project_key = ? AND s.lot_id = ? AND s.settled_at IS NULL AND i.status NOT IN ('done', 'archived')
+        ORDER BY s.sent_at, s.card_id`
+    )
+    .all(projectKey, lotId) as LotSendRow[];
+}
+
+type LotSendRow = LotSendRecord & { claimed_at: string | null };
+
+/** Whether a write would take a card with an open send out of its lot; no lot and the default queue are one. */
+function strandsOpenSend(card: { id: string; lot_id: string | null }, nextLotId: string | null): boolean {
+  if ((card.lot_id ?? DEFAULT_ROADMAP_LOT_ID) === (nextLotId ?? DEFAULT_ROADMAP_LOT_ID)) return false;
+  const open = db
+    .query(
+      `SELECT 1 FROM roadmap_lot_dispatched s JOIN roadmap_items i ON i.id = s.card_id
+        WHERE s.card_id = ? AND s.settled_at IS NULL AND i.status NOT IN ('done', 'archived')`
+    )
+    .get(card.id);
+  return open !== null;
+}
+
+/** The epoch of the lot's latest closed execution, 0 when none: what a start signs. */
+function lastClosedEpoch(projectKey: string, lotId: string): number {
+  const row = db
+    .query(
+      "SELECT COALESCE(MAX(epoch), 0) AS epoch FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state = 'closed'"
+    )
+    .get(projectKey, lotId) as { epoch: number };
+  return row.epoch;
+}
+
 // --- Lot execution guard ---
 
 function hasLiveRunCredential(operatorId: string, runRef: string, groupId: string): boolean {
@@ -2846,6 +2941,14 @@ function lotExecutionSubject(
   };
 }
 
+/** The lot's execution that is not closed, with an interruption already due recorded. */
+function openLotExecution(projectKey: string, lotId: string): LotExecution | null {
+  const open = db
+    .query("SELECT * FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'")
+    .get(projectKey, lotId) as LotExecution | null;
+  return open ? settleLotExecution(open) : null;
+}
+
 /** Judges one act against the lot's execution that is not closed, and traces a refusal. */
 function judgeNamedLot(
   projectKey: string,
@@ -2854,11 +2957,8 @@ function judgeNamedLot(
   act: LotExecutionAct,
   route: string,
   target: string
-): { execution: LotExecution | null } | { error: string; status: number } {
-  const open = db
-    .query("SELECT * FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'")
-    .get(projectKey, lotId) as LotExecution | null;
-  const execution = open ? settleLotExecution(open) : null;
+): { execution: LotExecution | null } | { error: string; status: number; code: LotExecutionRefusal } {
+  const execution = openLotExecution(projectKey, lotId);
   const participants = execution
     ? (db
         .query("SELECT instance_ref FROM roadmap_lot_participants WHERE project_key = ? AND lot_id = ? AND epoch = ?")
@@ -2880,6 +2980,7 @@ function judgeNamedLot(
   return {
     error: formatLotExecutionRefusal(verdict.code, lot?.name ?? lotId, execution?.controller_peer_id ?? null),
     status: lotExecutionRefusalStatus(verdict.code),
+    code: verdict.code,
   };
 }
 
@@ -5408,10 +5509,84 @@ function handleRoadmapDispatchAtomic(
     );
     if (secretError) return { status: secretError.status, body: { error: secretError.error } };
   }
-  return runAtomicDispatch(atomicDispatchDeps(author), author.operator_id, body);
+  return runAtomicDispatch(atomicDispatchDeps(author, body.run_ref), author.operator_id, body);
 }
 
-function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
+/** The proven session behind an active local peer of a group, or null. */
+function attestedSession(groupId: string, peerId: string, token: string): LotInstanceSubject | null {
+  const subject = lotExecutionSubject({ by: peerId, proven: true, instance_token: token, group_id: groupId });
+  return subject.kind === "instance" ? subject : null;
+}
+
+/** Writes the running execution `controller` holds, under the lot's next epoch. */
+function openNextLotExecution(
+  projectKey: string,
+  lotId: string,
+  controller: LotInstanceSubject,
+  peerId: string
+): number {
+  const { next } = db
+    .query("SELECT COALESCE(MAX(epoch), 0) + 1 AS next FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ?")
+    .get(projectKey, lotId) as { next: number };
+  db.run(
+    `INSERT INTO roadmap_lot_executions
+       (project_key, lot_id, epoch, state, operator_id, group_id, run_ref, controller_ref, controller_peer_id, started_at)
+     VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)`,
+    [
+      projectKey,
+      lotId,
+      next,
+      controller.operator_id,
+      controller.group_id,
+      controller.run_ref,
+      controller.instance_ref,
+      peerId,
+      new Date().toISOString(),
+    ]
+  );
+  log.info(`lot execution held by '${peerId}'`, { lot_id: lotId, epoch: next });
+  return next;
+}
+
+/**
+ * Judges the operator's send of a named lot, the receiving session read from the
+ * binding of its own token, and writes the execution a start opens. The caller
+ * holds the transaction.
+ */
+function admitNamedLotSend(
+  author: RoadmapAuthor,
+  runRef: unknown,
+  intent: AtomicDispatchIntent,
+  targetToken: string
+): { epoch: number } | { refusal: AtomicDispatchRefusal } {
+  const send = intent.lot!;
+  const lotId = send.lot_id;
+  const lot = db
+    .query("SELECT closed_at FROM roadmap_lots WHERE project_key = ? AND id = ?")
+    .get(intent.project_key, lotId) as { closed_at: string | null } | null;
+  if (!lot || lot.closed_at !== null) return { refusal: "ineligible" };
+  const target = attestedSession(intent.group_id, intent.to_peer_id, targetToken);
+  const judged = judgeNamedLot(
+    intent.project_key,
+    lotId,
+    lotExecutionSubject(author, { run_ref: runRef, group_id: intent.group_id }),
+    send.epoch === null
+      ? {
+          kind: "start",
+          controller: target,
+          after: send.closed_epoch,
+          lastClosed: lastClosedEpoch(intent.project_key, lotId),
+        }
+      : { kind: "dispatch", target, epoch: send.epoch },
+    "/roadmap/dispatch-atomic",
+    `a send to '${intent.to_peer_id}'`
+  );
+  if ("error" in judged) return { refusal: judged.code };
+  if (judged.execution) return { epoch: judged.execution.epoch };
+  return { epoch: openNextLotExecution(intent.project_key, lotId, target!, intent.to_peer_id) };
+}
+
+function atomicDispatchDeps(author: RoadmapAuthor, runRef: unknown): AtomicDispatchDeps {
   return {
     db,
     now: () => Date.now(),
@@ -5441,7 +5616,7 @@ function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
         state_tag: dispatchStateTag(row, BROKER_ID),
       };
     },
-    headWaveIds: (projectKey) => {
+    headWaveIds: (projectKey, lotId) => {
       // ORDER BY queue, id is the queue order the Deck derives (BINARY collation).
       const rows = db
         .query(
@@ -5449,11 +5624,40 @@ function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
             WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')
             ORDER BY queue, id`
         )
-        .all(projectKey, DEFAULT_ROADMAP_LOT_ID) as { id: string; queue: number }[];
+        .all(projectKey, lotId) as { id: string; queue: number }[];
       const head = rows[0]?.queue;
       return rows.filter((r) => r.queue === head).map((r) => r.id);
     },
-    writeMember: (member, patch, expectedContentRev) => {
+    settleLot: (projectKey, lotId) => void openLotExecution(projectKey, lotId),
+    admitLotSend: (intent, targetToken) => admitNamedLotSend(author, runRef, intent, targetToken),
+    recordSends: (sends) => {
+      for (const send of sends) {
+        // A card sent again is waited on through its new send alone.
+        db.run(
+          `UPDATE roadmap_lot_dispatched SET settled_at = ?, settled_as = 'resent'
+            WHERE project_key = ? AND card_id = ? AND settled_at IS NULL`,
+          [send.sent_at, send.project_key, send.card_id]
+        );
+        db.run(
+          `INSERT INTO roadmap_lot_dispatched
+             (project_key, lot_id, epoch, card_id, operator_id, operation_id, mode, target_peer_id, sent_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            send.project_key,
+            send.lot_id,
+            send.epoch,
+            send.card_id,
+            send.operator_id,
+            send.operation_id,
+            send.mode,
+            send.target_peer_id,
+            send.sent_at,
+          ]
+        );
+      }
+    },
+    writeMember: (member, patch, expectedContentRev, intent) => {
+      // The run and group the operator signed: the lot door takes a claim from the holding window alone.
       const result = handleRoadmapUpsert(
         {
           id: member.id,
@@ -5461,8 +5665,11 @@ function atomicDispatchDeps(author: RoadmapAuthor): AtomicDispatchDeps {
           status: patch.status,
           queue: patch.queue,
           expected_content_rev: expectedContentRev,
+          run_ref: runRef,
+          group_id: intent.group_id,
         } as RoadmapUpsertRequest,
-        author
+        author,
+        true
       );
       if ("error" in result) {
         return {
@@ -6588,7 +6795,8 @@ function refusesTriageContradiction(
  */
 function handleRoadmapUpsert(
   body: RoadmapUpsertRequest,
-  provenAuthor?: RoadmapAuthor
+  provenAuthor?: RoadmapAuthor,
+  dispatching = false
 ): RoadmapUpsertResponse | { error: string; status: number } {
   const author = provenAuthor ?? resolveRoadmapAuthor(body, "/roadmap/upsert");
   if ("error" in author) return author;
@@ -6882,7 +7090,9 @@ function handleRoadmapUpsert(
     if (nextDependsOn && "error" in nextDependsOn) return nextDependsOn;
 
     // A client that predates lots reads a named lot's rank as null and may send it back with its write.
+    // A dispatch means it: the sent card leaves its lot's queue.
     const ignoresNullRank =
+      !dispatching &&
       isNamedRoadmapLot(existing.lot_id) &&
       body.queue === null &&
       existing.queue !== null &&
@@ -7943,6 +8153,224 @@ function handleRoadmapLotGrant(
   return grant();
 }
 
+/** The operator-signed head every execution route shares; the lot must exist unless it is the default queue. */
+function resolveExecutionRequest(
+  body: { by?: unknown; instance_token?: unknown; project_key?: unknown; lot_id?: unknown },
+  route: string
+): { operatorId: string; author: RoadmapAuthor; projectKey: string; lotId: string } | { error: string; status: number } {
+  const author = resolveRoadmapAuthor(body, route);
+  if ("error" in author) return author;
+  if (author.operator_id === undefined) {
+    return { error: `${route} must be signed with the operator credential`, status: 403 };
+  }
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const check = validateProjectKey(projectKey);
+  if (!check.ok) return { error: `project_key is invalid (${check.reason})`, status: 400 };
+  const caseRefusal = projectKeyCaseRefusal(projectKey);
+  if (caseRefusal) return { error: caseRefusal, status: 400 };
+  const lotId = typeof body.lot_id === "string" ? body.lot_id : "";
+  if (!lotId) return { error: "lot_id is required", status: 400 };
+  if (
+    isNamedRoadmapLot(lotId) &&
+    !db.query("SELECT 1 FROM roadmap_lots WHERE project_key = ? AND id = ?").get(projectKey, lotId)
+  ) {
+    return { error: `unknown lot '${lotId}' in this project`, status: 404 };
+  }
+  return { operatorId: author.operator_id, author, projectKey, lotId };
+}
+
+const isExpectedEpoch = (value: unknown, min: number): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= min;
+
+function handleRoadmapLotExecutionState(
+  body: RoadmapLotExecutionStateRequest
+): RoadmapLotExecutionStateResponse | { error: string; status: number } {
+  const request = resolveExecutionRequest(body, "/roadmap/lot/execution/state");
+  if ("error" in request) return request;
+  const { operatorId, projectKey, lotId } = request;
+  const read = db.transaction((): RoadmapLotExecutionStateResponse => {
+    const execution = isNamedRoadmapLot(lotId) ? openLotExecution(projectKey, lotId) : null;
+    const ranked = db
+      .query(
+        `SELECT * FROM roadmap_items
+          WHERE project_key = ? AND lot_id = ? AND queue IS NOT NULL AND status NOT IN ('done', 'archived')
+          ORDER BY queue, id`
+      )
+      .all(projectKey, lotId) as RoadmapRow[];
+    return {
+      lot_id: lotId,
+      closed_epoch: lastClosedEpoch(projectKey, lotId),
+      // Field by field: the run and the controller digest never leave the broker.
+      execution: execution
+        ? {
+            epoch: execution.epoch,
+            state: execution.state as "running" | "interrupted",
+            group_id: execution.group_id,
+            controller_peer_id: execution.controller_peer_id,
+            started_at: execution.started_at,
+            interrupted_at: execution.interrupted_at,
+            interrupted_reason: execution.interrupted_reason,
+            own: execution.operator_id === operatorId,
+          }
+        : null,
+      open_sends: openLotSends(projectKey, lotId).map((send) => ({
+        card_id: send.card_id,
+        epoch: send.epoch,
+        mode: send.mode,
+        target_peer_id: send.target_peer_id,
+        sent_at: send.sent_at,
+        claimed_at: send.claimed_at,
+        own: send.operator_id === operatorId,
+      })),
+      queue: ranked.map((row) => ({
+        card_id: row.id,
+        queue: row.queue!,
+        content_rev: row.content_rev,
+        dispatch_state_tag: dispatchStateTag(row, BROKER_ID),
+      })),
+    };
+  });
+  return read();
+}
+
+/** Hands an interrupted execution to a session of the signing run, under the next epoch. It sends nothing. */
+function handleRoadmapLotExecutionResume(
+  body: RoadmapLotResumeRequest
+): RoadmapLotResumeResponse | { error: string; status: number } {
+  const route = "/roadmap/lot/execution/resume";
+  const request = resolveExecutionRequest(body, route);
+  if ("error" in request) return request;
+  const { author, projectKey, lotId } = request;
+  if (!isNamedRoadmapLot(lotId)) return { error: "lot_id must name a lot other than the default one", status: 400 };
+  const { expected_epoch: epoch, to_peer_id: toPeerId, group_id: groupId } = body;
+  if (!isExpectedEpoch(epoch, 1)) return { error: "expected_epoch must be a positive safe integer", status: 400 };
+  if (typeof toPeerId !== "string" || !toPeerId) return { error: "to_peer_id is required", status: 400 };
+  if (typeof groupId !== "string" || !groupId) return { error: "group_id is required", status: 400 };
+  const secretError = checkGroupSecret(
+    groupId,
+    typeof body.group_secret_hash === "string" ? body.group_secret_hash : null
+  );
+  if (secretError) return secretError;
+  const resume = db.transaction((): RoadmapLotResumeResponse | { error: string; status: number } => {
+    const peer = db
+      .query("SELECT instance_token FROM peers WHERE group_id = ? AND peer_id = ? AND status = 'active' AND via IS NULL")
+      .get(groupId, toPeerId) as { instance_token: string } | null;
+    const controller = peer ? attestedSession(groupId, toPeerId, peer.instance_token) : null;
+    const judged = judgeNamedLot(
+      projectKey,
+      lotId,
+      lotExecutionSubject(author, { run_ref: body.run_ref, group_id: groupId }),
+      { kind: "resume", controller, epoch },
+      route,
+      `a resume to '${toPeerId}'`
+    );
+    if ("error" in judged) return { error: judged.error, status: judged.status };
+    db.run("UPDATE roadmap_lot_executions SET state = 'closed' WHERE project_key = ? AND lot_id = ? AND epoch = ?", [
+      projectKey,
+      lotId,
+      epoch,
+    ]);
+    return { lot_id: lotId, epoch: openNextLotExecution(projectKey, lotId, controller!, toPeerId) };
+  });
+  return resume();
+}
+
+/** Ends an execution on the operator's gesture. Open sends refuse it unless confirmed, and are then settled. */
+function handleRoadmapLotExecutionClose(
+  body: RoadmapLotCloseRequest
+): RoadmapLotCloseResponse | { error: string; status: number; open_card_ids?: string[] } {
+  const route = "/roadmap/lot/execution/close";
+  const request = resolveExecutionRequest(body, route);
+  if ("error" in request) return request;
+  const { author, projectKey, lotId } = request;
+  if (!isNamedRoadmapLot(lotId)) return { error: "lot_id must name a lot other than the default one", status: 400 };
+  const { expected_epoch: epoch, confirm_open_sends: confirmed } = body;
+  if (!isExpectedEpoch(epoch, 1)) return { error: "expected_epoch must be a positive safe integer", status: 400 };
+  if (confirmed !== undefined && typeof confirmed !== "boolean") {
+    return { error: "confirm_open_sends must be a boolean", status: 400 };
+  }
+  const close = db.transaction((): RoadmapLotCloseResponse | { error: string; status: number; open_card_ids?: string[] } => {
+    const judged = judgeNamedLot(
+      projectKey,
+      lotId,
+      lotExecutionSubject(author),
+      { kind: "close", epoch },
+      route,
+      `epoch ${epoch}`
+    );
+    if ("error" in judged) return { error: judged.error, status: judged.status };
+    const open = openLotSends(projectKey, lotId).map((send) => send.card_id);
+    if (open.length > 0 && confirmed !== true) {
+      return {
+        error: `lot_execution_open_sends: ${open.length} send(s) of this lot are still open: confirm to close it`,
+        status: 409,
+        open_card_ids: open,
+      };
+    }
+    const at = new Date().toISOString();
+    db.run(
+      `UPDATE roadmap_lot_dispatched SET settled_at = ?, settled_as = 'closed'
+        WHERE project_key = ? AND lot_id = ? AND settled_at IS NULL`,
+      [at, projectKey, lotId]
+    );
+    db.run("UPDATE roadmap_lot_executions SET state = 'closed' WHERE project_key = ? AND lot_id = ? AND epoch = ?", [
+      projectKey,
+      lotId,
+      epoch,
+    ]);
+    log.info(`${route}: closed epoch ${epoch} with ${open.length} open send(s)`, { lot_id: lotId });
+    return { lot_id: lotId, epoch, settled: open };
+  });
+  return close();
+}
+
+/**
+ * Sets one card's open send aside: a named lot's through its execution's holder,
+ * a default queue's by the operator who sent it.
+ */
+function handleRoadmapLotExecutionRemoveSend(
+  body: RoadmapLotRemoveSendRequest
+): RoadmapLotRemoveSendResponse | { error: string; status: number } {
+  const route = "/roadmap/lot/execution/remove-send";
+  const request = resolveExecutionRequest(body, route);
+  if ("error" in request) return request;
+  const { operatorId, author, projectKey, lotId } = request;
+  const named = isNamedRoadmapLot(lotId);
+  const { expected_epoch: epoch, card_id: cardId } = body;
+  if (!isExpectedEpoch(epoch, named ? 1 : 0) || (!named && epoch !== 0)) {
+    return { error: "expected_epoch must name the lot's open epoch, 0 on the default queue", status: 400 };
+  }
+  if (typeof cardId !== "string" || !cardId) return { error: "card_id is required", status: 400 };
+  const remove = db.transaction((): RoadmapLotRemoveSendResponse | { error: string; status: number } => {
+    if (named) {
+      const judged = judgeNamedLot(
+        projectKey,
+        lotId,
+        lotExecutionSubject(author),
+        { kind: "settle", epoch },
+        route,
+        `card ${cardId}`
+      );
+      if ("error" in judged) return { error: judged.error, status: judged.status };
+    }
+    const waited = openLotSends(projectKey, lotId).filter(
+      (send) => send.card_id === cardId && (named || send.operator_id === operatorId)
+    );
+    if (waited.length === 0) return { error: `no open send of card '${cardId}' in this lot`, status: 404 };
+    const at = new Date().toISOString();
+    for (const send of waited) {
+      db.run(
+        `UPDATE roadmap_lot_dispatched SET settled_at = ?, settled_as = 'removed'
+          WHERE operator_id = ? AND operation_id = ? AND card_id = ?`,
+        [at, send.operator_id, send.operation_id, send.card_id]
+      );
+    }
+    return { lot_id: lotId, card_id: cardId, settled: waited.length };
+  });
+  return remove();
+}
+
 function handleRoadmapLotMove(
   body: RoadmapLotMoveRequest
 ): RoadmapLotMoveResponse | { error: string; status: number } {
@@ -7989,6 +8417,13 @@ function handleRoadmapLotMove(
         beginOrContinueExecution(row, UNPROVEN_WRITER, "restructure", "/roadmap/lot/move") ??
         beginOrContinueExecution({ ...row, lot_id: to }, UNPROVEN_WRITER, "restructure", "/roadmap/lot/move");
       if (lotRefusal) return lotRefusal;
+    }
+    const sent = rows.find((row) => strandsOpenSend(row, to));
+    if (sent) {
+      return {
+        error: `lot_open_send: item '${sent.id}' has a send still open: close the card or remove the send first`,
+        status: 409,
+      };
     }
     for (const card of moved.cards) {
       db.run(
@@ -9983,6 +10418,8 @@ function judgeLotQueueMutation(
         return conflict("locked_upstream", { item_id: next.id });
       }
     }
+    const sent = changed.find((next) => strandsOpenSend(stored.get(next.id)!, next.lot_id));
+    if (sent) return conflict("locked_upstream", { item_id: sent.id });
 
     const defaultRevBefore = queueRev(projectKey);
     const by = relayedAuthor("deck", replicaId);
@@ -16800,6 +17237,35 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/lot/execution/grant": {
           const result = handleRoadmapLotGrant(body as RoadmapLotGrantRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/execution/state": {
+          const result = handleRoadmapLotExecutionState(body as RoadmapLotExecutionStateRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/execution/resume": {
+          const result = handleRoadmapLotExecutionResume(body as RoadmapLotResumeRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/execution/close": {
+          const result = handleRoadmapLotExecutionClose(body as RoadmapLotCloseRequest);
+          if ("error" in result) {
+            const { status, ...errorBody } = result;
+            return Response.json(errorBody, { status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lot/execution/remove-send": {
+          const result = handleRoadmapLotExecutionRemoveSend(body as RoadmapLotRemoveSendRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

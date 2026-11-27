@@ -138,9 +138,37 @@ describe("an interrupted execution", () => {
     expect(code({ execution: interrupted, subject: OPERATOR, act: { kind: "change" } })).toBe("continue");
   });
 
-  test("stays closed to anyone else", () => {
-    const stranger = { ...CONTROLLER, instance_ref: "instance-second-lead" };
-    expect(code({ execution: interrupted, subject: stranger })).toBe("lot_execution_held");
+  test("tells every proven writer who holds nothing that it must be resumed", () => {
+    for (const subject of [
+      { ...CONTROLLER, instance_ref: "instance-second-lead" },
+      { kind: "operator", operator_id: "operator-b", window: null },
+    ] as const) {
+      for (const act of [{ kind: "claim" }, { kind: "change" }, { kind: "grant", grantee: CONTROLLER }] as const) {
+        expect([subject.kind, act.kind, code({ execution: interrupted, subject, act })]).toEqual([
+          subject.kind,
+          act.kind,
+          "lot_execution_interrupted",
+        ]);
+      }
+    }
+    expect(code({ execution: interrupted, subject: OPERATOR })).toBe("lot_execution_interrupted");
+  });
+
+  test("tells a writer proving nothing only that, whatever it attempts", () => {
+    for (const act of [
+      { kind: "claim" },
+      { kind: "change" },
+      { kind: "grant", grantee: CONTROLLER },
+      { kind: "start", controller: CONTROLLER, after: 0, lastClosed: 0 },
+      { kind: "dispatch", target: CONTROLLER, epoch: 1 },
+      { kind: "resume", controller: CONTROLLER, epoch: 1 },
+      { kind: "close", epoch: 1 },
+    ] as const) {
+      expect([act.kind, code({ execution: interrupted, subject: { kind: "unproven" }, act })]).toEqual([
+        act.kind,
+        "lot_execution_unproven",
+      ]);
+    }
   });
 });
 
@@ -154,41 +182,204 @@ describe("a lot with no execution", () => {
     });
   }
 
-  const start = { kind: "start" as const, controller: CONTROLLER };
+  const start = { kind: "start" as const, controller: CONTROLLER, after: 0, lastClosed: 0 };
 
-  test("an operator write starts it and names a controller of its own", () => {
-    expect(code({ execution: null, subject: OPERATOR, act: start })).toBe("start");
+  test("a start signed before a later close of the lot is refused", () => {
+    for (const [after, lastClosed] of [[0, 1], [1, 2], [2, 1]] as const) {
+      expect(code({ execution: null, subject: HOLDING_WINDOW, act: { ...start, after, lastClosed } })).toBe(
+        "lot_execution_stale"
+      );
+    }
+    expect(code({ execution: null, subject: HOLDING_WINDOW, act: { ...start, after: 2, lastClosed: 2 } })).toBe("start");
+  });
+
+  test("an operator write signing the controller's run starts it", () => {
+    expect(code({ execution: null, subject: HOLDING_WINDOW, act: start })).toBe("start");
   });
 
   test("no agent starts it, the intended controller included", () => {
     expect(code({ execution: null, subject: CONTROLLER, act: start })).toBe("lot_execution_unproven");
   });
 
-  test("an operator cannot name another operator's instance or another project's", () => {
-    for (const controller of [
-      { ...CONTROLLER, operator_id: "operator-b" },
-      { ...CONTROLLER, project_key: "github.com/vocsap/other-repo" },
-    ]) {
-      expect(code({ execution: null, subject: OPERATOR, act: { kind: "start", controller } })).toBe(
-        "lot_execution_unproven"
-      );
-    }
+  // One dimension at a time, as for a holder.
+  for (const [field, value] of [
+    ["operator_id", "operator-b"],
+    ["project_key", "github.com/vocsap/other-repo"],
+    ["run_ref", "run-b"],
+    ["group_id", "group-b"],
+  ] as const) {
+    test(`a controller whose binding differs by ${field} from the signed start is refused`, () => {
+      const act = { ...start, controller: { ...CONTROLLER, [field]: value } };
+      expect(code({ execution: null, subject: HOLDING_WINDOW, act })).toBe("lot_execution_controller");
+    });
+  }
+
+  test("an unprovable controller or a signature naming no run starts nothing", () => {
+    expect(code({ execution: null, subject: HOLDING_WINDOW, act: { ...start, controller: null } })).toBe(
+      "lot_execution_controller"
+    );
+    expect(code({ execution: null, subject: OPERATOR, act: start })).toBe("lot_execution_controller");
   });
 
   test("a held or interrupted lot is not started over", () => {
-    expect(code({ subject: OPERATOR, act: start })).toBe("lot_execution_held");
-    expect(code({ execution: { ...EXECUTION, state: "interrupted" }, subject: OPERATOR, act: start })).toBe(
+    expect(code({ subject: HOLDING_WINDOW, act: start })).toBe("lot_execution_held");
+    expect(code({ execution: { ...EXECUTION, state: "interrupted" }, subject: HOLDING_WINDOW, act: start })).toBe(
       "lot_execution_interrupted"
     );
+  });
+
+  test("takes no further dispatch and nothing to resume", () => {
+    for (const execution of [null, { ...EXECUTION, state: "closed" as const }]) {
+      for (const act of [
+        { kind: "dispatch" as const, target: CONTROLLER, epoch: 1 },
+        { kind: "resume" as const, controller: CONTROLLER, epoch: 1 },
+        { kind: "close" as const, epoch: 1 },
+      ]) {
+        expect(code({ execution, subject: HOLDING_WINDOW, act })).toBe("lot_execution_not_started");
+      }
+    }
+  });
+});
+
+describe("dispatching again on an execution", () => {
+  const open: LotExecution = { ...EXECUTION, epoch: 2 };
+  const dispatch = { kind: "dispatch" as const, target: CONTROLLER, epoch: 2 };
+
+  test("the holding window sends to the controller under the open epoch", () => {
+    expect(code({ execution: open, subject: HOLDING_WINDOW, act: dispatch })).toBe("continue");
+  });
+
+  test("an epoch that is not the open one is refused", () => {
+    for (const epoch of [1, 3]) {
+      expect(code({ execution: open, subject: HOLDING_WINDOW, act: { ...dispatch, epoch } })).toBe("lot_execution_stale");
+    }
+    expect(lotExecutionRefusalStatus("lot_execution_stale")).toBe(409);
+  });
+
+  for (const [field, value] of [
+    ["operator_id", "operator-b"],
+    ["group_id", "group-b"],
+    ["run_ref", "run-b"],
+    ["project_key", "github.com/vocsap/other-repo"],
+    ["instance_ref", "instance-second-lead"],
+  ] as const) {
+    test(`a target differing from the controller by ${field} is refused`, () => {
+      const target = { ...CONTROLLER, [field]: value };
+      expect(code({ execution: open, subject: HOLDING_WINDOW, act: { ...dispatch, target } })).toBe("lot_execution_held");
+    });
+  }
+
+  test("an unprovable target is refused, a granted worker included", () => {
+    const worker = { ...CONTROLLER, instance_ref: "instance-worker" };
+    expect(code({ execution: open, subject: HOLDING_WINDOW, act: { ...dispatch, target: null } })).toBe(
+      "lot_execution_held"
+    );
+    expect(
+      code({
+        execution: open,
+        subject: HOLDING_WINDOW,
+        participants: new Set(["instance-worker"]),
+        act: { ...dispatch, target: worker },
+      })
+    ).toBe("lot_execution_held");
+  });
+
+  test("only the operator's holding window dispatches", () => {
+    for (const subject of [
+      OPERATOR,
+      { kind: "operator", operator_id: "operator-b", window: { run_ref: "run-a", group_id: "group-a" } },
+      { kind: "operator", operator_id: "operator-a", window: { run_ref: "run-b", group_id: "group-a" } },
+      { kind: "operator", operator_id: "operator-a", window: { run_ref: "run-a", group_id: "group-b" } },
+    ] as const) {
+      expect(code({ execution: open, subject, act: dispatch })).toBe("lot_execution_held");
+    }
+    expect(code({ execution: open, subject: CONTROLLER, act: dispatch })).toBe("lot_execution_unproven");
+  });
+
+  test("an interrupted execution sends nothing, whatever epoch is named", () => {
+    const execution: LotExecution = { ...open, state: "interrupted" };
+    for (const epoch of [1, 2]) {
+      expect(code({ execution, subject: HOLDING_WINDOW, act: { ...dispatch, epoch } })).toBe("lot_execution_interrupted");
+    }
+  });
+});
+
+describe("resuming an interrupted execution", () => {
+  const interrupted: LotExecution = { ...EXECUTION, epoch: 2, state: "interrupted" };
+  const nextRun: LotExecutionSubject = {
+    kind: "operator",
+    operator_id: "operator-a",
+    window: { run_ref: "run-next", group_id: "group-next" },
+  };
+  const nextController: LotInstanceSubject = {
+    ...CONTROLLER,
+    run_ref: "run-next",
+    group_id: "group-next",
+    instance_ref: "instance-next-lead",
+  };
+  const resume = { kind: "resume" as const, controller: nextController, epoch: 2 };
+
+  test("the same operator hands it to a controller of the run it signs", () => {
+    expect(code({ execution: interrupted, subject: nextRun, act: resume })).toBe("resume");
+  });
+
+  test("a running execution is not resumed", () => {
+    const execution: LotExecution = { ...interrupted, state: "running" };
+    expect(code({ execution, subject: nextRun, act: resume })).toBe("lot_execution_held");
+  });
+
+  test("a resume naming another epoch is refused", () => {
+    for (const epoch of [1, 3]) {
+      expect(code({ execution: interrupted, subject: nextRun, act: { ...resume, epoch } })).toBe("lot_execution_stale");
+    }
+  });
+
+  test("another operator and an agent resume nothing", () => {
+    const other: LotExecutionSubject = { ...nextRun, kind: "operator", operator_id: "operator-b", window: nextRun.window };
+    const act = { ...resume, controller: { ...nextController, operator_id: "operator-b" } };
+    expect(code({ execution: interrupted, subject: other, act })).toBe("lot_execution_interrupted");
+    expect(code({ execution: interrupted, subject: nextController, act: resume })).toBe("lot_execution_interrupted");
+  });
+
+  for (const [field, value] of [
+    ["operator_id", "operator-b"],
+    ["project_key", "github.com/vocsap/other-repo"],
+    ["run_ref", "run-a"],
+    ["group_id", "group-a"],
+  ] as const) {
+    test(`a new controller whose binding differs by ${field} from the signed resume is refused`, () => {
+      const act = { ...resume, controller: { ...nextController, [field]: value } };
+      expect(code({ execution: interrupted, subject: nextRun, act })).toBe("lot_execution_controller");
+    });
+  }
+
+  test("an unprovable controller or a signature naming no run resumes nothing", () => {
+    expect(code({ execution: interrupted, subject: nextRun, act: { ...resume, controller: null } })).toBe(
+      "lot_execution_controller"
+    );
+    expect(code({ execution: interrupted, subject: OPERATOR, act: resume })).toBe("lot_execution_controller");
+    expect(lotExecutionRefusalStatus("lot_execution_controller")).toBe(403);
   });
 });
 
 test("a replica neither starts, claims nor grants, and still changes and restructures", () => {
   expect(code({ replica: true })).toBe("lot_execution_replica");
-  expect(code({ replica: true, execution: null, subject: OPERATOR, act: { kind: "start", controller: CONTROLLER } })).toBe(
+  expect(
+    code({
+      replica: true,
+      execution: null,
+      subject: OPERATOR,
+      act: { kind: "start", controller: CONTROLLER, after: 0, lastClosed: 0 },
+    })
+  ).toBe("lot_execution_replica");
+  expect(code({ replica: true, act: { kind: "grant", grantee: CONTROLLER } })).toBe("lot_execution_replica");
+  expect(code({ replica: true, subject: HOLDING_WINDOW, act: { kind: "dispatch", target: CONTROLLER, epoch: 1 } })).toBe(
     "lot_execution_replica"
   );
-  expect(code({ replica: true, act: { kind: "grant", grantee: CONTROLLER } })).toBe("lot_execution_replica");
+  expect(code({ replica: true, subject: HOLDING_WINDOW, act: { kind: "resume", controller: CONTROLLER, epoch: 1 } })).toBe(
+    "lot_execution_replica"
+  );
+  expect(code({ replica: true, subject: OPERATOR, act: { kind: "close", epoch: 1 } })).toBe("lot_execution_replica");
   expect(code({ replica: true, execution: null, act: { kind: "change" } })).toBe("pass");
   expect(code({ replica: true, execution: null, act: { kind: "restructure" } })).toBe("pass");
 });
@@ -248,6 +439,47 @@ describe("granting a worker", () => {
   });
 });
 
+describe("closing an execution", () => {
+  const close = { kind: "close" as const, epoch: 2 };
+
+  for (const state of ["running", "interrupted"] as const) {
+    test(`the holding operator closes a ${state} one from any window, under its epoch`, () => {
+      const execution: LotExecution = { ...EXECUTION, epoch: 2, state };
+      expect(code({ execution, subject: OPERATOR, act: close })).toBe("close");
+      expect(code({ execution, subject: HOLDING_WINDOW, act: close })).toBe("close");
+      for (const epoch of [1, 3]) {
+        expect(code({ execution, subject: OPERATOR, act: { ...close, epoch } })).toBe("lot_execution_stale");
+      }
+    });
+
+    test(`nobody else closes a ${state} one`, () => {
+      const execution: LotExecution = { ...EXECUTION, epoch: 2, state };
+      const refused = state === "running" ? "lot_execution_held" : "lot_execution_interrupted";
+      const other: LotExecutionSubject = { kind: "operator", operator_id: "operator-b", window: null };
+      expect(code({ execution, subject: other, act: close })).toBe(refused);
+      expect(code({ execution, subject: CONTROLLER, act: close })).toBe(
+        state === "running" ? "lot_execution_unproven" : "lot_execution_interrupted"
+      );
+    });
+
+    test(`settling a send of a ${state} one is the holding operator's gesture, under its epoch`, () => {
+      const execution: LotExecution = { ...EXECUTION, epoch: 2, state };
+      const settle = { kind: "settle" as const, epoch: 2 };
+      const other: LotExecutionSubject = { kind: "operator", operator_id: "operator-b", window: null };
+      expect(code({ execution, subject: OPERATOR, act: settle })).toBe("continue");
+      expect(code({ execution, subject: OPERATOR, act: { ...settle, epoch: 1 } })).toBe("lot_execution_stale");
+      expect(code({ execution, subject: other, act: settle })).toBe(
+        state === "running" ? "lot_execution_held" : "lot_execution_interrupted"
+      );
+      expect(code({ execution, subject: CONTROLLER, act: settle })).toBe(
+        state === "running" ? "lot_execution_unproven" : "lot_execution_interrupted"
+      );
+      expect(code({ execution: null, subject: OPERATOR, act: settle })).toBe("lot_execution_not_started");
+      expect(code({ execution, subject: OPERATOR, act: settle, replica: true })).toBe("lot_execution_replica");
+    });
+  }
+});
+
 describe("interruption", () => {
   const NOW = 1_000_000;
   const TTL = 600_000;
@@ -278,4 +510,10 @@ test("a refusal names the lot and the controlling peer, and no run or instance d
   expect(lotExecutionRefusalStatus("lot_execution_held")).toBe(409);
   expect(lotExecutionRefusalStatus("lot_execution_unproven")).toBe(403);
   expect(lotExecutionRefusalStatus("lot_execution_replica")).toBe(403);
+});
+
+test("a refusal raised before any execution exists names no controller", () => {
+  const refused = formatLotExecutionRefusal("lot_execution_controller", "release train", null);
+  expect(refused.startsWith("lot_execution_controller:")).toBe(true);
+  expect(refused).not.toContain("null");
 });

@@ -1967,6 +1967,15 @@ export interface AtomicDispatchMember {
   expected_dispatch_state_tag: string;
 }
 
+/**
+ * A send of one named lot: `epoch` null opens an execution, a number sends on
+ * that open one. A start also signs the lot's last closed epoch (0 when none),
+ * so that it opens nothing after a later close.
+ */
+export type AtomicDispatchLot =
+  | { lot_id: string; epoch: null; closed_epoch: number }
+  | { lot_id: string; epoch: number };
+
 export interface AtomicDispatchIntent {
   /** This broker's persistent identity. */
   broker_id: string;
@@ -1979,12 +1988,16 @@ export interface AtomicDispatchIntent {
   /** The ACTIVE local peer receiving the message; never substituted by the broker. */
   to_peer_id: string;
   members: AtomicDispatchMember[];
+  /** Absent for the default queue. */
+  lot?: AtomicDispatchLot;
 }
 
 export interface AtomicDispatchRequest {
   action: "execute" | "resolve";
   intent: AtomicDispatchIntent;
   group_secret_hash: string | null;
+  /** The signing Deck's run; a send of a named lot is refused without it. */
+  run_ref?: string;
   by?: string;
   public_key?: string;
   auth?: ApprovalAuthProof;
@@ -2002,7 +2015,15 @@ export type AtomicDispatchRefusal =
   | "queue-changed"
   | "ineligible"
   | "cancelled-before-execution"
-  | "write-failed";
+  | "write-failed"
+  | "lot_execution_held"
+  | "lot_execution_interrupted"
+  | "lot_execution_not_started"
+  | "lot_execution_unproven"
+  | "lot_execution_grantee"
+  | "lot_execution_controller"
+  | "lot_execution_stale"
+  | "lot_execution_replica";
 
 /** What the broker recorded for one operation; `unknown` is never stored. */
 export type AtomicDispatchOutcome =
@@ -2054,6 +2075,8 @@ export interface AtomicDispatchCapability {
   max_operation_ms: number;
   max_members: number;
   registry_capacity: number;
+  /** Present when the broker reads `intent.lot`; one without it refuses the field as unknown. */
+  lots?: 1;
 }
 
 export interface DispatchRequest {

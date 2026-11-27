@@ -539,7 +539,15 @@ const ATOMIC_REFUSALS: readonly AtomicDispatchRefusal[] = [
   'queue-changed',
   'ineligible',
   'cancelled-before-execution',
-  'write-failed'
+  'write-failed',
+  'lot_execution_held',
+  'lot_execution_interrupted',
+  'lot_execution_not_started',
+  'lot_execution_unproven',
+  'lot_execution_grantee',
+  'lot_execution_controller',
+  'lot_execution_stale',
+  'lot_execution_replica'
 ]
 
 function atomicOutcome(raw: Record<string, unknown>, operationId: string, memberIds: string[]): AtomicDispatchOutcome | null {

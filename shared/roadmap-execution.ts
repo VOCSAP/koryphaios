@@ -47,15 +47,23 @@ export type LotExecutionSubject =
 /**
  * `claim` moves a card toward work or takes its lock; `change` is any other
  * guarded write; `restructure` moves a card in or out of the lot, ranks it or
- * replaces it, which nobody does under execution; `grant` mandates a worker,
- * null when the named peer is no session the broker can prove.
+ * replaces it, which nobody does under execution; `grant` mandates a worker.
+ * `start` opens an execution, `dispatch` sends more work to the open one,
+ * `resume` hands an interrupted one to a controller, `close` ends it and
+ * `settle` sets one of its sends aside. `epoch` is the execution the operator
+ * read; a start signs `after`, the lot's last closed epoch, to be compared with
+ * `lastClosed`. A session the broker cannot prove is null.
  */
 export type LotExecutionAct =
   | { kind: "claim" }
   | { kind: "change" }
   | { kind: "restructure" }
   | { kind: "grant"; grantee: LotInstanceSubject | null }
-  | { kind: "start"; controller: LotInstanceSubject };
+  | { kind: "start"; controller: LotInstanceSubject | null; after: number; lastClosed: number }
+  | { kind: "dispatch"; target: LotInstanceSubject | null; epoch: number }
+  | { kind: "resume"; controller: LotInstanceSubject | null; epoch: number }
+  | { kind: "close"; epoch: number }
+  | { kind: "settle"; epoch: number };
 
 export type LotExecutionRefusal =
   | "lot_execution_held"
@@ -63,10 +71,12 @@ export type LotExecutionRefusal =
   | "lot_execution_not_started"
   | "lot_execution_unproven"
   | "lot_execution_grantee"
+  | "lot_execution_controller"
+  | "lot_execution_stale"
   | "lot_execution_replica";
 
 export type LotExecutionVerdict =
-  | { ok: true; effect: "pass" | "continue" | "start" }
+  | { ok: true; effect: "pass" | "continue" | "start" | "resume" | "close" }
   | { ok: false; code: LotExecutionRefusal };
 
 export interface LotExecutionRequest {
@@ -83,27 +93,42 @@ export interface LotExecutionRequest {
 
 const refuse = (code: LotExecutionRefusal): LotExecutionVerdict => ({ ok: false, code });
 
+const signsRunOf = (window: LotRunWindow | null, holder: LotRunWindow): boolean =>
+  window !== null && window.run_ref === holder.run_ref && window.group_id === holder.group_id;
+
+/** An operator names as controller only its own proven session, in this project and in the run it signs. */
+const isSignedController = (
+  operator: Extract<LotExecutionSubject, { kind: "operator" }>,
+  controller: LotInstanceSubject | null,
+  projectKey: string
+): boolean =>
+  controller !== null &&
+  controller.operator_id === operator.operator_id &&
+  controller.project_key === projectKey &&
+  signsRunOf(operator.window, controller);
+
 export function judgeLotExecution(request: LotExecutionRequest): LotExecutionVerdict {
   const { subject, act } = request;
   const execution = request.execution?.state === "closed" ? null : request.execution;
   if (request.replica && act.kind !== "change" && act.kind !== "restructure") return refuse("lot_execution_replica");
+  // Only a proven writer holding nothing learns a lot is interrupted, except on restructure (import, lot move, sync).
+  const blocked = (code: "lot_execution_held" | "lot_execution_unproven"): LotExecutionVerdict =>
+    refuse(subject.kind !== "unproven" && execution?.state === "interrupted" ? "lot_execution_interrupted" : code);
   if (act.kind === "start") {
-    // Only an operator dispatch starts an execution, and it names a controller of the same operator.
-    if (
-      subject.kind !== "operator" ||
-      act.controller.operator_id !== subject.operator_id ||
-      act.controller.project_key !== request.project_key
-    ) {
-      return refuse("lot_execution_unproven");
-    }
-    if (execution === null) return { ok: true, effect: "start" };
-    return refuse(execution.state === "interrupted" ? "lot_execution_interrupted" : "lot_execution_held");
+    // Only an operator dispatch starts an execution.
+    if (subject.kind !== "operator") return blocked("lot_execution_unproven");
+    if (execution !== null) return blocked("lot_execution_held");
+    // A start signed before a close would reopen the lot the operator ended.
+    if (act.after !== act.lastClosed) return refuse("lot_execution_stale");
+    return isSignedController(subject, act.controller, request.project_key)
+      ? { ok: true, effect: "start" }
+      : refuse("lot_execution_controller");
   }
-  // A lot nobody processes is being prepared: only taking a card or mandating a worker needs an execution.
+  // A lot nobody processes is being prepared: changing and restructuring need no execution.
   if (execution === null) {
-    return act.kind === "claim" || act.kind === "grant"
-      ? refuse("lot_execution_not_started")
-      : { ok: true, effect: "pass" };
+    return act.kind === "change" || act.kind === "restructure"
+      ? { ok: true, effect: "pass" }
+      : refuse("lot_execution_not_started");
   }
   if (act.kind === "restructure") {
     return refuse(execution.state === "interrupted" ? "lot_execution_interrupted" : "lot_execution_held");
@@ -114,31 +139,50 @@ export function judgeLotExecution(request: LotExecutionRequest): LotExecutionVer
     instance.group_id === execution.group_id &&
     instance.run_ref === execution.run_ref &&
     instance.project_key === execution.project_key;
-  if (act.kind === "grant") {
-    if (subject.kind !== "instance" || !ofTheRun(subject) || subject.instance_ref !== execution.controller_ref) {
+  const isController = (instance: LotInstanceSubject): boolean =>
+    ofTheRun(instance) && instance.instance_ref === execution.controller_ref;
+  if (act.kind === "dispatch") {
+    if (subject.kind !== "operator") return blocked("lot_execution_unproven");
+    if (execution.state === "interrupted") return refuse("lot_execution_interrupted");
+    if (subject.operator_id !== execution.operator_id || !signsRunOf(subject.window, execution)) {
       return refuse("lot_execution_held");
     }
+    if (act.epoch !== execution.epoch) return refuse("lot_execution_stale");
+    // Orders of a lot go to its controller alone.
+    if (act.target === null || !isController(act.target)) return refuse("lot_execution_held");
+    return { ok: true, effect: "continue" };
+  }
+  if (act.kind === "resume") {
+    if (subject.kind !== "operator") return blocked("lot_execution_unproven");
+    if (subject.operator_id !== execution.operator_id) return blocked("lot_execution_held");
+    if (act.epoch !== execution.epoch) return refuse("lot_execution_stale");
+    if (execution.state !== "interrupted") return refuse("lot_execution_held");
+    return isSignedController(subject, act.controller, request.project_key)
+      ? { ok: true, effect: "resume" }
+      : refuse("lot_execution_controller");
+  }
+  if (act.kind === "close" || act.kind === "settle") {
+    if (subject.kind !== "operator") return blocked("lot_execution_unproven");
+    if (subject.operator_id !== execution.operator_id) return blocked("lot_execution_held");
+    if (act.epoch !== execution.epoch) return refuse("lot_execution_stale");
+    return { ok: true, effect: act.kind === "close" ? "close" : "continue" };
+  }
+  if (act.kind === "grant") {
+    if (subject.kind !== "instance" || !isController(subject)) return blocked("lot_execution_held");
     if (execution.state === "interrupted") return refuse("lot_execution_interrupted");
     if (act.grantee === null || !ofTheRun(act.grantee)) return refuse("lot_execution_grantee");
     return { ok: true, effect: "continue" };
   }
   const interruptedClaim = act.kind === "claim" && execution.state === "interrupted";
   if (subject.kind === "operator") {
-    if (subject.operator_id !== execution.operator_id) return refuse("lot_execution_held");
+    if (subject.operator_id !== execution.operator_id) return blocked("lot_execution_held");
     // The operator may stop or close from any window; taking a card is the holding window's act.
-    if (
-      act.kind === "claim" &&
-      (subject.window === null ||
-        subject.window.group_id !== execution.group_id ||
-        subject.window.run_ref !== execution.run_ref)
-    ) {
-      return refuse("lot_execution_held");
-    }
+    if (act.kind === "claim" && !signsRunOf(subject.window, execution)) return blocked("lot_execution_held");
   } else {
     const holds =
       ofTheRun(subject) &&
       (subject.instance_ref === execution.controller_ref || request.participants.has(subject.instance_ref));
-    if (!holds) return refuse("lot_execution_held");
+    if (!holds) return blocked("lot_execution_held");
   }
   return interruptedClaim ? refuse("lot_execution_interrupted") : { ok: true, effect: "continue" };
 }
@@ -163,7 +207,10 @@ export function lotExecutionInterruption(
 }
 
 export function lotExecutionRefusalStatus(code: LotExecutionRefusal): 403 | 409 {
-  return code === "lot_execution_unproven" || code === "lot_execution_grantee" || code === "lot_execution_replica"
+  return code === "lot_execution_unproven" ||
+    code === "lot_execution_grantee" ||
+    code === "lot_execution_controller" ||
+    code === "lot_execution_replica"
     ? 403
     : 409;
 }
@@ -181,6 +228,8 @@ export function formatLotExecutionRefusal(
     lot_execution_not_started: `${lot} is not being processed: only an operator dispatch starts it`,
     lot_execution_unproven: `${lot} is processed by '${controllerPeerId}' and this write proves no Kory run`,
     lot_execution_grantee: `${lot} takes a worker only from the Kory run that processes it: the named peer is no such session`,
+    lot_execution_controller: `${lot} takes a controller only from the Kory run that signs the request: the named peer is no such session`,
+    lot_execution_stale: `${lot} changed execution since it was read: read it again`,
     lot_execution_replica: `${lot} cannot be processed on a replica broker`,
   };
   return `${code}: ${detail[code]}`;

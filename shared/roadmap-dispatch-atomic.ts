@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { composeAtomicDispatchText, type DispatchCardView } from "./roadmap-dispatch-message";
 import { projectKeyCaseRefusal, validateProjectKey } from "./project-key";
-import { isNamedRoadmapLot } from "./roadmap-lot";
+import { DEFAULT_ROADMAP_LOT_ID, isNamedRoadmapLot } from "./roadmap-lot";
 import type {
   AtomicDispatchCapability,
   AtomicDispatchCard,
@@ -9,6 +9,7 @@ import type {
   AtomicDispatchError,
   AtomicDispatchErrorCode,
   AtomicDispatchIntent,
+  AtomicDispatchLot,
   AtomicDispatchMember,
   AtomicDispatchOutcome,
   AtomicDispatchRefusal,
@@ -27,6 +28,7 @@ export function atomicDispatchCapability(brokerId: string): AtomicDispatchCapabi
     max_operation_ms: ATOMIC_DISPATCH_MAX_OPERATION_MS,
     max_members: ATOMIC_DISPATCH_MAX_MEMBERS,
     registry_capacity: ATOMIC_DISPATCH_REGISTRY_CAPACITY,
+    lots: 1,
   };
 }
 
@@ -83,6 +85,7 @@ const OPERATION_ID = /^(\d{1,16}):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const BROKER_ID = /^[A-Za-z0-9-]{8,64}$/;
 const STATE_TAG = /^[0-9a-f]{64}$/;
 const CARD_ID = /^[A-Za-z0-9-]{8,64}$/;
+const LOT_ID = /^[A-Za-z0-9-]{1,64}$/;
 const GROUP_ID_MAX = 256;
 
 export function parseOperationId(operationId: string): { deadlineMs: number } | null {
@@ -106,6 +109,7 @@ export function atomicDispatchDigest(intent: AtomicDispatchIntent): string {
     intent.target_kind,
     intent.to_peer_id,
     intent.members.map((m) => [m.id, m.expected_content_rev, m.expected_dispatch_state_tag]),
+    ...(intent.lot ? [[intent.lot.lot_id, intent.lot.epoch, intent.lot.epoch === null ? intent.lot.closed_epoch : null]] : []),
   ]);
   return createHash("sha256").update(canonical).digest("hex");
 }
@@ -121,6 +125,7 @@ const INTENT_KEYS = [
   "members",
 ] as const;
 const MEMBER_KEYS = ["id", "expected_content_rev", "expected_dispatch_state_tag"] as const;
+const LOT_KEYS = ["lot_id", "epoch"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -136,6 +141,24 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
   return null;
 }
 
+function isCount(value: unknown, min: number): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min;
+}
+
+function parseLot(raw: unknown): AtomicDispatchLot | string {
+  if (!isRecord(raw)) return "lot must be an object";
+  const shape = hasExactKeys(raw, raw.epoch === null ? [...LOT_KEYS, "closed_epoch"] : LOT_KEYS);
+  if (shape) return `lot: ${shape}`;
+  const { lot_id, epoch, closed_epoch } = raw;
+  if (typeof lot_id !== "string" || !LOT_ID.test(lot_id) || !isNamedRoadmapLot(lot_id)) {
+    return "lot_id must name a lot other than the default one";
+  }
+  if (epoch === null) {
+    return isCount(closed_epoch, 0) ? { lot_id, epoch, closed_epoch } : "closed_epoch must be a non-negative safe integer";
+  }
+  return isCount(epoch, 1) ? { lot_id, epoch } : "epoch must be null or a positive safe integer";
+}
+
 /**
  * Closed validation: the intent carries identity and tokens, never a wanted
  * status, rank, text or lock field, so an unknown key is refused rather than
@@ -147,8 +170,10 @@ export function validateAtomicDispatchIntent(
 ): { ok: true; intent: AtomicDispatchIntent } | { ok: false; error: string } {
   const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
   if (!isRecord(raw)) return fail("intent must be an object");
-  const shape = hasExactKeys(raw, INTENT_KEYS);
+  const shape = hasExactKeys(raw, "lot" in raw ? [...INTENT_KEYS, "lot"] : INTENT_KEYS);
   if (shape) return fail(`intent: ${shape}`);
+  const lot = "lot" in raw ? parseLot(raw.lot) : undefined;
+  if (typeof lot === "string") return fail(lot);
   const { broker_id, operation_id, project_key, group_id, mode, target_kind, to_peer_id, members } = raw;
   if (typeof broker_id !== "string" || !BROKER_ID.test(broker_id)) return fail("broker_id is malformed");
   if (typeof operation_id !== "string" || parseOperationId(operation_id) === null) {
@@ -195,7 +220,17 @@ export function validateAtomicDispatchIntent(
   }
   return {
     ok: true,
-    intent: { broker_id, operation_id, project_key, group_id, mode, target_kind, to_peer_id, members: parsed },
+    intent: {
+      broker_id,
+      operation_id,
+      project_key,
+      group_id,
+      mode,
+      target_kind,
+      to_peer_id,
+      members: parsed,
+      ...(lot ? { lot } : {}),
+    },
   };
 }
 
@@ -303,6 +338,19 @@ export type AtomicDispatchMemberWrite =
   | { ok: true; card: DispatchCardView & { kind: RoadmapKind } }
   | { ok: false; reason: "card-changed" | "ineligible" };
 
+/** One card of one send, as the durable registry keeps it. The default queue sends under epoch 0. */
+export interface LotSendRecord {
+  project_key: string;
+  lot_id: string;
+  epoch: number;
+  card_id: string;
+  operator_id: string;
+  operation_id: string;
+  mode: string;
+  target_peer_id: string;
+  sent_at: string;
+}
+
 export interface AtomicDispatchDeps {
   db: DispatchDb;
   now: () => number;
@@ -311,13 +359,25 @@ export interface AtomicDispatchDeps {
   /** The ACTIVE local peer of the group, or null. */
   findTarget: (groupId: string, peerId: string) => { token: string } | null;
   loadMember: (id: string) => AtomicDispatchMemberRow | null;
-  /** Ids of the project's head wave in queue order, directives included: a queued directive is a changed queue. */
-  headWaveIds: (projectKey: string) => string[];
+  /** Ids of one lot's head wave in queue order, directives included: a queued directive is a changed queue. */
+  headWaveIds: (projectKey: string, lotId: string) => string[];
+  /** Records an interruption already due on the lot's execution, outside the effects whose rollback would undo it. */
+  settleLot: (projectKey: string, lotId: string) => void;
+  /**
+   * Judges a send of a named lot and opens the execution on a start, inside the
+   * effects. Returns the epoch the send runs under.
+   */
+  admitLotSend: (
+    intent: AtomicDispatchIntent,
+    targetToken: string
+  ) => { epoch: number } | { refusal: AtomicDispatchRefusal };
+  recordSends: (sends: LotSendRecord[]) => void;
   /** Writes one card through the roadmap upsert core; a throw rolls the whole operation back. */
   writeMember: (
     member: AtomicDispatchMemberRow,
     patch: AtomicDispatchPatch,
-    expectedContentRev: number
+    expectedContentRev: number,
+    intent: AtomicDispatchIntent
   ) => AtomicDispatchMemberWrite;
   insertMessage: (targetToken: string, groupId: string, text: string, sentAt: string) => number;
   /** Runs only after the commit; a failure never changes the recorded outcome. */
@@ -347,15 +407,15 @@ function outcomeResponse(outcome: AtomicDispatchOutcome): AtomicDispatchHttp {
   return { status: outcome.delivery === "sent" ? 200 : 409, body: outcome };
 }
 
-function isEligible(row: AtomicDispatchMemberRow): boolean {
+/** `lotId` null is the default queue, which takes no card of a named lot. */
+function isEligible(row: AtomicDispatchMemberRow, lotId: string | null): boolean {
   return (
     !row.inactive &&
     row.deleted_at === null &&
     row.status !== "done" &&
     row.status !== "archived" &&
     row.kind !== "directive" &&
-    // A named lot's cards are not dispatched through the default queue's door.
-    !isNamedRoadmapLot(row.lot_id)
+    (lotId === null ? !isNamedRoadmapLot(row.lot_id) : row.lot_id === lotId)
   );
 }
 
@@ -465,6 +525,8 @@ export function runAtomicDispatch(
       return outcomeResponse(cancelled);
     }
 
+    if (intent.lot) deps.settleLot(intent.project_key, intent.lot.lot_id);
+
     const effects = deps.db.transaction((): AtomicDispatchOutcome => {
       const target = deps.findTarget(intent.group_id, intent.to_peer_id);
       if (!target) throw new DispatchRefusal("no-target", []);
@@ -473,7 +535,7 @@ export function runAtomicDispatch(
       const unavailable: string[] = [];
       for (const member of intent.members) {
         const row = deps.loadMember(member.id);
-        if (!row || row.project_key !== intent.project_key || !isEligible(row)) unavailable.push(member.id);
+        if (!row || row.project_key !== intent.project_key || !isEligible(row, intent.lot?.lot_id ?? null)) unavailable.push(member.id);
         else rows.push(row);
       }
       if (unavailable.length > 0) throw new DispatchRefusal("ineligible", unavailable);
@@ -488,22 +550,45 @@ export function runAtomicDispatch(
         .map((member) => member.id);
       if (changed.length > 0) throw new DispatchRefusal("card-changed", changed);
 
-      if (intent.mode === "wave" && !sameOrderedIds(deps.headWaveIds(intent.project_key), intent.members.map((m) => m.id))) {
-        throw new DispatchRefusal(
-          "queue-changed",
-          intent.members.map((m) => m.id)
-        );
+      const lotId = intent.lot?.lot_id ?? DEFAULT_ROADMAP_LOT_ID;
+      const memberIds = intent.members.map((m) => m.id);
+      if (intent.mode === "wave" && !sameOrderedIds(deps.headWaveIds(intent.project_key, lotId), memberIds)) {
+        throw new DispatchRefusal("queue-changed", memberIds);
       }
+
+      let epoch = 0;
+      if (intent.lot) {
+        // A controller is the designated lead: a wave sent to it, never a stand-in or an assignee.
+        if (intent.lot.epoch === null && intent.target_kind !== "lead") {
+          throw new DispatchRefusal("lot_execution_controller", memberIds);
+        }
+        const admitted = deps.admitLotSend(intent, target.token);
+        if ("refusal" in admitted) throw new DispatchRefusal(admitted.refusal, memberIds);
+        epoch = admitted.epoch;
+      }
+      const sentAt = new Date(nowMs).toISOString();
+      deps.recordSends(
+        memberIds.map((cardId) => ({
+          project_key: intent.project_key,
+          lot_id: lotId,
+          epoch,
+          card_id: cardId,
+          operator_id: operatorId,
+          operation_id: intent.operation_id,
+          mode: intent.mode,
+          target_peer_id: intent.to_peer_id,
+          sent_at: sentAt,
+        }))
+      );
 
       const written: (DispatchCardView & { kind: RoadmapKind })[] = [];
       for (const [i, row] of rows.entries()) {
-        const result = deps.writeMember(row, patchFor(intent.mode, row), intent.members[i]!.expected_content_rev);
+        const result = deps.writeMember(row, patchFor(intent.mode, row), intent.members[i]!.expected_content_rev, intent);
         if (!result.ok) throw new DispatchRefusal(result.reason, [row.id]);
         written.push(result.card);
       }
 
       const text = composeAtomicDispatchText(intent.mode, intent.target_kind, written);
-      const sentAt = new Date(nowMs).toISOString();
       const messageId = deps.insertMessage(target.token, intent.group_id, text, sentAt);
 
       const cards: AtomicDispatchCard[] = written.map((card) => ({ id: card.id, title: card.title, kind: card.kind }));

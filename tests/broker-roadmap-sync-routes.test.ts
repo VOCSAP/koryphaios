@@ -3526,6 +3526,33 @@ test("queue-delta v2: every refusal is logged with its status and reason", async
   expect(traces[2]).toContain("no-such-lot");
 }, 30_000);
 
+test("queue-delta v2: a card with an open send keeps its lot, and still takes a new rank in it", async () => {
+  const { b, project, lot, card } = await lotProject("sent", [["x", "a", 1], ["y", "a", 2], ["free", "default", 1]]);
+  for (const [name, lotId] of [["x", lot.a], ["free", "default"]] as const) {
+    lotSql(
+      b,
+      `INSERT INTO roadmap_lot_dispatched
+         (project_key, lot_id, epoch, card_id, operator_id, operation_id, mode, target_peer_id, sent_at)
+       VALUES (?, ?, 1, ?, 'operator', ?, 'wave', 'lead', '2026-01-01T00:00:00.000Z')`,
+      project, lotId, card(name), `op-${name}`
+    );
+  }
+  const before = placesOf(b, project);
+  const send = (ids: string[], ops: unknown) => sendLotDelta(b, project, currentLots(b, project, ids), ops);
+
+  const named = await send([lot.a, lot.b], [{ op: "move_members", ids: [card("x")], from: lot.a, to: lot.b }]);
+  const plain = await send(["default", lot.b], [{ op: "move_members", ids: [card("free")], from: "default", to: lot.b }]);
+
+  expect([named, plain].map((res) => [res.status, res.body.reason, res.body.item_id])).toEqual([
+    [409, "locked_upstream", card("x")],
+    [409, "locked_upstream", card("free")],
+  ]);
+  expect(placesOf(b, project)).toEqual(before);
+  const reranked = await send([lot.a], [{ op: "place", lot_id: lot.a, ids: [card("y")], at: "start" }]);
+  expect(reranked.status, JSON.stringify(reranked.body)).toBe(200);
+  expect(placesOf(b, project)).toContainEqual([card("x"), lot.a, 2]);
+}, 30_000);
+
 // ----- a lot under execution on the upstream, where a replica proves no holder -----
 
 function holdLot(b: TestBroker, project: string, lotId: string): void {

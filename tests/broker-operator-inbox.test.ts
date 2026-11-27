@@ -345,6 +345,38 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
     reason:
       "The intent's peer id is refused when it is a reserved identity (isPeerId in atomicDispatchDeps) before any lookup, and the target lookup filters status='active' on local rows, so a sentinel never resolves. Proven by tests/broker-roadmap-dispatch-atomic.test.ts.",
   },
+  RoadmapLotGrantRequest: {
+    field: "to_peer_id",
+    route: "/roadmap/lot/execution/grant",
+    verdict: "guarded",
+    reason:
+      "The grantee lookup filters status='active' on local rows of the holding group, and the sentinel rows are seeded permanently dormant, so a sentinel never becomes a participant.",
+  },
+  RoadmapLotResumeRequest: {
+    field: "to_peer_id",
+    route: "/roadmap/lot/execution/resume",
+    verdict: "guarded",
+    reason:
+      "The new controller lookup filters status='active' on local rows, so a sentinel resolves to no attested session and the resume is refused. Proven by tests/broker-roadmap-dispatch-atomic.test.ts.",
+  },
+  RoadmapLotOpenSend: {
+    field: "target_peer_id",
+    route: "(none)",
+    verdict: "exempt",
+    reason: "A response row of /roadmap/lot/execution/state: written by the broker, never parsed from a request body.",
+  },
+  DispatchOperationRecord: {
+    field: "target_peer_id",
+    route: "(none)",
+    verdict: "exempt",
+    reason: "A broker-internal row of the operation registry, filled from an intent whose recipient is already classified.",
+  },
+  LotSendRecord: {
+    field: "target_peer_id",
+    route: "(none)",
+    verdict: "exempt",
+    reason: "A broker-internal row of the send registry, filled from an intent whose recipient is already classified.",
+  },
   RoadmapItem: {
     field: "target_peer_ids",
     route: "/roadmap/import",
@@ -398,14 +430,15 @@ function findRecipientCarryingInterfaces(source: string): { iface: string; field
 }
 
 test("coverage: every interface carrying a client-supplied recipient is classified", async () => {
-  const source = await Bun.file(new URL("../shared/types.ts", import.meta.url)).text();
-  const found = findRecipientCarryingInterfaces(source);
+  const shared = new URL("../shared/", import.meta.url);
+  const found: { iface: string; field: string }[] = [];
+  for (const file of new Bun.Glob("**/*.ts").scanSync({ cwd: Bun.fileURLToPath(shared) })) {
+    found.push(...findRecipientCarryingInterfaces(await Bun.file(new URL(file.replaceAll("\\", "/"), shared)).text()));
+  }
 
-  // The scanner must SEE something before its silence can mean anything (a
-  // volet 2 probe once passed green with its guard removed because an
-  // unrelated early return made it blind).
-  expect(found.length).toBeGreaterThan(0);
-  expect(found.map((f) => f.iface)).toContain("SendMessageRequest");
+  // Every classified name must still be found: a scan that loses a module, or a
+  // renamed field, would otherwise shrink the domain in silence.
+  expect(found.map((f) => f.iface).sort()).toEqual(Object.keys(RECIPIENT_ROUTES).sort());
 
   expect(found.filter((f) => !RECIPIENT_ROUTES[f.iface])).toEqual([]);
 

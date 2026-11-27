@@ -981,6 +981,20 @@ test("postAtomicDispatch returns the broker's recorded outcome, sent or not-sent
   expect((await postAgainst(() => json(409, refused))).answer).toEqual(refused);
 });
 
+test.each([
+  "lot_execution_held",
+  "lot_execution_interrupted",
+  "lot_execution_not_started",
+  "lot_execution_unproven",
+  "lot_execution_grantee",
+  "lot_execution_controller",
+  "lot_execution_stale",
+  "lot_execution_replica"
+])("postAtomicDispatch reads the %s refusal as not sent", async (reason) => {
+  const refused = { delivery: "not-sent", operation_id: POST_OP, reason, card_ids: ["a"] };
+  expect((await postAgainst(() => json(409, refused))).answer as unknown).toEqual(refused);
+});
+
 test.each<[string, () => Response, ReturnType<typeof unknownAnswer>]>([
   ["a broker that is not the one asked", () => json(409, { code: "dispatch-broker-mismatch", error: "x" }), unknownAnswer("broker-mismatch")],
   ["an operation past its deadline", () => json(409, { code: "dispatch-operation-expired", error: "x" }), unknownAnswer("expired")],
