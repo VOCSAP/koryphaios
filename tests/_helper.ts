@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import {
   buildAuthProof,
   buildInboxProof,
+  deriveInstanceRef,
   deriveOperatorId,
   generateCredential,
   INBOX_GATES,
@@ -456,6 +457,87 @@ export async function mintMandate(
   const res = await (options.send ?? post)<{ token_id: string }>(`${b.url}/approval/token-mint`, { ...body, auth });
   if (res.status !== 200) throw new Error(`mandate mint refused: ${res.status} ${JSON.stringify(res.body)}`);
   return { cred, tokenId: res.body.token_id };
+}
+
+export interface NamedLot {
+  projectKey: string;
+  lotId: string;
+}
+
+/** A named lot holding one operator-written card per entry, with no execution. */
+export async function createNamedLot(
+  b: TestBroker,
+  projectKey: string,
+  name: string,
+  cards: readonly Record<string, unknown>[]
+): Promise<NamedLot & { ids: string[] }> {
+  const ok = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+    const res = await post<T>(`${b.url}${path}`, deckAuthored({ project_key: projectKey, ...body }));
+    if (res.status !== 200) throw new Error(`${path} refused: ${res.status} ${JSON.stringify(res.body)}`);
+    return res.body;
+  };
+  const created = await ok<{ lot: { id: string } }>("/roadmap/lot/create", { name });
+  const ids: string[] = [];
+  for (const card of cards) {
+    const { item } = await ok<{ item: { id: string } }>("/roadmap/upsert", { status: "planned", ...card });
+    ids.push(item.id);
+  }
+  await ok("/roadmap/lot/move", { ids, from: null, to: created.lot.id });
+  return { projectKey, lotId: created.lot.id, ids };
+}
+
+/** The execution row an operator dispatch writes, seeded so that a lot is held by `controller`. */
+export function seedLotExecution(
+  b: TestBroker,
+  lot: NamedLot,
+  holder: { run: RunCredential; controller: { instance_token: string; peer_id: string } }
+): void {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run(
+      `INSERT INTO roadmap_lot_executions
+         (project_key, lot_id, epoch, state, operator_id, group_id, run_ref, controller_ref, controller_peer_id, started_at)
+       VALUES (?, ?, 1, 'running', ?, ?, ?, ?, ?, ?)`,
+      [
+        lot.projectKey,
+        lot.lotId,
+        FIXTURE_OPERATOR_ID,
+        holder.run.group,
+        holder.run.run,
+        deriveInstanceRef(holder.controller.instance_token),
+        holder.controller.peer_id,
+        new Date().toISOString(),
+      ]
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function grantLotParticipant(b: TestBroker, lot: NamedLot, instanceToken: string): void {
+  const db = openBrokerDb(b.dbPath);
+  try {
+    db.run(
+      "INSERT INTO roadmap_lot_participants (project_key, lot_id, epoch, instance_ref, granted_at) VALUES (?, ?, 1, ?, ?)",
+      [lot.projectKey, lot.lotId, deriveInstanceRef(instanceToken), new Date().toISOString()]
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export function lotExecutionRow(
+  b: TestBroker,
+  lot: NamedLot
+): { state: string; interrupted_reason: string | null } | null {
+  const db = openBrokerDb(b.dbPath, { readonly: true });
+  try {
+    return db
+      .query("SELECT state, interrupted_reason FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ?")
+      .get(lot.projectKey, lot.lotId) as { state: string; interrupted_reason: string | null } | null;
+  } finally {
+    db.close();
+  }
 }
 
 /**

@@ -384,6 +384,13 @@ une version 1 et son refus defait le geste. Un lot cree sur cette base avant qu'
 soit une replique est garde et nomme dans le journal; ses cartes, elles, perdent
 leur lot au premier echange, l'amont ne le connaissant pas.
 
+### Execution des lots
+
+Au demarrage, le broker cree `roadmap_lot_executions` et
+`roadmap_lot_participants`, vides. Ces deux tables sont locales: ni repliquees ni
+exportees. Un broker plus ancien relance sur la meme base les ignore et n'applique
+plus la garde d'execution.
+
 ---
 
 ## 7. Sauvegarder la roadmap avant, c'est deux secondes

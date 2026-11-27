@@ -3,7 +3,7 @@
 // peer's status writes, the deck/force bypasses, the release on leaving
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,15 +19,27 @@ import {
   type TestBroker,
   deckAuthored,
   openBrokerDb,
+  createNamedLot,
+  grantLotParticipant,
+  groupId,
+  lotExecutionRow,
+  mintRunCredential,
+  registerAttestedInstance,
+  seedLotExecution,
+  sha256Hex,
+  type NamedLot,
+  type RunCredential,
 } from "./_helper.ts";
 import { ROADMAP_IMPORT_COLUMNS, findUncoveredRoadmapColumns, type RoadmapItem } from "../shared/types.ts";
-import { buildAuthProof } from "../shared/approval.ts";
+import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 import { scrubEnv } from "./_scrub-env.ts";
 
 let broker: TestBroker;
 
+const OTHER_OPERATOR = generateCredential();
+
 beforeAll(async () => {
-  broker = await startBroker();
+  broker = await startBroker({}, { trustedOperators: [FIXTURE_OPERATOR.publicKey, OTHER_OPERATOR.publicKey] });
 });
 
 afterAll(async () => {
@@ -1856,6 +1868,260 @@ test("a lock holder's instance_token value appears in no roadmap response, and e
   expect(leaking, "responses carrying the holder's instance_token").toEqual([]);
 });
 
+// ----- lot execution guard, ahead of the work-lock -----
+
+describe("a card of a named lot under execution", () => {
+  type Attested = { peer_id: string; instance_token: string };
+  let group: { id: string; hash: string };
+  let run: RunCredential;
+  let controller: Attested;
+  let worker: Attested;
+  let secondLead: Attested;
+
+  const attestOn = async (b: TestBroker, credential: RunCredential, cwd: string): Promise<Attested> => {
+    const res = await registerAttestedInstance(b, credential, "test-host", cwd, { project_key: PK });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body;
+  };
+  const attest = (cwd: string) => attestOn(broker, run, cwd);
+
+  const writeOn = (b: TestBroker, peer: Attested, id: string, fields: Record<string, unknown>) =>
+    post<UpsertRes & { error?: string }>(`${b.url}/roadmap/upsert`, {
+      id,
+      by: peer.peer_id,
+      instance_token: peer.instance_token,
+      ...fields,
+    });
+  const write = (peer: Attested, id: string, fields: Record<string, unknown>) => writeOn(broker, peer, id, fields);
+
+  const heldLot = async (...titles: string[]): Promise<NamedLot & { ids: string[] }> => {
+    const lot = await createNamedLot(broker, PK, titles[0]!, titles.map((title) => ({ title })));
+    seedLotExecution(broker, lot, { run, controller });
+    return lot;
+  };
+
+  const byOtherOperator = (payload: Record<string, unknown>) => {
+    const body = { ...payload, by: "deck", public_key: OTHER_OPERATOR.publicKey };
+    const operator_id = deriveOperatorId(OTHER_OPERATOR.publicKey);
+    return { ...body, auth: buildAuthProof(OTHER_OPERATOR.privateKey, body, { kind: "operator", operator_id }) };
+  };
+
+  const ageController = (b: TestBroker, peer: Attested, silentSec: number, status: "active" | "dormant") => {
+    const db = openBrokerDb(b.dbPath);
+    db.run("UPDATE peers SET status = ?, last_seen = ? WHERE instance_token = ?", [
+      status,
+      new Date(Date.now() - silentSec * 1000).toISOString(),
+      peer.instance_token,
+    ]);
+    db.close();
+  };
+
+  beforeAll(async () => {
+    const phrase = "lot-lock-group";
+    group = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+    run = await mintRunCredential(broker, group, PK);
+    controller = await attest("/work/lot-lock-lead");
+    worker = await attest("/work/lot-lock-worker");
+    secondLead = await attest("/work/lot-lock-second-lead");
+  });
+
+  test("no agent or unwindowed operator write starts an execution; preparing the lot stays free", async () => {
+    const lot = await createNamedLot(broker, PK, "prepared", [{ title: "claim me" }, { title: "close me" }]);
+
+    const claimed = await write(controller, lot.ids[0]!, { status: "in_progress" });
+    expect(claimed.status, JSON.stringify(claimed.body)).toBe(409);
+    expect(claimed.body.error).toStartWith("lot_execution_not_started:");
+    const deck = await post<{ error?: string }>(
+      `${broker.url}/roadmap/upsert`,
+      deckAuthored({ id: lot.ids[0]!, status: "in_progress", run_ref: run.run, group_id: group.id })
+    );
+    expect(deck.status, JSON.stringify(deck.body)).toBe(409);
+    expect(lotExecutionRow(broker, lot)).toBeNull();
+
+    const closed = await write(secondLead, lot.ids[1]!, { status: "done" });
+    expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+  });
+
+  test("a card of the default lot is taken as before", async () => {
+    const item = await add({ title: "default lot card", status: "planned", queue: 1 });
+    const claimed = await write(secondLead, item.id, { status: "in_progress" });
+    expect(claimed.status, JSON.stringify(claimed.body)).toBe(200);
+  });
+
+  test("force walks past the work-lock, never past the execution", async () => {
+    const lot = await heldLot("forced");
+    expect((await write(controller, lot.ids[0]!, { status: "in_progress" })).status).toBe(200);
+
+    for (const fields of [
+      { status: "done", force: true },
+      { status: "in_progress", force: true },
+      { locked: false, force: true },
+      { kind: "bug", force: true },
+      { release: true },
+    ]) {
+      const refused = await write(secondLead, lot.ids[0]!, fields);
+      expect([fields, refused.status]).toEqual([fields, 409]);
+      expect(refused.body.error).toStartWith("lot_execution_held:");
+    }
+  });
+
+  test("text stays writable to anyone, and restating in_progress is a claim", async () => {
+    const lot = await heldLot("texts");
+    expect((await write(controller, lot.ids[0]!, { status: "in_progress" })).status).toBe(200);
+
+    const text = await write(secondLead, lot.ids[0]!, { description: "noted by a bystander", tags: ["seen"] });
+    expect(text.status, JSON.stringify(text.body)).toBe(200);
+    const restated = await write(secondLead, lot.ids[0]!, { status: "in_progress", description: "again" });
+    expect(restated.status, JSON.stringify(restated.body)).toBe(409);
+    expect(restated.body.error).toStartWith("lot_execution_held:");
+    // The Deck editor resends the stored status with every save.
+    const edited = await post(
+      `${broker.url}/roadmap/upsert`,
+      deckAuthored({ id: lot.ids[0]!, status: "in_progress", title: "retitled by the operator" })
+    );
+    expect(edited.status, JSON.stringify(edited.body)).toBe(200);
+  });
+
+  test("a worker claims only once granted", async () => {
+    const lot = await heldLot("mandate");
+    const refused = await write(worker, lot.ids[0]!, { status: "in_progress" });
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+
+    grantLotParticipant(broker, lot, worker.instance_token);
+
+    const claimed = await write(worker, lot.ids[0]!, { status: "in_progress" });
+    expect(claimed.status, JSON.stringify(claimed.body)).toBe(200);
+    expect(claimed.body.item.locked_by).toBe(worker.peer_id);
+  });
+
+  test("archive, park and release meet the same execution", async () => {
+    const lot = await heldLot("other doors");
+    expect((await write(controller, lot.ids[0]!, { status: "in_progress" })).status).toBe(200);
+    const peers = { project_key: PK, peer_ids: [controller.peer_id] };
+
+    const refused = await post<{ error?: string }>(`${broker.url}/roadmap/archive`, {
+      id: lot.ids[0]!,
+      by: secondLead.peer_id,
+      instance_token: secondLead.instance_token,
+    });
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error).toStartWith("lot_execution_held:");
+
+    for (const route of ["/roadmap/lock-park", "/roadmap/lock-release"]) {
+      const foreign = await post<Record<string, string[]>>(`${broker.url}${route}`, byOtherOperator(peers));
+      expect([route, foreign.status, foreign.body.failed]).toEqual([route, 200, [controller.peer_id]]);
+    }
+    const parked = await post<{ parked: string[] }>(`${broker.url}/roadmap/lock-park`, deckAuthored(peers));
+    expect(parked.body.parked).toEqual([controller.peer_id]);
+    const released = await post<{ released: string[] }>(`${broker.url}/roadmap/lock-release`, deckAuthored(peers));
+    expect(released.body.released).toEqual([controller.peer_id]);
+
+    const byOperator = await post(`${broker.url}/roadmap/archive`, deckAuthored({ id: lot.ids[0]! }));
+    expect(byOperator.status, JSON.stringify(byOperator.body)).toBe(200);
+  });
+
+  test("a controller silent for less than the delay still holds the lot", async () => {
+    const quiet = await attest("/work/lot-lock-quiet-lead");
+    const lot = await createNamedLot(broker, PK, "short silence", [{ title: "still held" }]);
+    seedLotExecution(broker, lot, { run, controller: quiet });
+    grantLotParticipant(broker, lot, worker.instance_token);
+    ageController(broker, quiet, 120, "dormant");
+
+    const claimed = await write(worker, lot.ids[0]!, { status: "in_progress" });
+
+    expect(claimed.status, JSON.stringify(claimed.body)).toBe(200);
+    expect(lotExecutionRow(broker, lot)?.state).toBe("running");
+  });
+
+  test("a controller that unregistered leaves the lot interrupted at the next claim", async () => {
+    const leaving = await attest("/work/lot-lock-leaving-lead");
+    const lot = await createNamedLot(broker, PK, "gone", [{ title: "orphaned" }]);
+    seedLotExecution(broker, lot, { run, controller: leaving });
+    grantLotParticipant(broker, lot, worker.instance_token);
+    expect((await post(`${broker.url}/unregister`, { instance_token: leaving.instance_token })).status).toBe(200);
+
+    const refused = await write(worker, lot.ids[0]!, { status: "in_progress" });
+
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error).toStartWith("lot_execution_interrupted:");
+    expect(lotExecutionRow(broker, lot)).toEqual({ state: "interrupted", interrupted_reason: "controller-gone" });
+  });
+
+  test("the sweep interrupts a silent holder, and its return does not resume the lot", async () => {
+    const b = await startBroker({ CLAUDE_PEERS_LOT_EXECUTION_TTL_SEC: "1", CLAUDE_PEERS_LOCK_SWEEP_SEC: "1" });
+    try {
+      const shortRun = await mintRunCredential(b, group, PK);
+      const lead = await attestOn(b, shortRun, "/work/lot-lock-swept-lead");
+      const lot = await createNamedLot(b, PK, "swept", [{ title: "left behind" }]);
+      seedLotExecution(b, lot, { run: shortRun, controller: lead });
+      ageController(b, lead, 60, "dormant");
+
+      const row = await pollUntil(10_000, 100, async () => {
+        const value = lotExecutionRow(b, lot);
+        return { done: value?.state !== "running", value };
+      });
+      expect(row).toEqual({ state: "interrupted", interrupted_reason: "controller-silent" });
+
+      ageController(b, lead, 0, "active");
+      const refused = await writeOn(b, lead, lot.ids[0]!, { status: "in_progress" });
+      expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+      expect(refused.body.error).toStartWith("lot_execution_interrupted:");
+    } finally {
+      await stopBroker(b);
+    }
+  }, 30_000);
+
+  test("a broker restarted on the same database interrupts an expired holder before its first tick", async () => {
+    const first = await startBroker();
+    let second: TestBroker | null = null;
+    try {
+      const shortRun = await mintRunCredential(first, group, PK);
+      const lead = await attestOn(first, shortRun, "/work/lot-lock-restarted-lead");
+      const lot = await createNamedLot(first, PK, "restarted", [{ title: "across a restart" }]);
+      seedLotExecution(first, lot, { run: shortRun, controller: lead });
+      ageController(first, lead, 3600, "dormant");
+      first.proc.kill();
+      await first.proc.exited;
+
+      second = await startBroker({ CLAUDE_PEERS_DB: first.dbPath });
+
+      // The default sweep period is a minute: only the startup pass can have run.
+      expect(lotExecutionRow(first, lot)?.state).toBe("interrupted");
+    } finally {
+      if (second) await stopBroker(second);
+      await stopBroker(first);
+    }
+  }, 60_000);
+
+  test("a replica broker refuses to take a card of a named lot", async () => {
+    const b = await startBroker({
+      CLAUDE_PEERS_BROKER_URL: "http://127.0.0.1:1",
+      CLAUDE_PEERS_OFFLINE_REPLICA: "1",
+    });
+    try {
+      const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+        project_key: PK,
+        by: "test-peer",
+        title: "mirrored lot card",
+      });
+      const db = openBrokerDb(b.dbPath);
+      db.run("UPDATE roadmap_items SET lot_id = 'mirrored-lot' WHERE id = ?", [created.body.item.id]);
+      db.close();
+
+      const refused = await post<{ error?: string }>(`${b.url}/roadmap/upsert`, {
+        id: created.body.item.id,
+        by: "test-peer",
+        status: "in_progress",
+      });
+
+      expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+      expect(refused.body.error).toStartWith("lot_execution_replica:");
+    } finally {
+      await stopBroker(b);
+    }
+  }, 30_000);
+});
+
 test("a lock sweep period outside 1..86400 or not an integer falls back to the default, and says so", async () => {
   // Above 2^31 ms a setInterval fires every few milliseconds instead of never.
   const warning = "CLAUDE_PEERS_LOCK_SWEEP_SEC is not an integer between 1 and 86400";
@@ -1891,6 +2157,7 @@ test("every unusable timer period of a broker is named in a warning, bounded, an
     ["CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC", "0", "1 and 86400, using 1"],
     ["CLAUDE_PEERS_LOCK_SWEEP_SEC", "0", "1 and 86400, using 60"],
     ["CLAUDE_PEERS_DELEGATION_SWEEP_SEC", "3000000000", "1 and 86400, using 15"],
+    ["CLAUDE_PEERS_LOT_EXECUTION_TTL_SEC", "0", "1 and 86400, using 600"],
   ] as const;
   // A replica, the only mode that arms the sync timer; nothing listens upstream.
   const b = await startBroker({

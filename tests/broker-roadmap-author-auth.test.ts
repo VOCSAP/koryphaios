@@ -4,18 +4,39 @@
 // row or token, but a sentinel value presented as a claim is refused outright
 // since sentinels are public exported constants.
 
-import { test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FIXTURE_OPERATOR, FIXTURE_OPERATOR_ID, startBroker, stopBroker, post, livePid, type TestBroker, openBrokerDb } from "./_helper.ts";
+import {
+  FIXTURE_OPERATOR,
+  FIXTURE_OPERATOR_ID,
+  startBroker,
+  stopBroker,
+  post,
+  livePid,
+  type TestBroker,
+  openBrokerDb,
+  createNamedLot,
+  grantLotParticipant,
+  groupId,
+  lotExecutionRow,
+  mintRunCredential,
+  registerAttestedInstance,
+  seedLotExecution,
+  sha256Hex,
+  type NamedLot,
+  type RunCredential,
+} from "./_helper.ts";
 import * as sharedTypes from "../shared/types.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
-import { buildAuthProof, deriveOperatorId, deriveTokenId, generateCredential } from "../shared/approval.ts";
+import { buildAuthProof, deriveInstanceRef, deriveOperatorId, deriveTokenId, generateCredential } from "../shared/approval.ts";
 
 let broker: TestBroker;
 
+const OTHER_OPERATOR = generateCredential();
+
 beforeAll(async () => {
-  broker = await startBroker();
+  broker = await startBroker({}, { trustedOperators: [FIXTURE_OPERATOR.publicKey, OTHER_OPERATOR.publicKey] });
 });
 
 afterAll(async () => {
@@ -831,6 +852,172 @@ test("an author carrying the cli: marker is accepted (the fallback keeps working
   const res = await upsert({ by: `cli:${eve.peerId}`, title: "filed through the CLI" });
   expect(res.status).toBe(200);
   expect(res.body.item.created_by).toBe(`cli:${eve.peerId}`);
+});
+
+// ---------------------------------------------------------------------------
+// A NAMED LOT UNDER EXECUTION: who writes comes from the run binding of the
+// writer's own token, or from the operator signature, never from the body.
+// ---------------------------------------------------------------------------
+
+describe("lot execution identity", () => {
+  type Attested = { peer_id: string; instance_token: string };
+  let group: { id: string; hash: string };
+  let run: RunCredential;
+  let controller: Attested;
+  let secondLead: Attested;
+  let otherWindow: Attested;
+  let unbound: Attested;
+  let lot: NamedLot & { ids: string[] };
+
+  const attest = async (credential: RunCredential, cwd: string): Promise<Attested> => {
+    const res = await registerAttestedInstance(broker, credential, "test-host", cwd, { project_key: PK });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body;
+  };
+
+  const claim = (peer: Attested, id: string, extra: Record<string, unknown> = {}) =>
+    upsert({ id, by: peer.peer_id, instance_token: peer.instance_token, status: "in_progress", ...extra });
+
+  const operatorWrite = (credential: typeof FIXTURE_OPERATOR, fields: Record<string, unknown>) => {
+    const body = { project_key: PK, ...fields, by: "deck", public_key: credential.publicKey };
+    return post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+      ...body,
+      auth: buildAuthProof(credential.privateKey, body, {
+        kind: "operator",
+        operator_id: deriveOperatorId(credential.publicKey),
+      }),
+    });
+  };
+
+  beforeAll(async () => {
+    const phrase = "lot-identity-group";
+    group = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+    run = await mintRunCredential(broker, group, PK);
+    controller = await attest(run, "/work/lot-lead");
+    secondLead = await attest(run, "/work/lot-second-lead");
+    otherWindow = await attest(await mintRunCredential(broker, group, PK), "/work/lot-other-window");
+    const bare = await post<Attested>(`${broker.url}/register`, {
+      pid: livePid(),
+      cwd: "/work/lot-unbound",
+      git_root: null,
+      tty: null,
+      summary: "",
+      host: "test-host",
+      client_pid: livePid(),
+      project_key: PK,
+      group_id: group.id,
+      group_secret_hash: group.hash,
+    });
+    expect(bare.status).toBe(200);
+    unbound = bare.body;
+    const titles = ["windows", "body run", "second lead", "operator window", "operator close"];
+    lot = await createNamedLot(broker, PK, "identity lot", titles.map((title) => ({ title })));
+    seedLotExecution(broker, lot, { run, controller });
+  });
+
+  test("two windows under one group stay distinct: only the holding run claims", async () => {
+    const refused = await claim(otherWindow, lot.ids[0]!);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error).toStartWith("lot_execution_held: Workflow en cours, pas touche");
+    expect(refused.body.error).toContain(controller.peer_id);
+    expect(refused.body.error).not.toContain(run.run);
+    expect(refused.body.error).not.toContain(deriveInstanceRef(controller.instance_token).slice(0, 12));
+
+    const held = await claim(controller, lot.ids[0]!);
+    expect(held.status, JSON.stringify(held.body)).toBe(200);
+    expect(held.body.item.locked_by).toBe(controller.peer_id);
+  });
+
+  test("a run and group named in an agent's body prove nothing", async () => {
+    const named = { run_ref: run.run, group_id: group.id };
+    const elsewhere = await claim(otherWindow, lot.ids[1]!, named);
+    expect(elsewhere.status, JSON.stringify(elsewhere.body)).toBe(409);
+
+    const bare = await claim(unbound, lot.ids[1]!, named);
+    expect(bare.status, JSON.stringify(bare.body)).toBe(403);
+    expect(bare.body.error).toStartWith("lot_execution_unproven:");
+  });
+
+  test("a session bound to no run borrows no other session's binding", async () => {
+    const refused = await claim(unbound, lot.ids[1]!);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(refused.body.error).toStartWith("lot_execution_unproven:");
+  });
+
+  test("a grant held by a session of another run stays refused, whatever run its body names", async () => {
+    const stray = await createNamedLot(broker, PK, "stray grant", [{ title: "stray grant" }]);
+    seedLotExecution(broker, stray, { run, controller });
+    grantLotParticipant(broker, stray, otherWindow.instance_token);
+
+    const refused = await claim(otherWindow, stray.ids[0]!, { run_ref: run.run, group_id: group.id });
+
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error).toStartWith("lot_execution_held:");
+  });
+
+  test("a granted session moved to another group proves nothing", async () => {
+    const mover = await attest(run, "/work/lot-mover");
+    const moved = await createNamedLot(broker, PK, "moved worker", [{ title: "moved worker" }]);
+    seedLotExecution(broker, moved, { run, controller });
+    grantLotParticipant(broker, moved, mover.instance_token);
+    const db = openBrokerDb(broker.dbPath);
+    db.run("UPDATE peers SET group_id = 'default' WHERE instance_token = ?", [mover.instance_token]);
+    db.close();
+
+    const refused = await claim(mover, moved.ids[0]!);
+
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(refused.body.error).toStartWith("lot_execution_unproven:");
+  });
+
+  test("a second lead of the holding window is refused", async () => {
+    const refused = await claim(secondLead, lot.ids[2]!);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error).toStartWith("lot_execution_held:");
+  });
+
+  test("the operator claims only with the holding run and group under the signature", async () => {
+    const fields = { id: lot.ids[3]!, status: "in_progress" };
+    expect((await operatorWrite(FIXTURE_OPERATOR, fields)).status).toBe(409);
+    const elsewhere = { ...fields, run_ref: crypto.randomUUID(), group_id: group.id };
+    expect((await operatorWrite(FIXTURE_OPERATOR, elsewhere)).status).toBe(409);
+
+    const held = await operatorWrite(FIXTURE_OPERATOR, { ...fields, run_ref: run.run, group_id: group.id });
+    expect(held.status, JSON.stringify(held.body)).toBe(200);
+  });
+
+  test("another operator is refused even forcing with the holding window; the holding one closes from anywhere", async () => {
+    const id = lot.ids[4]!;
+    for (const fields of [
+      { id, status: "in_progress", force: true, run_ref: run.run, group_id: group.id },
+      { id, status: "done", force: true },
+    ]) {
+      const refused = await operatorWrite(OTHER_OPERATOR, fields);
+      expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+      expect(refused.body.error).toStartWith("lot_execution_held:");
+    }
+
+    const closed = await operatorWrite(FIXTURE_OPERATOR, { id, status: "done" });
+    expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+  });
+
+  test("revoking the holding run credential interrupts the lot, and its sessions then prove nothing", async () => {
+    const dyingRun = await mintRunCredential(broker, group, PK);
+    const lead = await attest(dyingRun, "/work/lot-dying-run");
+    const doomed = await createNamedLot(broker, PK, "revoked run lot", [{ title: "revoked" }]);
+    seedLotExecution(broker, doomed, { run: dyingRun, controller: lead });
+    const db = openBrokerDb(broker.dbPath);
+    db.run("UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ?", [
+      new Date().toISOString(),
+      dyingRun.tokenId,
+    ]);
+    db.close();
+
+    const refused = await claim(lead, doomed.ids[0]!);
+
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(lotExecutionRow(broker, doomed)).toEqual({ state: "interrupted", interrupted_reason: "run-ended" });
+  });
 });
 
 // ---------------------------------------------------------------------------

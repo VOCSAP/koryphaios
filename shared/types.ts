@@ -1487,6 +1487,12 @@ export interface RoadmapUpsertRequest {
    * lock fields), refused 400 with any other field.
    */
   change_origin?: RoadmapChangeOrigin;
+  /**
+   * Kory run and group a claim on a card of a lot under execution comes from.
+   * Read only on an operator-signed write, where the signature covers them.
+   */
+  run_ref?: string;
+  group_id?: string;
 }
 
 export interface RoadmapUpsertResponse {

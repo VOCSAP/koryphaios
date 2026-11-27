@@ -154,6 +154,15 @@ import {
   type RoadmapLotMoveRequest,
   type RoadmapLotMoveResponse,
 } from "./shared/roadmap-lot.ts";
+import {
+  formatLotExecutionRefusal,
+  judgeLotExecution,
+  lotExecutionInterruption,
+  lotExecutionRefusalStatus,
+  type LotExecution,
+  type LotExecutionPresence,
+  type LotExecutionSubject,
+} from "./shared/roadmap-execution.ts";
 import { resolveRoadmapDateFilter, type RoadmapDateWindow } from "./shared/roadmap-date-filter.ts";
 import {
   adoptedContentDate,
@@ -461,6 +470,13 @@ const LOCK_PARK_TTL_SEC = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_LOCK_PARK_TTL_SEC ?? "86400", 10)
 );
+// How long the controller of a lot execution may stay silent before the lot is interrupted.
+const LOT_EXECUTION_TTL_SEC = envDuration("CLAUDE_PEERS_LOT_EXECUTION_TTL_SEC", {
+  min: 1,
+  max: DAY_SEC,
+  fallback: 600,
+  belowMin: "fallback",
+});
 const FLUSH_MAX_COUNT = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_FLUSH_MAX_COUNT ?? "20", 10)
@@ -1239,6 +1255,37 @@ db.run(`
     closed_at TEXT,
     color INTEGER,
     PRIMARY KEY (project_key, id)
+  )
+`);
+// Local state, never replicated: one row per execution epoch of a named lot.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_lot_executions (
+    project_key TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('running', 'interrupted', 'closed')),
+    operator_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    run_ref TEXT NOT NULL,
+    controller_ref TEXT NOT NULL,
+    controller_peer_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    interrupted_at TEXT,
+    interrupted_reason TEXT,
+    PRIMARY KEY (project_key, lot_id, epoch)
+  )
+`);
+db.run(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_roadmap_lot_executions_open ON roadmap_lot_executions(project_key, lot_id) WHERE state <> 'closed'"
+);
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_lot_participants (
+    project_key TEXT NOT NULL,
+    lot_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    instance_ref TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (project_key, lot_id, epoch, instance_ref)
   )
 `);
 
@@ -2407,14 +2454,7 @@ function telemetryFields(t: PeerTelemetrySnapshot): PeerTelemetrySnapshot {
 
 function purgeTelemetryRunsWithoutLiveCredential(): void {
   for (const run of peerTelemetryRegistry.runs()) {
-    const live = db.query(
-      `SELECT EXISTS(
-         SELECT 1 FROM approval_session_tokens
-          WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
-            AND revoked_at IS NULL AND expires_at > ?
-       ) AS live`
-    ).get(run.operatorId, run.runRef, run.groupId, new Date().toISOString()) as { live: number };
-    if (live.live !== 1) peerTelemetryRegistry.forgetRun(run);
+    if (!hasLiveRunCredential(run.operatorId, run.runRef, run.groupId)) peerTelemetryRegistry.forgetRun(run);
   }
 }
 
@@ -2706,6 +2746,147 @@ function releaseStaleLocks(): void {
   ]);
 }
 guardedInterval("releaseStaleLocks", releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
+
+// --- Lot execution guard ---
+
+function hasLiveRunCredential(operatorId: string, runRef: string, groupId: string): boolean {
+  const row = db
+    .query(
+      `SELECT EXISTS(
+         SELECT 1 FROM approval_session_tokens
+          WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
+            AND revoked_at IS NULL AND expires_at > ?
+       ) AS live`
+    )
+    .get(operatorId, runRef, groupId, new Date().toISOString()) as { live: number };
+  return row.live === 1;
+}
+
+function lotExecutionPresence(execution: LotExecution): LotExecutionPresence {
+  const peers = db
+    .query("SELECT instance_token, status, last_seen FROM peers WHERE group_id = ?")
+    .all(execution.group_id) as { instance_token: string; status: string; last_seen: string }[];
+  const controller = peers.find((p) => deriveInstanceRef(p.instance_token) === execution.controller_ref);
+  return {
+    runCredentialLive: hasLiveRunCredential(execution.operator_id, execution.run_ref, execution.group_id),
+    controller: controller
+      ? { active: controller.status === "active", lastSeenMs: Date.parse(controller.last_seen) }
+      : null,
+  };
+}
+
+/** Persists the interruption of a running execution whose holder is gone, and returns the row as it now stands. */
+function settleLotExecution(execution: LotExecution): LotExecution {
+  if (execution.state !== "running") return execution;
+  const reason = lotExecutionInterruption(lotExecutionPresence(execution), Date.now(), LOT_EXECUTION_TTL_SEC * 1000);
+  if (reason === null) return execution;
+  const at = new Date().toISOString();
+  db.run(
+    `UPDATE roadmap_lot_executions SET state = 'interrupted', interrupted_at = ?, interrupted_reason = ?
+      WHERE project_key = ? AND lot_id = ? AND epoch = ? AND state = 'running'`,
+    [at, reason, execution.project_key, execution.lot_id, execution.epoch]
+  );
+  log.warn(`lot execution interrupted (${reason})`, {
+    project_key: execution.project_key,
+    lot_id: execution.lot_id,
+    epoch: execution.epoch,
+    controller: execution.controller_peer_id,
+  });
+  return { ...execution, state: "interrupted", interrupted_at: at, interrupted_reason: reason };
+}
+
+function sweepLotExecutions(): void {
+  const running = db
+    .query("SELECT * FROM roadmap_lot_executions WHERE state = 'running'")
+    .all() as LotExecution[];
+  for (const execution of running) settleLotExecution(execution);
+}
+// Once at startup too: a heartbeat arriving before the first tick would revive a holder that had expired.
+sweepLotExecutions();
+guardedInterval("sweepLotExecutions", sweepLotExecutions, LOCK_SWEEP_SEC * 1000);
+
+/**
+ * Who is writing, as a lot execution judges it. An agent is read from the
+ * binding of its own proven token, never from the body. `claimed` is the run
+ * and group a claim names: they count only under an operator signature, which
+ * covers them.
+ */
+function lotExecutionSubject(
+  author: RoadmapAuthor,
+  claimed: { run_ref?: unknown; group_id?: unknown } = {}
+): LotExecutionSubject {
+  if (author.operator_id !== undefined) {
+    const window =
+      typeof claimed.run_ref === "string" && typeof claimed.group_id === "string"
+        ? { run_ref: claimed.run_ref.toLowerCase(), group_id: claimed.group_id }
+        : null;
+    return { kind: "operator", operator_id: author.operator_id, window };
+  }
+  if (!author.instance_token) return { kind: "unproven" };
+  const instanceRef = deriveInstanceRef(author.instance_token);
+  const binding = bindingByRef(instanceRef);
+  if (
+    !binding ||
+    binding.group_id !== author.group_id ||
+    isAuthError(resolveTrustedOperator(binding.operator_id)) ||
+    !hasLiveRunCredential(binding.operator_id, binding.run_ref, binding.group_id)
+  ) {
+    return { kind: "unproven" };
+  }
+  return {
+    kind: "instance",
+    operator_id: binding.operator_id,
+    group_id: binding.group_id,
+    run_ref: binding.run_ref,
+    project_key: binding.project_key,
+    instance_ref: instanceRef,
+  };
+}
+
+/**
+ * The one door a card write passes before it touches a card of a named lot:
+ * the lot is resolved from the card, then the writer is judged against its
+ * execution. Null lets the write through. Synchronous, so the caller's write
+ * follows with nothing in between.
+ */
+function beginOrContinueExecution(
+  card: { id: string; project_key: string; lot_id?: string | null },
+  subject: LotExecutionSubject,
+  act: "claim" | "change",
+  route: string
+): { error: string; status: number } | null {
+  const lotId = card.lot_id;
+  if (typeof lotId !== "string" || !isNamedRoadmapLot(lotId)) return null;
+  const open = db
+    .query("SELECT * FROM roadmap_lot_executions WHERE project_key = ? AND lot_id = ? AND state <> 'closed'")
+    .get(card.project_key, lotId) as LotExecution | null;
+  const execution = open ? settleLotExecution(open) : null;
+  const participants = execution
+    ? (db
+        .query("SELECT instance_ref FROM roadmap_lot_participants WHERE project_key = ? AND lot_id = ? AND epoch = ?")
+        .all(card.project_key, lotId, execution.epoch) as { instance_ref: string }[])
+    : [];
+  const verdict = judgeLotExecution({
+    project_key: card.project_key,
+    execution,
+    subject,
+    act: { kind: act },
+    participants: new Set(participants.map((p) => p.instance_ref)),
+    replica: BROKER_MODE === "replica",
+  });
+  if (verdict.ok) return null;
+  const lot = db
+    .query("SELECT name FROM roadmap_lots WHERE project_key = ? AND id = ?")
+    .get(card.project_key, lotId) as { name: string } | null;
+  log.warn(`${route}: refused a ${act} on card ${card.id} (${verdict.code})`, {
+    lot_id: lotId,
+    writer: subject.kind,
+  });
+  return {
+    error: formatLotExecutionRefusal(verdict.code, lot?.name ?? lotId, execution?.controller_peer_id ?? null),
+    status: lotExecutionRefusalStatus(verdict.code),
+  };
+}
 
 // --- Prepared statements ---
 
@@ -3732,15 +3913,8 @@ function handleTileTelemetry(body: unknown): Response {
   );
   if (isAuthError(identity)) return Response.json({ error: identity.error }, { status: identity.status });
   if (identity.kind !== "operator") return Response.json({ error: "the operator key is required" }, { status: 403 });
-  const live = db.query(
-    `SELECT EXISTS(
-       SELECT 1 FROM approval_session_tokens
-        WHERE operator_id = ? AND inbox_purpose = 'run' AND run_ref = ? AND group_id = ?
-          AND revoked_at IS NULL AND expires_at > ?
-     ) AS live`
-  ).get(identity.operator_id, request.run_ref, request.group_id, new Date().toISOString()) as { live: number };
   const run = { operatorId: identity.operator_id, runRef: request.run_ref, groupId: request.group_id };
-  if (live.live !== 1) {
+  if (!hasLiveRunCredential(identity.operator_id, request.run_ref, request.group_id)) {
     peerTelemetryRegistry.forgetRun(run);
     return Response.json({ error: "no live credential for this run" }, { status: 403 });
   }
@@ -6529,6 +6703,31 @@ function handleRoadmapUpsert(
       };
     }
 
+    // Lot execution guard, ahead of the work-lock guard so that neither force
+    // nor the operator name walks past it. An agent restating in_progress is a
+    // claim; the operator's editor resends the stored status with a text edit.
+    const takesClaim =
+      body.locked === true ||
+      (nextStatus === "in_progress" && existing.status !== "in_progress") ||
+      (resolvedLock.locked && !existing.locked) ||
+      (author.operator_id === undefined && body.status === "in_progress");
+    const changesWork =
+      nextStatus !== existing.status ||
+      resolvedLock.locked !== existing.locked ||
+      resolvedLock.lockedBy !== existing.locked_by ||
+      nextInactive !== existing.inactive ||
+      (body.kind !== undefined && body.kind !== existing.kind) ||
+      body.release === true;
+    if (takesClaim || changesWork) {
+      const lotRefusal = beginOrContinueExecution(
+        existing,
+        lotExecutionSubject(author, body),
+        takesClaim ? "claim" : "change",
+        "/roadmap/upsert"
+      );
+      if (lotRefusal) return lotRefusal;
+    }
+
     // Lock guard (PLAN K2): while an agent holds the work-lock, only the owner
     // or the operator ('deck') may write the item's status or claim the lock
     // (a same-status in_progress write IS a claim attempt). Other writes
@@ -7006,6 +7205,9 @@ function handleRoadmapArchive(
   const existing = getRoadmapItem(body.id);
   if (!existing) return { error: "unknown roadmap item", status: 404 };
 
+  const lotRefusal = beginOrContinueExecution(existing, lotExecutionSubject(author), "change", "/roadmap/archive");
+  if (lotRefusal) return lotRefusal;
+
   // Card e344fa79: same discipline as handleRoadmapUpsert's guard.
   const authorLockedGroup = author.group_id ?? null;
 
@@ -7058,6 +7260,19 @@ function handleRoadmapArchive(
   return { item: getRoadmapItem(body.id)! };
 }
 
+/** A park or release moves every card a peer holds, so one refused card refuses that peer. */
+function lotRefusesLockedCards(
+  projectKey: string,
+  peerId: string,
+  subject: LotExecutionSubject,
+  route: string
+): boolean {
+  const cards = db
+    .query("SELECT id, project_key, lot_id FROM roadmap_items WHERE locked = 1 AND project_key = ? AND locked_by = ?")
+    .all(projectKey, peerId) as { id: string; project_key: string; lot_id: string | null }[];
+  return cards.some((card) => beginOrContinueExecution(card, subject, "change", route) !== null);
+}
+
 /**
  * Operator-gated unconditionally, not just when the author is a reserved name
  * -- this route acts on other agents' locks by construction, since a peer never
@@ -7108,6 +7323,10 @@ function handleRoadmapLockPark(
         .get(projectKey, peerId) as { lock_parked_by: string | null } | null;
       if (!row) continue;
       if (row.lock_parked_by !== null && row.lock_parked_by !== author.operator_id) {
+        failed.push(peerId);
+        continue;
+      }
+      if (lotRefusesLockedCards(projectKey, peerId, lotExecutionSubject(author), "/roadmap/lock-park")) {
         failed.push(peerId);
         continue;
       }
@@ -7207,6 +7426,10 @@ function handleRoadmapLockRelease(
       // must agree with.
       const parkStillLive = isParked(row.lock_parked_at, new Date().toISOString(), LOCK_PARK_TTL_SEC);
       if (row.lock_parked_by !== null && row.lock_parked_by !== author.operator_id && parkStillLive) {
+        failed.push(peerId);
+        continue;
+      }
+      if (lotRefusesLockedCards(projectKey, peerId, lotExecutionSubject(author), "/roadmap/lock-release")) {
         failed.push(peerId);
         continue;
       }

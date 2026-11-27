@@ -98,6 +98,8 @@ const EXPECTED_PROJECT_KEY_TABLES = [
   "pending_approvals",
   "roadmap_context_documents",
   "roadmap_items",
+  "roadmap_lot_executions",
+  "roadmap_lot_participants",
   "roadmap_lots",
   "roadmap_queue_outbox",
   "roadmap_queue_receipts",

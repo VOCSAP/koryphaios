@@ -695,6 +695,41 @@ test("every EXEMPT handler carries a one-line justification citing this card", (
   }
 });
 
+/** Card writers that pass the lot execution door, keyed to the call that takes them there. */
+const LOT_GUARDED_HANDLERS: Record<string, string> = {
+  handleRoadmapUpsert: "beginOrContinueExecution(",
+  handleRoadmapArchive: "beginOrContinueExecution(",
+  handleRoadmapLockPark: "lotRefusesLockedCards(",
+  handleRoadmapLockRelease: "lotRefusesLockedCards(",
+};
+
+/** Card writers outside the door, each with what that leaves them able to do on a named lot. */
+const LOT_UNGUARDED_HANDLERS: Record<string, string> = {
+  handleRoadmapDispatchAtomic: "writes through handleRoadmapUpsert and refuses a named lot's card",
+  handleRoadmapReorder: "refuses a named lot's card",
+  handleRoadmapContextAppend: "text only",
+  handleRoadmapContextDocumentDeport: "text only",
+  handleRoadmapContextDocumentSyncPush: "documents only",
+  releaseStaleLocks: "releases the lock of an owner that is gone",
+  handleRoadmapSyncResolve: "replica only, where no card of a named lot is claimed",
+  handleRoadmapImport: "open: replaces a card of a held lot",
+  handleRoadmapLotMove: "open: moves a card out of a held lot",
+  handleRoadmapQueueDelta: "open: moves or ranks a card of a held lot",
+  handleRoadmapSyncPush: "open: writes the status of a card of a held lot",
+  handleRoadmapSyncLock: "open: relays a claim on a card of a held lot",
+};
+
+test("every card writer passes the lot execution door or says why not", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  const writers = discoverRoadmapHandlers(source).filter((h) => !READ_ONLY_INACTIVE_HANDLERS.has(h));
+  const classified = [...Object.keys(LOT_GUARDED_HANDLERS), ...Object.keys(LOT_UNGUARDED_HANDLERS)].sort();
+  expect(classified, "a card writer is unclassified, classified twice, or gone").toEqual(writers);
+  for (const [name, call] of Object.entries(LOT_GUARDED_HANDLERS)) {
+    expect([name, stripComments(extractFunctionBody(source, name)).includes(call)]).toEqual([name, true]);
+  }
+  expect(stripComments(extractFunctionBody(source, "lotRefusesLockedCards"))).toContain("beginOrContinueExecution(");
+});
+
 /** The SQL literal of every db.run/query/prepare call that names both the card table and the rank column. */
 function discoverRankStatements(source: string): string[] {
   const found: string[] = [];

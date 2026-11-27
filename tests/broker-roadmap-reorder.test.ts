@@ -828,10 +828,10 @@ test("an upsert sending queue:null keeps a named lot card's stored rank, applies
   const logPath = join(broker.tmpDir, "logs", "broker.log");
   const logStart = readFileSync(logPath, "utf-8").length;
 
-  const res = await upsert({ id: card.id, status: "in_progress", queue: null });
+  const res = await upsert({ id: card.id, status: "idea", queue: null });
 
   expect(res.status).toBe(200);
-  expect((res.body as { item: RoadmapItem }).item.status).toBe("in_progress");
+  expect((res.body as { item: RoadmapItem }).item.status).toBe("idea");
   expect(storedPlace(card.id)).toEqual([lot.id, 1]);
   expect(readFileSync(logPath, "utf-8").slice(logStart)).toContain(`'${card.id}' belongs to a named lot`);
   const closingStart = readFileSync(logPath, "utf-8").length;

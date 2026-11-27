@@ -5,7 +5,20 @@
 // else it is refused.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker, deckAuthored, FIXTURE_OPERATOR_ID } from "./_helper.ts";
+import {
+  startBroker,
+  stopBroker,
+  post,
+  type TestBroker,
+  deckAuthored,
+  FIXTURE_OPERATOR_ID,
+  createNamedLot,
+  groupId,
+  mintRunCredential,
+  registerAttestedInstance,
+  seedLotExecution,
+  sha256Hex,
+} from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -500,4 +513,32 @@ test("upsert: inactive must be a boolean when present (400)", async () => {
     inactive: "yes",
   });
   expect(res.status).toBe(400);
+});
+
+test("on a held lot the operator may set a card aside, retype it and send it back to idea; a bystander may not", async () => {
+  const phrase = "lot-inactive-group";
+  const group = { id: await groupId(phrase), hash: await sha256Hex(phrase) };
+  const run = await mintRunCredential(broker, group, PK);
+  const attest = async (cwd: string) =>
+    (await registerAttestedInstance(broker, run, "test-host", cwd, { project_key: PK })).body;
+  const controller = await attest("/work/lot-inactive-lead");
+  const bystander = await attest("/work/lot-inactive-bystander");
+  const lot = await createNamedLot(broker, PK, "set aside", [{ title: "held card" }]);
+  seedLotExecution(broker, lot, { run, controller });
+  const id = lot.ids[0]!;
+
+  const refused = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+    id,
+    by: bystander.peer_id,
+    instance_token: bystander.instance_token,
+    kind: "bug",
+  });
+  expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+  expect(refused.body.error).toStartWith("lot_execution_held:");
+
+  for (const fields of [{ inactive: true }, { inactive: false }, { kind: "bug" }, { status: "idea" }]) {
+    const res = await post<ItemRes>(`${broker.url}/roadmap/upsert`, deckAuthored({ id, ...fields }));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.item).toMatchObject(fields);
+  }
 });
